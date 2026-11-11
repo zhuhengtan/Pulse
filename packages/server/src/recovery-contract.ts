@@ -56,17 +56,12 @@ export function recoveryFingerprints(registry: ToolRegistry, policy: unknown, re
 }
 export function recoveryCompatibility(previous: RecoveryFingerprints | undefined, current: RecoveryFingerprints) {
   if (!previous) return { status: 'migratable' as const, reasons: ['Legacy run has no fingerprints; preserve its snapshot and bind the current contract.'] }
-  const reasons = Object.entries(previous.tools).filter(([name, hash]) => current.tools[name] !== hash).map(([name]) => `TOOL_SCHEMA_INCOMPATIBLE:${name}`)
-  if (previous.policy !== current.policy) reasons.push('RECOVERY_POLICY_INCOMPATIBLE')
-  return reasons.length ? { status: 'incompatible' as const, reasons } : { status: previous.build === current.build ? 'compatible' as const : 'migratable' as const, reasons: previous.build === current.build ? [] : ['Build changed; tool schemas and policy remain compatible.'] }
+  return { status: previous.build === current.build && digest(previous) === digest(current) ? 'compatible' as const : 'migratable' as const, reasons: previous.build === current.build && digest(previous) === digest(current) ? [] : ['Current implementation will diagnose and take over the saved task; original evidence and budget are retained.'] }
 }
 /** Preflight only. No effects, approvals, question answers or ownership are replayed by migration. */
 export async function prepareRecovery(backend: RuntimePersistenceBackend, directory: string, current: RecoveryFingerprints, authorization?: { from: string; to: string }) {
   const snapshot = await backend.load()
   const result = recoveryCompatibility(snapshot?.compatibility?.fingerprints as RecoveryFingerprints | undefined, current)
-  if (result.status === 'incompatible') throw new Error(result.reasons.join('; '))
-  const previousBuild = snapshot?.compatibility?.fingerprints?.build
-  if (previousBuild && previousBuild !== current.build && (authorization?.from !== previousBuild || authorization?.to !== current.build)) throw new Error(`RECOVERY_BUILD_MIGRATION_REQUIRED: from=${previousBuild} to=${current.build}. Review the build change, then authorize this exact pair.`)
   if (snapshot && result.status === 'migratable') {
     await mkdir(directory, { recursive: true })
     const body = JSON.stringify(snapshot)

@@ -18,7 +18,7 @@ export async function launchManaged(root: string, base: string, args: string[]):
   if (active && !recoveryCommand) { await manager.verifyInstalled(active); runtime = active.directory }
   const manifest = JSON.parse(await readFile(join(runtime, 'desktop-runtime.json'), 'utf8')) as { buildId: string; browserExecutable?: string }
   return new Promise((resolveExit, reject) => {
-    const child = spawn(join(runtime, process.platform === 'win32' ? 'node.exe' : 'node'), [join(runtime, 'app/node_modules/@hunterzhu/pulse-cli/dist/bin.js'), ...args], { stdio: 'inherit', env: { ...process.env, PULSE_HOME: root, PULSE_MANAGED: '1', PULSE_RUNTIME_DIR: runtime, PULSE_BOOTSTRAP_RUNTIME: base, PULSE_RUNTIME_ID: createHash('sha256').update(manifest.buildId + runtime).digest('hex'), ...(manifest.browserExecutable ? { PULSE_BROWSER_EXECUTABLE: join(runtime, manifest.browserExecutable) } : {}) } })
+    const child = spawn(join(runtime, process.platform === 'win32' ? 'node.exe' : 'node'), [join(runtime, 'app/node_modules/@hunterzhu/pulse-cli/dist/bin.js'), ...args], { windowsHide: true, stdio: 'inherit', env: { ...process.env, PULSE_HOME: root, PULSE_MANAGED: '1', PULSE_RUNTIME_DIR: runtime, PULSE_BOOTSTRAP_RUNTIME: base, PULSE_RUNTIME_ID: createHash('sha256').update(manifest.buildId + runtime).digest('hex'), ...(manifest.browserExecutable ? { PULSE_BROWSER_EXECUTABLE: join(runtime, manifest.browserExecutable) } : {}) } })
     process.once('SIGTERM', () => child.kill('SIGTERM')); process.once('SIGINT', () => child.kill('SIGINT'))
     child.once('error', reject); child.once('exit', code => resolveExit(code ?? 1))
   })

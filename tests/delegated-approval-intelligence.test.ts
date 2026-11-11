@@ -7,7 +7,7 @@ import { createLocalHost } from '../packages/server/src/index.js'
 
 type Call = { name: string; input: Record<string, any> }
 
-async function review(calls: Call[], options: { response?: string; script?: string; live?: boolean; intent?: string } = {}) {
+async function review(calls: Call[], options: { response?: string; script?: string; live?: boolean; intent?: string; reviewProvider?: string } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'pulse-delegate-intelligence-'))
   const requests: any[] = []
   const reviewer = createServer(async (req, res) => {
@@ -19,7 +19,7 @@ async function review(calls: Call[], options: { response?: string; script?: stri
   })
   await new Promise<void>(resolve => reviewer.listen(0, '127.0.0.1', resolve))
   const host = createLocalHost({ cwd: root, dataDir: join(root, 'data'), allowNetwork: true, approvalMode: 'ask', mockToolCalls: calls,
-    ...(options.response || options.live ? { approvalReview: { provider: 'ollama' as const, model: options.live ? 'qwen3.5:4b' : 'fixture', baseURL: options.live ? 'http://127.0.0.1:11434' : `http://127.0.0.1:${(reviewer.address() as any).port}`, timeoutMs: 60_000 } } : {}),
+    ...(options.response || options.live ? { approvalReview: { provider: options.reviewProvider ?? 'ollama', model: options.live ? 'qwen3.5:4b' : 'fixture', baseURL: options.live ? 'http://127.0.0.1:11434' : `http://127.0.0.1:${(reviewer.address() as any).port}`, timeoutMs: 60_000 } } : {}),
   })
   try {
     if (options.script) await writeFile(join(root, 'report.mjs'), options.script)
@@ -55,6 +55,15 @@ it.each([
 it('still requires review for writes mixed with read-only operations', async () => {
   const { result } = await review([{ name: 'web.search', input: { query: 'documentation' } }, { name: 'fs.write', input: { path: 'report.txt', content: 'new' } }])
   expect(result).toEqual({ status: 'manual', reason: 'reviewer_not_configured' })
+})
+
+it.each(['openai-compatible', 'openrouter', 'ollama-cloud'])('uses an explicitly configured %s reviewer for approval and hands off an unclear response', async reviewProvider => {
+  const approved = await review([{ name: 'fs.write', input: { path: 'report.txt', content: 'new' } }], { response: 'APPROVE', reviewProvider })
+  expect(approved.result).toEqual({ status: 'approved', reason: 'approved' })
+  expect(approved.requests).toHaveLength(1)
+  expect(approved.requests[0].model).toBe('fixture')
+  const unclear = await review([{ name: 'fs.write', input: { path: 'report.txt', content: 'new' } }], { response: 'not sure', reviewProvider })
+  expect(unclear.result).toEqual({ status: 'manual', reason: 'review_not_explicitly_approved' })
 })
 
 it.each(['docs/plans/feature.md', '../outside.md', '.env'])('delegates only a registered scoped read-only plan review: %s', async path => {

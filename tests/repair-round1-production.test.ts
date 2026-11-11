@@ -649,6 +649,8 @@ describe('repair round 1 production paths', () => {
       expect(openRecords.map((record) => record.effectId)).toContain('eff-open')
       const owner = new LocalHost({ cwd: root, dataDir: join(root, 'data-A'), provider: { provider: 'mock' }, approvalMode: 'auto', jarvis: { enabled: false } })
       hosts.push(owner)
+      await owner.init()
+      await (owner as unknown as { saveManifest(value: unknown): Promise<void> }).saveManifest({ schemaVersion: 1, id: 'conv-01234567-89ab-4cde-8fab-0123456789ab', title: 'Synthetic owner', cwd: root, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), runs: ['run-A'], artifacts: [] })
       const runtime = { state: { effects: new Map([['eff-open', { outcome: { status: 'failed' }, executionState: 'failed', input: { name: 'fs.apply_patch' } }]]) } }
       const recovered = await owner.reconcileWorkspaceWal(root, runtime as never, 'run-A', 'conv-01234567-89ab-4cde-8fab-0123456789ab')
       expect(recovered.restored).toContain('note.txt')
@@ -710,6 +712,8 @@ describe('repair round 1 production paths', () => {
       expect(await readFile(join(root, 'b.txt'), 'utf8')).toBe('B pending')
       const owner = new LocalHost({ cwd: root, dataDir: join(root, 'data-A'), provider: { provider: 'mock' }, approvalMode: 'auto', jarvis: { enabled: false } })
       hosts.push(owner)
+      await owner.init()
+      await (owner as unknown as { saveManifest(value: unknown): Promise<void> }).saveManifest({ schemaVersion: 1, id: convB, title: 'Synthetic owner', cwd: root, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), runs: ['run-B'], artifacts: [] })
       const mismatched = { state: { effects: new Map([[effectId, { outcome: { status: 'failed' }, executionState: 'failed', input: { name: 'fs.write' }, agentId: 'agent-1', ownerLaneId: 'lane-9' }]]) } }
       await expect(owner.reconcileWorkspaceWal(root, mismatched as never, 'run-B', convB)).rejects.toMatchObject({ code: 'WAL_RECOVERY_UNKNOWN' })
       expect(await readFile(join(root, 'b.txt'), 'utf8')).toBe('B pending')

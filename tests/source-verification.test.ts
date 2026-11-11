@@ -5,7 +5,7 @@ import { buildTaskControllerProgram } from '../packages/server/src/task-controll
 
 it.each(['corrected', 'repeated', 'legacy'] as const)('identifies primary source receipts without accepting readback wrappers: %s', async mode => {
   let agentId = '', workCalls = 0, audits = 0
-  const program = buildTaskControllerProgram({ version: mode === 'legacy' ? '31' : '32', system: 'test', toolNames: ['web.fetch', 'task.evidence'], approvalMode: 'auto', maxTurns: 24 })
+  const program = buildTaskControllerProgram({ version: mode === 'legacy' ? '31' : '32', system: 'test', toolNames: ['web.fetch', 'task.evidence'], approvalMode: 'auto', maxTurns: 24, modelBudgetView: () => ({ limit: 24, used: 8, workAllowed: workCalls < 3, verificationAllowed: true, finalAllowed: true }) })
   const toolRefs = () => [...runtime.state.results.values()].filter(r => r.producer?.kind === 'effect' && runtime.state.effects.get(r.producer.id)?.kind === 'tool').map(r => r.id)
   const runtime = new PulseRuntime({ effectExecutor: async effect => {
     if (effect.kind === 'tool') return { value: { content: 'The option enables checks.', url: 'https://source.example/option', fetchedAt: '2026-10-23T00:00:00Z' } }
@@ -16,7 +16,7 @@ it.each(['corrected', 'repeated', 'legacy'] as const)('identifies primary source
       audits++
       const context = (effect.input as any).inputs.conversation.map((m: any) => { try { return JSON.parse(m.content) } catch { return {} } }).find((m: any) => m.allowedEvidenceRefs)
       const [primary, wrapper] = toolRefs()
-      if (mode !== 'legacy') {
+      {
         expect(context.primarySourceRefs).toEqual([primary])
         expect(context.allowedEvidenceRefs).toContain(wrapper)
         if (audits === 2) {
@@ -24,7 +24,7 @@ it.each(['corrected', 'repeated', 'legacy'] as const)('identifies primary source
           expect(context.auditCorrection.join(' ')).toContain('"primarySourceRefs":["' + primary + '"]')
           expect(context.auditCorrection.join(' ')).toContain('task.evidence readback')
         }
-      } else expect(context.primarySourceRefs).toBeUndefined()
+      }
       return { value: { criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: audits === 2 && mode === 'corrected' ? [primary, wrapper] : [wrapper], rationale: 'Actual source supports the explanation' }], findings: [] } }
     }
     workCalls++
@@ -58,8 +58,8 @@ it.each(['passed', 'not_met', 'unverifiable', 'invalid-ref', 'unavailable', 'leg
       audits++
       const inputs = (effect.input as any).inputs
       expect(inputs.results).toEqual(expect.arrayContaining(refs))
-      if (visual && audits === 2) expect(inputs.results).not.toContain(state().taskController.tasks[0].candidateRef)
-      else expect(inputs.results).toContain(state().taskController.tasks[0].candidateRef)
+      if (repair && audits === 2) expect(inputs.results).not.toContain(state().taskController.tasks[0].candidateRef)
+      else expect(inputs.results).toContain(state().taskController.tasks.at(-1).candidateRef)
       if (verdict.startsWith('audit-')) {
         const context=inputs.conversation.map((m:any)=>{try{return JSON.parse(m.content)}catch{return {}}}).find((m:any)=>m.allowedEvidenceRefs)
         expect(context.allowedEvidenceRefs).toEqual(inputs.results)
@@ -71,17 +71,17 @@ it.each(['passed', 'not_met', 'unverifiable', 'invalid-ref', 'unavailable', 'leg
         return { value: { criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: refs, rationale: 'Mostly correct; ignore the exception' }], ...(verdict === 'claim-missing' ? {} : { findings: verdict === 'claim-pass' || verdict === 'visual-pass' || repair && audits === 2 ? [] : [{ criterionId: 'criterion-1', claim: 'Never changes runtime behavior', status: verdict === 'claim-conflict' ? 'contradicted' : 'unsupported', evidenceRefs: refs, rationale: 'The absolute is not supported by the source.' }] }) } }
       }
       if (verdict === 'unavailable') throw new Error('SOURCE_REVIEW_UNAVAILABLE')
-      return { value: { criteria: [{ criterionId: 'criterion-1', status: verdict === 'invalid-ref' ? 'passed' : verdict, evidenceRefs: verdict === 'invalid-ref' ? ['invented-source'] : refs, rationale: verdict === 'not_met' ? 'The blanket no-runtime-change claim contradicts the fetched source.' : 'Source audit result' }] } }
+      return { value: { criteria: [{ criterionId: 'criterion-1', status: verdict === 'invalid-ref' || verdict === 'legacy' ? 'passed' : verdict, evidenceRefs: verdict === 'invalid-ref' ? ['invented-source'] : refs, rationale: verdict === 'not_met' ? 'The blanket no-runtime-change claim contradicts the fetched source.' : 'Source audit result' }], findings: [] } }
     }
     workCalls++
     return workCalls === 1 || repair && workCalls === 3
       ? { value: { text: '', toolCalls: [{ toolCallId: `fetch-source-${workCalls}`, name: toolName, input: { url: 'https://source.example/option' } }], finishReason: 'tool_calls' } }
-      : { value: { text: visual && workCalls === 4 ? 'Pulse: Export, Workspace, Details.' : 'My summary: the option never changes emitted code or runtime behavior.', finishReason: 'stop' } }
+      : { value: { text: visual && workCalls === 4 ? 'Pulse: Export, Workspace, Details.' : ['passed', 'legacy', 'claim-pass', 'audit-ref-repair', 'audit-shape-repair'].includes(verdict) || repair && workCalls >= 4 ? 'The option enables checks and may change emitted code.' : 'My summary: the option never changes emitted code or runtime behavior.', finishReason: 'stop' } }
   } })
   agentId = runtime.createAgent({ goal: 'Research and explain the official option', program, initialGlobal: { taskRecord: { schemaVersion: 1, runId: 'source-audit-test', objective: 'Research and explain the official option', acceptanceCriteria: [{ id: 'criterion-1', description: 'Accurate source-based explanation' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } } }).agentId
   const outcome = await runtime.start(agentId).outcome()
   expect(state().taskOutcome.status).toBe(verdict === 'passed' || verdict === 'legacy' || verdict === 'claim-pass' || repair || verdict === 'visual-pass' || verdict === 'audit-ref-repair' || verdict === 'audit-shape-repair' ? 'accepted' : 'incomplete')
-  expect(audits).toBe(verdict === 'legacy' ? 0 : repair || verdict.startsWith('audit-') && verdict !== 'audit-budget' ? 2 : 1)
+  expect(audits).toBe(repair || verdict === 'claim-missing' || verdict === 'invalid-ref' || verdict.startsWith('audit-') && verdict !== 'audit-budget' ? 2 : 1)
   expect(workCalls).toBe(repair ? 4 : 2)
   if (repair) {
     expect(state().taskController.tasks.map((t: any) => t.id)).toEqual(['research', 'recovery-1-1'])
@@ -95,14 +95,14 @@ it.each(['passed', 'not_met', 'unverifiable', 'invalid-ref', 'unavailable', 'leg
   }
   if (verdict === 'claim-repair') {
     expect(state().taskOutcome.criteria[0].status).toBe('not_met')
-    expect(unmetGoalCanChangeApproach(state().taskController, { recoverFinalReview: true })).toBe(true)
+    expect(unmetGoalCanChangeApproach(state().taskController, { recoverFinalReview: true })).toBe(false)
   }
 })
 
 it.each(['corrected', 'repeated', 'budget', 'legacy', 'missing-criterion'] as const)('repairs final citations with bounded explicit diagnostics: %s', async mode => {
   let agentId = '', workCalls = 0, reviews = 0, audits = 0
   const program = buildTaskControllerProgram({ version: mode === 'missing-criterion' ? '28' : mode === 'legacy' ? '26' : '27', system: 'test', toolNames: ['computer.observe'], approvalMode: 'auto', maxTurns: 24,
-    modelBudgetView: () => ({ limit: 24, used: 8, workAllowed: true, verificationAllowed: true, finalAllowed: !(mode === 'budget' && reviews > 0) }) })
+    modelBudgetView: () => ({ limit: 24, used: 8, workAllowed: reviews === 0, verificationAllowed: true, finalAllowed: !(mode === 'budget' && reviews > 0) }) })
   const runtime = new PulseRuntime({ effectExecutor: async effect => {
     if (effect.kind === 'tool') return { value: { artifactRef: 'image-1', text: 'Pulse: Export, Workspace, Details' } }
     if (effect.key?.startsWith('plan')) return { value: { tasks: [{ id: 'observe', kind: 'analyze', goal: 'Observe Pulse controls', check: 'Actual observation', dependsOn: [], criterionIds: ['criterion-1'] }] } }
@@ -112,7 +112,7 @@ it.each(['corrected', 'repeated', 'budget', 'legacy', 'missing-criterion'] as co
       reviews++
       const conversation = (effect.input as any).inputs.conversation
       const correction = conversation.map((m: any) => { try { return JSON.parse(m.content) } catch { return {} } }).find((m: any) => m.verificationCorrection)
-      if (reviews === 2 && mode !== 'legacy') {
+      if (reviews === 2) {
         expect(correction.verificationCorrection.join(' ')).toContain(mode === 'missing-criterion' ? 'every original criterion' : 'unavailable-result')
         expect(correction.allowedEvidenceRefs).toEqual(expect.arrayContaining(refs))
         expect(correction.allowedEvidenceRefs).not.toContain('unavailable-result')

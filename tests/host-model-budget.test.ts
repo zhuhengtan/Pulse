@@ -108,9 +108,7 @@ describe('whole-run provider attempt budget', () => {
       const effect = pending[0]!.items[0]!
       const directory = join(root, 'data/conversations', conversation.id, 'runs', run.id)
       const saved = JSON.parse(await readFile(join(directory, 'model-budget.json'), 'utf8'))
-      const runtime = (first as any).active.get(run.id).runtime
-      runtime.cancelAgent = () => {}
-      await first.close()
+      await first.close({ preserveRuns: true })
       second = createLocalHost({ cwd: root, dataDir: join(root, 'data'), maxModelCalls: 256, mockResponse: '已停止实施' })
       const resumed = await second.resumeRun(conversation.id)
       expect(resumed?.id).toBe(run.id)
@@ -243,7 +241,7 @@ describe('whole-run provider attempt budget', () => {
     } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
   })
 
-  it.each(['ollama', 'deepseek'] as const)('does not let a parent task-controller lane retry after a %s reviewer denies a worker', async reviewer => {
+  it.each(['ollama', 'deepseek'] as const)('preserves a %s worker denial while bounding parent diagnosis by the original budget', async reviewer => {
     vi.stubEnv('PULSE_TEST_REVIEW_KEY', 'fixture-key')
     const root = await mkdtemp(join(tmpdir(), 'pulse-controller-denial-'))
     const goal = '检查运行时版本'
@@ -261,14 +259,19 @@ describe('whole-run provider attempt budget', () => {
       const conversation = await host.createConversation()
       const run = await host.sendMessage(conversation.id, { text: goal })
       await run.outcome()
-      expect(primary).toBe(2); expect(reviews).toBe(1)
-      expect(summaries).toBe(1)
-      expect((await run.usage()).modelCalls).toBe(4)
-      expect((await run.usage()).budget?.purposes['completion-summary']).toBe(1)
+      expect(primary).toBeGreaterThanOrEqual(2); expect(reviews).toBe(1)
+      expect(summaries).toBeLessThanOrEqual(1)
+      expect(primary + reviews + summaries).toBeLessThanOrEqual(16)
+      const usage = await run.usage()
+      expect(usage.modelCalls).toBe(primary + reviews + summaries)
+      expect(usage.budget?.purposes['completion-summary'] ?? 0).toBe(summaries)
       expect((await run.taskOutcome())?.status).not.toBe('accepted')
       const runDirectory = join(root, 'data/conversations', conversation.id, 'runs', run.id)
       const snapshot = await hydrateRuntimeResultBodies(JSON.parse(await readFile(join(runDirectory, 'runtime.json'), 'utf8')), new FileRuntimeContentStore(join(runDirectory, 'runtime-results')))
-      expect(snapshot.state.state.effects.filter(([, effect]: any) => effect.kind === 'tool' && effect.input?.name === 'shell.exec')).toHaveLength(1)
+      const commands = snapshot.state.state.effects.map(([, effect]: any) => effect).filter((effect: any) => effect.kind === 'tool' && effect.input?.name === 'shell.exec')
+      expect(commands.length).toBeGreaterThanOrEqual(1)
+      expect(commands.filter((effect: any) => effect.outcome?.status === 'succeeded')).toHaveLength(0)
+      expect(commands.every((effect: any) => effect.outcome?.error?.code === 'AI_APPROVAL_DENIED')).toBe(true)
     } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
   })
 })

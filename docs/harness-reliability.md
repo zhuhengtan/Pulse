@@ -49,7 +49,7 @@ Host API 的 `sendMessage` 支持 `requirementPaths`；继续旧任务时，`con
 
 模型常驻决定表面固定保留重要约束，再按阶段相关性和时间选择，完整问答仍通过 ResultRef 查询。提问可带稳定 `decisionId`、`decisionScope` 和 `decisionPriority`（`constraint`、`stage` 或 `normal`）；更新记录包含版本与被替代的结果引用。
 
-恢复检查构建、工具 schema/权限和策略指纹。结果分为兼容、可迁移或不兼容；可迁移时先保存原快照和记录，再绑定新契约。不兼容时给出具体工具或策略原因，保留原件。构建发生变化且已有旧指纹时，需要审核代码变更，再通过 `pulse resume <conversation-id> --accept-build-migration <oldhash:newhash>` 明确授权诊断中的精确构建对；不会自动放行未知构建。迁移不回答问题，不重放写入，不赋予旧的未绑定执行批准效力。
+恢复检查并记录构建、工具 schema/权限和策略指纹的变化，先保存原快照和接管记录，再绑定当前契约。更新后由当前控制器保存原始快照并接管任务，构建变化不再要求用户确认精确构建对；工具参数仍按当前契约校验，未知副作用先对账。迁移不回答问题，不重放写入，不赋予旧的未绑定执行批准效力。
 
 旧 ownerless 草稿需要人明确认领：
 
@@ -60,7 +60,11 @@ pulse drafts <conversation-id> <run-id> <draft-id> --revision <预览返回的ha
 
 第一条只预览，第二条确认相同修订后迁移，并保存原草稿。该入口没有注册为模型工具；不会按文件名或时间猜测归属。
 
-## Controller v13 and usage completeness
+## Historical implementation notes
+
+The notes below describe earlier implementation milestones. Current behavior and update takeover are defined in [the current task controller](task-controller.md); historical version-specific execution policies are no longer registered by Host.
+
+### Controller v13 and usage completeness
 
 New controlled runs persist a stage `kind` (`edit`, `verify`, or `analyze`). Host
 validation recognizes integration and documentation updates independently of

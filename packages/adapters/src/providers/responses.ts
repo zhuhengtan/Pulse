@@ -40,7 +40,7 @@ export class ResponsesAdapter implements ProviderAdapter {
   }
   async executeAttempt(params: Parameters<ProviderAdapter['executeAttempt']>[0]): Promise<LLMResult> {
     const streaming = params.onObservation !== undefined || params.onReasoning !== undefined
-    const { canonical, toolNameAliases } = lowerProjectionToCanonical({ request: params.request, model: params.model ?? this.config.defaultModel, outputSchema: params.outputSchema, maxOutputTokens: params.maxOutputTokens ?? this.config.maxOutputTokens, reasoningEffort: params.reasoningEffort ?? this.config.reasoningEffort, toolChoice: this.config.toolChoice, stream: streaming })
+    const { canonical, toolNameAliases } = lowerProjectionToCanonical({ request: params.request, model: params.model ?? this.config.defaultModel, outputSchema: params.outputSchema, maxOutputTokens: params.maxOutputTokens ?? this.config.maxOutputTokens, reasoningEffort: params.ignoreConfiguredReasoning ? params.reasoningEffort : params.reasoningEffort ?? this.config.reasoningEffort, toolChoice: this.config.toolChoice, stream: streaming })
     const effort = canonical.reasoning?.effort
     const strict = params.strictReasoning === true && effort !== undefined
     const provider = this.config.provider, model = canonical.model ?? ''

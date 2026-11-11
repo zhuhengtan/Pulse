@@ -1,5 +1,47 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.13.0": [
+    {
+      "zh": "桌面新增常驻托盘、未读通知、按住说话和可选本地语音识别与播报，并支持选择扬声器输出。",
+      "en": "Add a resident desktop tray, unread notifications, hold-to-talk dictation, optional local speech recognition and synthesis, and speaker selection."
+    },
+    {
+      "zh": "新增全局指令设置、可配置的任务质量检查和审批模型，保留已回答问题及后续消息。",
+      "en": "Add global instructions, configurable task quality checks and approval models, and retain answered questions and follow-up messages."
+    },
+    {
+      "zh": "新增带时区的日历定时任务，明确处理错过执行、夏令时和重启恢复，避免自动重放结果不确定的操作。",
+      "en": "Add timezone-aware calendar schedules with explicit missed-run, daylight-saving and restart handling, without automatically replaying operations whose outcome is uncertain."
+    },
+    {
+      "zh": "新增可选设备工具和场景模拟界面，以设备及动作授权、持久回执和状态核验约束控制；真实设备连接仍需用户单独配置。",
+      "en": "Add optional device tools and a simulated scene interface with scoped device/action grants, durable receipts and state verification; real devices still require separate user setup."
+    },
+    {
+      "zh": "项目可固定额外的只读文件夹；隔离开发胶囊可校验来源、保护文件历史，并实验性地在新建隔离运行实例之间切换。",
+      "en": "Pin additional read-only project folders; verify isolated development capsules, protect file history, and experimentally switch between newly created isolated runtime instances."
+    },
+    {
+      "zh": "加强跨进程任务准入、工作线程清理和启动所有权持久化，减少重复启动及中断后的状态歧义。",
+      "en": "Harden cross-process task admission, worker cleanup and persisted startup ownership to reduce duplicate starts and ambiguous recovery state."
+    },
+    {
+      "zh": "任务恢复保留原始检查、有效证据、审批边界和累计预算；上下文压缩与容量续接不丢失尚未完成的义务。",
+      "en": "Retain original checks, valid evidence, approval boundaries and cumulative budgets during recovery; preserve unfinished obligations through history compaction and capacity continuation."
+    },
+    {
+      "zh": "加固隔离工作区的合入锁、中断处理和内部数据保护，拒绝不兼容数据库的可写打开，并正确处理特殊文件名和额外目录边界。",
+      "en": "Harden isolated-workspace merge locks, interruption handling and internal-data protection, reject writable opens of incompatible databases, and handle special filenames and additional-folder boundaries correctly."
+    },
+    {
+      "zh": "修复更新启动器的校验与修复、开发环境组件重载、Windows 后台控制台及局域网聊天入口问题。",
+      "en": "Fix update-launcher validation and repair, development-component reloads, Windows background consoles and LAN chat access."
+    },
+    {
+      "zh": "改进语音播放的停止、恢复与回复关联，统一聊天、工作任务和通知中的终态显示。",
+      "en": "Improve speech playback cancellation, recovery and reply correlation, and reconcile terminal states across chat, work tasks and notifications."
+    }
+  ],
   "0.12.0": [
     {
       "zh": "聊天模式使用简洁气泡和输入动画，可先发送简短回复，再给出详细答复。工作任务可通过聊天回报进度，等待确认时可直接在聊天中处理。",

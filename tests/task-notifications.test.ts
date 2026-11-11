@@ -21,12 +21,12 @@ function setup() {
   return { controller, request, open, save, feed: (value: any[]) => { feed = value }, snapshot: (value: any) => { snapshot = value } }
 }
 describe('task notification lifecycle', () => {
-  it('retains live pending across 200 history entries and restores the legacy array format', async () => {
+  it('retains live pending and unread completions across the history limit', async () => {
     let saved: any[] = [{ ...item, createdAt: 1 }]
     const inbox = new TaskNoticeInbox(async () => structuredClone(saved), async value => { saved = structuredClone(value) }, async () => true)
     for (let index = 0; index < 205; index++) await inbox.record({ type: 'complete', runId: `other-${index}`, conversationId: 'c', seq: 1, data: { status: 'succeeded' } })
     const restored = await new TaskNoticeInbox(async () => saved, async value => { saved = value }, async () => true).list()
-    expect(restored.filter(item => item.kind === 'complete')).toHaveLength(200)
+    expect(restored.filter(item => item.kind === 'complete')).toHaveLength(205)
     expect(restored.find(notice => notice.id === item.id)).toBeTruthy()
   })
   it('clears answered groups, deduplicates cancellation and reconciles interrupted runs after restart', async () => {

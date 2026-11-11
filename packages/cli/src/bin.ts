@@ -49,8 +49,10 @@ Usage:
                                           mobile web assistant and launchd daemon
   pulse update [status|check|download|apply|rollback|enable|auto-download on|off]
                                           independent backend and frontend updates
-  pulse schedule <add|list|pause|resume|remove|daemon> [options]
-                                          manage recurring tasks (daemon requires read-only or auto approval)
+  pulse schedule <add|list|pause|resume|remove|daemon|run-once|recover> [options]
+                                          manage persistent tasks (daemon requires read-only or auto approval)
+    add --every 1h | --at YYYY-MM-DDTHH:mm | --daily HH:mm | --weekly mon,wed --time HH:mm
+    calendar options: --timezone Asia/Shanghai [--missed-run skip|run-once]
   pulse service <install|status|start|stop|uninstall>
   pulse template <list|show|run> [name] [values...]
   pulse automation doctor                  check browser and desktop dependencies
@@ -236,7 +238,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const maxOutputTokens = option(parsed.options, 'max-output-tokens') ?? process.env.PULSE_MAX_OUTPUT_TOKENS
   const reasoningEffort = option(parsed.options, 'reasoning-effort') ?? process.env.PULSE_REASONING_EFFORT
   const maxTurns = option(parsed.options, 'max-turns') ?? process.env.PULSE_MAX_TURNS
-  const taskControllerPolicy = option(parsed.options, 'task-controller-policy') ?? config.taskControllerPolicy ?? 'legacy'
+  const taskControllerPolicy = option(parsed.options, 'task-controller-policy') ?? config.taskControllerPolicy ?? 'continuous'
   if (!['legacy', 'continuous'].includes(taskControllerPolicy)) throw new Error('INVALID_TASK_CONTROLLER_POLICY')
   const maxModelCalls = option(parsed.options, 'max-model-calls') ?? process.env.PULSE_MAX_MODEL_CALLS
   const maxRuntimeMs = option(parsed.options, 'max-runtime-ms') ?? process.env.PULSE_MAX_RUNTIME_MS
@@ -461,8 +463,11 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     allowRemote: jarvisAllowRemote,
   }
 
+  if (config.qualityReviewEnabled !== undefined && typeof config.qualityReviewEnabled !== 'boolean') throw new Error('INVALID_QUALITY_REVIEW_SETTING')
   return {
-    taskControllerPolicy: taskControllerPolicy as 'legacy' | 'continuous',
+    qualityReviewEnabled: config.qualityReviewEnabled !== false,
+    taskControllerPolicy: 'continuous',
+    ...(config.taskAdmission === undefined ? {} : { taskAdmission: config.taskAdmission }),
     ...(explicitTaskController === undefined ? {} : { taskController: explicitTaskController }),
     ...(cwd === undefined ? {} : { cwd }),
     ...(dataDir === undefined ? {} : { dataDir }),
@@ -516,13 +521,20 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
       const selected = resolveModelReference(catalog, config.approvalReview!.model!)
       const entry = selections.find(item => item.id === selected)
       const source = entry && effectiveProviders[entry.providerId]
-      if (!entry || !source || (source.provider !== 'ollama' && source.provider !== 'deepseek') || source.provider === 'ollama' && (entry.model.remote === true || /(?:-cloud|:cloud)$/.test(entry.model.modelCode))) throw new Error('APPROVAL_REVIEW_PROVIDER_UNSUPPORTED')
-      return { provider: source.provider, model: entry.model.modelCode, baseURL: source.baseURL ?? (source.provider === 'ollama' ? 'http://127.0.0.1:11434' : 'https://api.deepseek.com'), ...(source.provider === 'deepseek' ? { apiKeyEnv: source.apiKeyEnv ?? 'DEEPSEEK_API_KEY', ...(resolvedKeys[entry.providerId] ? { apiKey: resolvedKeys[entry.providerId]! } : {}) } : {}), timeoutMs: Math.max(30_000, Math.min(60_000, config.approvalReview!.timeoutMs ?? 30_000)) }
+      if (!entry || !source || entry.model.purposes && !entry.model.purposes.includes('chat')) throw new Error('APPROVAL_REVIEW_MODEL_UNSUPPORTED')
+      const reasoningEffort = entry.model.reasoningEffort ?? source.reasoningEffort
+      const { toolChoice: _toolChoice, reasoningEffort: _profileEffort, ...profile } = providerProfiles[entry.providerId]!
+      return { ...profile, model: entry.model.modelCode, ...(source.apiKeyEnv ? { apiKeyEnv: source.apiKeyEnv } : {}), ...(entry.model.remote === true ? { remote: true } : {}), maxContextTokens: resolveContextTokens(entry.model, source), ...(entry.model.maxOutputTokens === undefined ? {} : { maxOutputTokens: entry.model.maxOutputTokens }), ...(reasoningEffort === undefined ? {} : { reasoningEffort }), ...(entry.model.structuredOutput === 'unsupported' ? { capabilityProfile: { structuredOutput: 'unsupported' as const } } : {}), timeoutMs: Math.max(30_000, Math.min(60_000, config.approvalReview!.timeoutMs ?? 30_000)) }
     })() } : {}),
   }
 }
 
 export async function main(): Promise<number> {
+  if (process.argv[2] === 'self-host-runtime') {
+    if (process.argv.length !== 5 || process.argv[3] !== '--control-root') throw new Error('ISOLATED_RUNTIME_ARGUMENTS_INVALID')
+    const { runIsolatedH5Runtime } = await import('@hunterzhu/pulse-server')
+    return runIsolatedH5Runtime(process.argv[4]!, createLocalHost)
+  }
   const parsed = parse(process.argv.slice(2))
   // Resolve this before global --help/--version. Otherwise `execpolicy check node --version`
   // is swallowed by the version flag and never reports that the `--` separator is missing.

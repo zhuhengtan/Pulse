@@ -19,6 +19,8 @@ it('retrieves omitted delivery evidence through the real Host index without repe
     calls++
     try {
     const { messages } = JSON.parse(String(init?.body)), text = currentRequestText(messages), results = suppliedRequestResults(messages)
+    if (text.includes('You are the Pulse safety reviewer')) return chat('APPROVE')
+    if (text.includes("You write Pulse's final user-facing reply")) return chat('Created 20 fixture files and summarized their original receipts.')
     if (text.includes('Create an executable plan')) return chat(JSON.stringify({ tasks: [
       { id: 'files', kind: 'edit', goal: 'Create 20 fixture text files under fixtures/', check: '20 file write receipts', criterionIds: ids, dependsOn: [] },
       { id: 'summary', kind: 'analyze', goal: 'Summarize original fixture write receipts', check: 'Original receipts retrieved and summarized without rewriting files', criterionIds: ids, dependsOn: ['files'] },
@@ -34,7 +36,7 @@ it('retrieves omitted delivery evidence through the real Host index without repe
       return chat({ content: '', tool_calls: tools })
     }
     if (readTurn++ === 0) {
-      const delivery = messages.flatMap((m: any) => { try { return JSON.parse(m.content).deliveries ?? [] } catch { return [] } })[0]
+      const delivery = text.split("\n").flatMap((content: string) => { try { return JSON.parse(content).deliveries ?? [] } catch { return [] } })[0]
       expect(delivery).toMatchObject({ version: 1, stageId: 'files', evidenceCount: 20, lookup: { tool: 'task.delivery', stageId: 'files' } })
       expect(delivery.omitted).toBeGreaterThan(0); expect(Buffer.byteLength(JSON.stringify(delivery))).toBeLessThanOrEqual(4096)
       return tool('task_delivery', { stageId: 'files', offset: 0 })
@@ -47,7 +49,7 @@ it('retrieves omitted delivery evidence through the real Host index without repe
     return chat('All 20 original fixture receipts are preserved; summary complete.')
     } catch (e) { mockErrors.push(String(e)); throw e }
   }))
-  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, taskController: true, jarvis: { enabled: false }, approvalMode: 'auto', maxModelCalls: 32 })
+  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture', maxContextTokens: 256000 }, taskController: true, jarvis: { enabled: false }, approvalMode: 'auto', maxModelCalls: 32 })
   try {
     const c = await host.createConversation(), run = await host.sendMessage(c.id, { text: objective })
     const outcome = await run.outcome(); expect(outcome, JSON.stringify({ outcome, calls, writes, readTurn, indexes, mockErrors })).toMatchObject({ status: 'succeeded' })

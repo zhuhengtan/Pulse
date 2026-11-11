@@ -16,13 +16,20 @@ window.pulseDesktop = { nativeBrowser: true } as NonNullable<typeof window.pulse
 const fixture = followupFixture('work', true), request = fixture.transport.request
 const path = 'docs/plans/rate-limit-and-export-plan.md', runId = fixture.conversation.activeRunId!
 let answered = false
+const questionInput = { kind: 'ask', type: kind, planPath: path, prompt: `请审阅已保存的计划 ${path}，是否执行？`, context: '计划已保存。请选择一个选项，或输入你的修改意见。', options: [{ label: '暂不执行', value: 'defer', description: '保留计划，暂不开始实施。' }, { label: '执行', value: 'execute', description: '按已保存的计划开始实施。' }], min: 1 }
 const status = { set: (_value: string) => {} }
 fixture.transport.request = async (url, init) => {
   if (url === '/api/session') return Response.json({ localAdmin: true, queueScope: `ask-cards-${kind}` })
   if (url === '/api/automation/sessions') return Response.json({ sessions: [{ id: 'existing-browser', kind: 'browser', mode: 'native', state: 'ai', owner: 'run:existing', conversationId: 'busy' }] })
-  if (url.endsWith('/state') && !answered) return Response.json({ runId, state: 'running', seq: 0, activities: [], interactions: [{ kind: 'ask', groupId: `ask-cards-${kind}`, items: [{ effectId: 'plan', input: { kind: 'ask', type: kind, planPath: path, prompt: `请审阅已保存的计划 ${path}，是否执行？`, options: [{ label: '暂不执行', value: 'defer' }, { label: '执行', value: 'execute' }], min: 1 } }] }] })
+  if (url.endsWith('/state') && !answered) return Response.json({ runId, state: 'running', seq: 0, activities: [], interactions: [{ kind: 'ask', groupId: `ask-cards-${kind}`, items: [{ effectId: 'plan', input: questionInput }] }] })
   if (url.includes('/artifacts/raw?')) return new Response('# 请求限流与导出计划\n\n## 实现范围\n\n- 为审计服务增加请求限流。\n- 将审计日志导出为 CSV。\n\n## 验证\n\n运行现有测试，保留配置和用户数据。', { headers: { 'Content-Type': 'text/markdown' } })
-  if (url.endsWith('/replies')) { answered = true; const body = JSON.parse(String(init?.body)); status.set(body.answers?.every((item: any) => item.value.dismissed === true) ? '未作答，卡片已关闭。' : '回答已提交。') }
+  if (url.endsWith('/replies')) {
+    answered = true
+    const body = JSON.parse(String(init?.body)), answer = body.answers[0].value
+    const dismissed = answer.dismissed === true
+    status.set(dismissed ? '未作答，卡片已关闭。' : '回答已提交。')
+    if (!dismissed) fixture.messages.push({ id: `ask-answer-${runId}-plan`, role: 'user', runId, text: answer.text ?? answer.value ?? answer.values?.join('、') ?? '', createdAt: new Date().toISOString(), questionAnswer: { effectId: 'plan', input: questionInput, answer } })
+  }
   return request(url, init)
 }
 const router = createMemoryRouter([{ path: '*', element: <PulseApp transport={fixture.transport}/> }], { initialEntries: ['/work/busy'] })

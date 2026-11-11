@@ -46,6 +46,8 @@ const makeFixture = (tag, options = {}) => {
 const fakeManager = (behavior = {}) => {
   const state = { gets: 0, finishes: 0, closes: 0, dataDirs: [], ids: [] }
   class FakeH5WorkspaceManager {
+    static selfHostBeforeApply = 1
+    static selfHostInternalDataBoundary = 1
     constructor(dataDir) {
       state.dataDirs.push(dataDir)
     }
@@ -55,6 +57,7 @@ const fakeManager = (behavior = {}) => {
       if (behavior.getThrows) throw new Error('fake get failure')
       return behavior.record
     }
+    async finishVerified(_id, validate) { await validate(behavior.record.worktreeRoot); return this.finish() }
     async finish() {
       state.finishes += 1
       return behavior.finish || { status: 'merged' }
@@ -73,6 +76,7 @@ const fakeHttp = (cwd, calls = []) => ({
     const method = init.method || 'GET'
     calls.push({ path: pathname, method, body: init.body || null })
     if (pathname === '/api/session/local' && method === 'POST') return { ok: true }
+    if (pathname === '/api/session') return { capabilities: { selfHostExternalValidation: 1, selfHostInternalDataBoundary: 1 } }
     if (pathname === '/api/projects' && method === 'GET') return [{ id: 'proj-1', name: 'fixture', cwd, pinned: false }]
     if (pathname === '/api/conversations' && method === 'POST') return { id: 'conv-1' }
     if (pathname === '/api/conversations/conv-1' && method === 'PATCH') return { ok: true }
@@ -253,7 +257,8 @@ describe('locateWorkspace 与 H5 传输的候选目录接线', () => {
     expect(missing.state.closes).toBe(1)
     // 认证仍必须早于查项目。
     expect(calls[0]).toEqual({ path: '/api/session/local', method: 'POST', body: null })
-    expect(calls[1].path).toBe('/api/projects')
+    expect(calls[1].path).toBe('/api/session')
+    expect(calls[2].path).toBe('/api/projects')
   })
 
   it('成功时把候选目录与状态交给 main', async () => {
@@ -281,6 +286,7 @@ describe('合入失败不得判定 success', () => {
     const finalized = await invoker.finalize({
       conversationId: 'conv-1',
       runId: 'run-1',
+      validate: async () => {},
       workspace: engine.workspace,
       cwd: f.targetCwd,
       dataDir: f.dataDir,
@@ -301,6 +307,7 @@ describe('合入失败不得判定 success', () => {
     const mismatch = await invoker.finalize({
       conversationId: 'conv-1',
       runId: 'run-1',
+      validate: async () => {},
       workspace: f.targetCwd,
       cwd: f.targetCwd,
       dataDir: f.dataDir,
@@ -312,6 +319,7 @@ describe('合入失败不得判定 success', () => {
     const merged = await invoker.finalize({
       conversationId: 'conv-1',
       runId: 'run-1',
+      validate: async () => {},
       workspace: engine.workspace,
       cwd: f.targetCwd,
       dataDir: f.dataDir,
@@ -355,8 +363,11 @@ it.each(['accepted', 'incomplete', 'missing', 'lookup-error'])('main checks cand
   if (outcome !== 'missing') writeFileSync(path.join(runDir, 'task-outcome.json'), JSON.stringify({ status: outcome }))
   let closes = 0, finishes = 0
   class Manager {
+    static selfHostBeforeApply = 1
+    static selfHostInternalDataBoundary = 1
     async get() { if (outcome === 'lookup-error') throw new Error('fixture workspace lookup failed'); return f.record }
     async close() { closes++ }
+    async finishVerified(_id, validate) { await validate(f.candidateCwd); return this.finish() }
     async finish() { finishes++; writeFileSync(path.join(f.targetCwd, 'ready'), 'fixed'); return { status: 'merged' } }
   }
   const code = await main(['--transport', 'h5', '--cwd', f.targetCwd, '--data-dir', f.dataDir, '--cli-entry', f.cliEntry, '--checks-file', checks, '--task-file', task, '--output', output, '--max-attempts', '1'], {
@@ -365,7 +376,7 @@ it.each(['accepted', 'incomplete', 'missing', 'lookup-error'])('main checks cand
   })
   const report = JSON.parse(readFileSync(path.join(output, 'report.json'), 'utf8'))
   checked.push(...readFileSync(trace, 'utf8').trim().split('\n').map(line => real(JSON.parse(line))))
-  expect(checked).toEqual(outcome === 'accepted' ? [real(f.targetCwd), real(f.candidateCwd), real(f.targetCwd)] : outcome === 'lookup-error' ? [real(f.targetCwd)] : [real(f.targetCwd), real(f.candidateCwd)])
+  expect(checked).toEqual(outcome === 'accepted' ? [real(f.targetCwd), real(f.candidateCwd), real(f.candidateCwd), real(f.targetCwd)] : outcome === 'lookup-error' ? [real(f.targetCwd)] : [real(f.targetCwd), real(f.candidateCwd)])
   expect(code).toBe(outcome === 'accepted' ? 0 : outcome === 'lookup-error' ? 2 : 6)
   expect(report.conversationId).toBe('conv-1')
   expect(report.runId).toBe('run-1')

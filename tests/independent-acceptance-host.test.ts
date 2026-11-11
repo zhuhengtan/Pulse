@@ -36,8 +36,7 @@ it.each([false, true])('persists frozen Host checks despite an optimistic model 
     if (cold) {
       for await (const event of run.events) if (event.type === 'waiting') break
       const originalId = run.id, previousCalls = calls
-      const rt = (host as any).active.get(run.id).runtime; rt.cancelAgent = () => {}
-      await host.close()
+      await host.close({ preserveRuns: true })
       host = createLocalHost({ ...options, acceptanceChecks: [] } as any)
       run = await host.resumeRun(c.id)
       expect(run.id).toBe(originalId); expect(calls).toBe(previousCalls); expect(checks).toBe(0)
@@ -50,7 +49,7 @@ it.each([false, true])('persists frozen Host checks despite an optimistic model 
     const base = join(dir, 'data/conversations', c.id, 'runs', run.id)
     const saved = JSON.parse(await readFile(join(base, 'task-record.json'), 'utf8'))
     expect(saved.acceptanceChecks).toEqual([definition])
-    expect(JSON.parse(await readFile(join(base, 'input.json'), 'utf8')).controllerVersion).toBe('56')
+    expect(JSON.parse(await readFile(join(base, 'input.json'), 'utf8')).controllerVersion).toBe('58')
     const state = JSON.parse(await readFile(join(base, 'task-controller.json'), 'utf8'))
     expect(state.acceptanceResults).toMatchObject([{ id: 'entry', status: 'failed', ref: expect.any(String) }])
     expect(checks).toBe(1); expect(work).toBe(cold ? 3 : 2); expect((await run.usage()).modelCalls).toBe(calls)

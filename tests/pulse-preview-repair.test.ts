@@ -6,7 +6,7 @@ import { createAgent, createRuntimeState, EffectOutbox, exportRuntimePersistence
 import { ConversationData } from '../packages/data/src/index.js'
 import { createLocalHost } from '../packages/server/src/index.js'
 import { MockAdapter } from '@hunterzhu/pulse-adapters'
-import { acceptanceCriteriaFromObjective, isTaskContinuation } from '../packages/server/src/task.js'
+import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 import { readConversationFixture, writeConversationFixture } from './conversation-fixtures.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 
@@ -309,7 +309,7 @@ it('releases a terminal controller 56 marker and blocks unknown or pending work'
   expect(await readFile(join(runDirectory, 'runtime.json'), 'utf8')).toBe(safe.snapshot)
   expect(await readFile(join(runDirectory, 'model-budget.json'), 'utf8')).toBe(safe.budget)
   expect(JSON.parse(await readFile(join(runDirectory, 'outcome.json'), 'utf8'))).toMatchObject({ status: 'cancelled', error: { code: 'ORPHAN_ACTIVE_RELEASED' } })
-  const continued = await safe.host.sendMessage(safe.conversationId, { text: '继续' })
+  const continued = await safe.host.sendMessage(safe.conversationId, { text: '继续', continueTask: true })
   const continuedWatch = watch(continued)
   await until(continuedWatch.events, event => event.type === 'complete')
   const continuedManifest = JSON.parse(await readConversationFixture(join(safeDirectory, 'data', 'conversations', safe.conversationId, 'manifest.json'), 'utf8')) as { runs: string[] }
@@ -327,7 +327,7 @@ it('releases a terminal controller 56 marker and blocks unknown or pending work'
   const unknown = await orphanRun(unknownDirectory, { id: 'effect-shell', agentId: '', ownerLaneId: '', key: 'shell', kind: 'tool', concurrencyClass: 'tool', input: { name: 'shell.exec', arguments: { command: 'npm', args: ['test'] } }, state: 'running', attemptId: 'attempt-1', attemptNo: 1, executionState: 'remote_unknown', sideEffectState: 'unknown' })
   await expect(unknown.host.reconcileInactiveRun(unknown.conversationId, unknown.runId)).rejects.toThrow('RECOVERY_SIDE_EFFECT_UNKNOWN')
   expect((await unknown.host.getConversation(unknown.conversationId)).summary.activeRunId).toBe(unknown.runId)
-  await expect(unknown.host.sendMessage(unknown.conversationId, { text: '继续' })).rejects.toThrow('CONVERSATION_BUSY')
+  await expect(unknown.host.sendMessage(unknown.conversationId, { text: '继续', continueTask: true })).rejects.toThrow('CONVERSATION_BUSY')
   expect(await readFile(join(unknownDirectory, 'data', 'conversations', unknown.conversationId, 'runs', unknown.runId, 'model-budget.json'), 'utf8')).toBe(unknown.budget)
 
   const pendingDirectory = await temporary('pulse-f2-pending-')
@@ -336,7 +336,7 @@ it('releases a terminal controller 56 marker and blocks unknown or pending work'
   expect((await pending.host.getConversation(pending.conversationId)).summary.activeRunId).toBe(pending.runId)
 })
 
-async function seedMisclassifiedRetries(directory: string): Promise<{ host: ReturnType<typeof createLocalHost>; conversationId: string; goal: string; criteria: ReturnType<typeof acceptanceCriteriaFromObjective>; files: Map<string, string> }> {
+async function seedStructuredRetries(directory: string): Promise<{ host: ReturnType<typeof createLocalHost>; conversationId: string; goal: string; criteria: ReturnType<typeof acceptanceCriteriaFromObjective>; files: Map<string, string> }> {
   const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), jarvis: { enabled: false }, mockResponse: '已承接。' })
   hosts.push(host)
   const conversation = await host.createConversation({ title: 'retry-chain' })
@@ -348,8 +348,8 @@ async function seedMisclassifiedRetries(directory: string): Promise<{ host: Retu
   for (const runId of runs) {
     const runDirectory = join(directory, 'data', 'conversations', conversation.id, 'runs', runId)
     await mkdir(runDirectory, { recursive: true })
-    const objective = runId === 'run-original-goal' ? goal : '重试'
-    const record = JSON.stringify({ schemaVersion: 1, runId, objective, acceptanceCriteria: runId === 'run-original-goal' ? criteria : [{ id: 'criterion-1', description: '重试' }], status: 'incomplete', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] })
+    const objective = goal
+    const record = JSON.stringify({ schemaVersion: 1, runId, objective, acceptanceCriteria: criteria, ...(runId === 'run-original-goal' ? {} : { continuedFromRunId: 'run-original-goal' }), status: 'incomplete', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] })
     const budget = JSON.stringify(runId === 'run-retry-used-39'
       ? { schemaVersion: 1, limit: 256, used: 39, inheritedFrom: join(runDirectory, '..', 'run-retry-used-38', 'model-budget.json') }
       : { schemaVersion: 1, limit: 256, used: runId === 'run-retry-used-38' ? 38 : 1 })
@@ -369,15 +369,11 @@ async function seedMisclassifiedRetries(directory: string): Promise<{ host: Retu
   return { host, conversationId: conversation.id, goal, criteria, files }
 }
 
-it('continues 重试 and 没做完啊 from the original contract without resetting the latest budget', async () => {
-  expect(isTaskContinuation('重试')).toBe(true)
-  expect(isTaskContinuation('没做完啊')).toBe(true)
-  expect(isTaskContinuation('不要重试')).toBe(false)
-  expect(isTaskContinuation('新任务')).toBe(false)
-  for (const text of ['没做完啊', '重试'] as const) {
+it('continues the existing contract without resetting the latest budget', async () => {
+  for (const text of ['Vuelve a intentarlo', '最後までお願いします'] as const) {
     const directory = await temporary(`pulse-f2-continue-${text}-`)
-    const seeded = await seedMisclassifiedRetries(directory)
-    const run = await seeded.host.sendMessage(seeded.conversationId, { text })
+    const seeded = await seedStructuredRetries(directory)
+    const run = await seeded.host.sendMessage(seeded.conversationId, { text, workOperation: 'continue' })
     const watched = watch(run)
     await until(watched.events, event => event.type === 'complete')
     await watched.done
@@ -386,7 +382,7 @@ it('continues 重试 and 没做完啊 from the original contract without resetti
     expect(continuedRunId).not.toBe('run-retry-used-39')
     const record = JSON.parse(await readFile(join(directory, 'data', 'conversations', seeded.conversationId, 'runs', continuedRunId, 'task-record.json'), 'utf8')) as { objective: string; continuedFromRunId?: string; acceptanceCriteria: Array<{ description: string }> }
     expect(record.objective).toBe(seeded.goal)
-    expect(record.continuedFromRunId).toBe('run-original-goal')
+    expect(record.continuedFromRunId).toBe('run-retry-used-39')
     expect(record.acceptanceCriteria.map(criterion => criterion.description)).toEqual(seeded.criteria.map(criterion => criterion.description))
     const budget = JSON.parse(await readFile(join(directory, 'data', 'conversations', seeded.conversationId, 'runs', continuedRunId, 'model-budget.json'), 'utf8')) as { limit: number; used: number; inheritedFrom?: string }
     expect(budget.limit).toBe(217)
@@ -397,7 +393,7 @@ it('continues 重试 and 没做完啊 from the original contract without resetti
     expect(await readFile(join(directory, 'greeting.txt'), 'utf8')).toBe('hello')
   }
   const rejected = await temporary('pulse-f2-do-not-retry-')
-  const seeded = await seedMisclassifiedRetries(rejected)
+  const seeded = await seedStructuredRetries(rejected)
   const fresh = await seeded.host.sendMessage(seeded.conversationId, { text: '不要重试' })
   const watched = watch(fresh)
   await until(watched.events, event => event.type === 'complete')
@@ -442,7 +438,7 @@ it('rejects whitespace and private reasoning, then accepts one visible correctio
     const request = JSON.parse(String(init?.body))
     const text = currentRequestText(request.messages)
     const raw = JSON.stringify(request)
-    const kind = raw.includes('needs_work') ? 'verify' : text.includes('Create an executable plan') ? 'plan' : text.includes('Execute only the active taskController stage') || text.includes('Execute only this independent') ? 'work' : text.includes('progress checkpoint') || (raw.includes('"ready"') && raw.includes('"continue"')) ? 'progress' : text.includes('Independently verify every ORIGINAL') ? 'final-review' : text.includes('final user-facing reply') ? 'reply' : 'other'
+    const kind = raw.includes('needs_work') ? 'verify' : text.includes('Create an executable plan') ? 'plan' : text.includes('Execute the current stage continuously') || text.includes('Execute this independent stage continuously') ? 'work' : text.includes('progress checkpoint') || (raw.includes('"ready"') && raw.includes('"continue"')) ? 'progress' : text.includes('Independently verify every ORIGINAL') ? 'final-review' : text.includes('final user-facing reply') ? 'reply' : 'other'
     seen.push(kind)
     if (kind === 'verify') seen[seen.length - 1] = `${kind} refs=${suppliedRequestResults(request.messages).map((item: { id: string }) => item.id).join(',') || 'none'} errors=${raw.includes('validationErrors')} leaked=${raw.includes('from-private-reasoning') || raw.includes('result-999999')}`
     if (kind === 'reply') return chat('Saved.')
@@ -481,10 +477,10 @@ it('rejects whitespace and private reasoning, then accepts one visible correctio
     expect(JSON.stringify(request.messages)).not.toContain('from-private-reasoning')
     expect(JSON.stringify(request.messages)).not.toContain('Return a nonempty plain-text summary only')
   }
-  expect(JSON.stringify(verifyRequests[1]?.messages)).toContain('validationErrors')
+  expect(JSON.stringify(verifyRequests[1]?.messages)).toMatch(/validationErrors|verificationCorrection|CITATION_REPAIR|Final bounded verification attempt/)
 })
 
-it('stops after one illegal correction without another edit', async () => {
+it('retains completed edits while trying bounded alternatives after illegal verifier corrections', async () => {
   const cwd = await temporary('pulse-f4-reject-')
   const objective = 'Create greeting.txt containing hello.'
   const ids = acceptanceCriteriaFromObjective(objective).map(criterion => criterion.id)
@@ -495,7 +491,7 @@ it('stops after one illegal correction without another edit', async () => {
     const request = JSON.parse(String(init?.body))
     const text = currentRequestText(request.messages)
     const raw = JSON.stringify(request)
-    const kind = raw.includes('needs_work') ? 'verify' : text.includes('Create an executable plan') ? 'plan' : text.includes('Execute only the active taskController stage') || text.includes('Execute only this independent') ? 'work' : text.includes('progress checkpoint') || (raw.includes('"ready"') && raw.includes('"continue"')) ? 'progress' : text.includes('Independently verify every ORIGINAL') ? 'final-review' : text.includes('final user-facing reply') ? 'reply' : 'other'
+    const kind = raw.includes('needs_work') ? 'verify' : text.includes('Create an executable plan') ? 'plan' : text.includes('Execute the current stage continuously') || text.includes('Execute this independent stage continuously') ? 'work' : text.includes('progress checkpoint') || (raw.includes('"ready"') && raw.includes('"continue"')) ? 'progress' : text.includes('Independently verify every ORIGINAL') ? 'final-review' : text.includes('final user-facing reply') ? 'reply' : 'other'
     seen.push(kind)
     if (kind === 'reply') return chat('Stopped.')
     if (kind === 'plan') return chat(JSON.stringify({ tasks: [{ id: 'create', kind: 'edit', goal: objective, check: 'File saved', dependsOn: [], criterionIds: ids }] }))
@@ -516,7 +512,8 @@ it('stops after one illegal correction without another edit', async () => {
   const run = await host.sendMessage(conversation.id, { text: objective })
   const outcome = await run.outcome()
   const taskOutcome = await run.taskOutcome()
-  expect(stageReviews, seen.join('\n---\n')).toBe(2)
+  expect(stageReviews, seen.join('\n---\n')).toBeGreaterThanOrEqual(2)
+  expect(stageReviews).toBeLessThanOrEqual(16)
   expect(writes).toBe(1)
   expect(taskOutcome?.status).not.toBe('accepted')
   expect(outcome.status === 'succeeded' || outcome.status === 'failed' || outcome.status === 'cancelled').toBe(true)

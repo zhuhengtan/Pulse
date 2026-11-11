@@ -1,7 +1,9 @@
-import { ChatInteractionContent } from './ChatInteraction.js'
+import { QualityReviewSelect } from './QualityReviewSelect.js'
+import { ChatInteractionContent, ChatWorkPrompt } from './ChatInteraction.js'
+import { PendingWorkSummary, interactionElementId, interactionKey } from './PendingWorkSummary.js'
 import { readChatPreReply } from './chat-preferences.js'
 import { presentRun, shellProcessPending, type RunCompletion } from '@hunterzhu/pulse-server/run-presentation'
-import { compactRunLabel, CompactRunStatus, ConnectionMark, missingCompleteStatus } from './run-status.js'
+import { admissionLabel, snapshotAdmission, compactRunLabel, CompactRunStatus, ConnectionMark, missingCompleteStatus } from './run-status.js'
 import { messagePayload, retryMessagePayload } from './message-payload.js'
 import { chatReferenceFromQuery, chatModePath } from './chat-reference.js'
 import type { RunRecoveryPreflight } from '@hunterzhu/pulse-server/protocol'
@@ -61,11 +63,11 @@ const PreviewDock = lazy(() => import('./PreviewDock.js').then(module => ({ defa
 const RunProcessPanel = lazy(() => import('./RunProcessPanel.js').then(module => ({ default: module.RunProcessPanel })))
 
 type RunStatus =
-  | { kind: 'status'; label: string }
+  | { kind: 'status'; label: string; admission?: WebRunSnapshot['admission'] }
   | { kind: 'review'; label: string }
   | { kind: 'tool'; activityId: string; label: string; state: string; processPending?: boolean }
   | PendingInteraction
-  | { kind: 'complete'; label: string; outcome: 'succeeded' | 'failed' | 'cancelled' | 'interrupted' }
+  | { kind: 'complete'; runId: string; label: string; outcome: 'succeeded' | 'failed' | 'cancelled' | 'interrupted' }
 
 const historyStorageKey = 'pulse-web-conversation'
 
@@ -80,8 +82,34 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
   } }), [baseTransport])
   const dialogs = usePulseDialogs()
   const { route, location, go, patchQuery, openPage, backToSource, backToSettings } = usePulseNavigation()
+  const [readVisibility, setReadVisibility] = useState(0)
+  useEffect(() => { const refresh = () => setReadVisibility(value => value + 1); window.addEventListener('focus', refresh); document.addEventListener('visibilitychange', refresh); return () => { window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh) } }, [])
   const notificationId = new URLSearchParams(location.search).get('notification')
   const notificationTarget = notificationId && !notificationId.startsWith('complete:') ? notificationId : undefined
+  // Native group IDs restart per run, so a target is run + group, resolved from the current URL only. A revision must be
+  // verified against the notice list (found, same group, same run when given); while that is pending or when it fails or
+  // expired, no other question may open. A bare group is a fallback only for links without any revision/run identity.
+  const noticeParams = new URLSearchParams(location.search)
+  const noticeRevision = noticeParams.get('noticeRevision') ?? undefined, noticeRunParam = noticeParams.get('noticeRun') ?? undefined
+  // The native revision hashes only the group, so identical waits of different runs share it: the run is part of the identity.
+  const noticeLookupKey = notificationTarget && noticeRevision ? `${notificationTarget}\0${noticeRevision}\0${noticeRunParam ?? ''}` : undefined
+  const [noticeLookup, setNoticeLookup] = useState<{ key: string; runs: string[] }>()
+  useEffect(() => {
+    if (!noticeLookupKey || !notificationTarget || !noticeRevision) return
+    let cancelled = false
+    void transport.request('/api/notifications').then(async response => {
+      const notices = response.ok ? await response.json() as Array<{ revision?: string; runId: string; groupId?: string; id: string }> : []
+      const runs = [...new Set(notices.filter(item => item.revision === noticeRevision && (item.groupId ?? item.id) === notificationTarget && (!noticeRunParam || item.runId === noticeRunParam)).map(item => item.runId))]
+      if (!cancelled) setNoticeLookup({ key: noticeLookupKey, runs })
+    }).catch(() => { if (!cancelled) setNoticeLookup({ key: noticeLookupKey, runs: [] }) })
+    return () => { cancelled = true }
+  }, [transport, noticeLookupKey])
+  const lookedUp = noticeLookup?.key === noticeLookupKey ? noticeLookup : undefined
+  // Exactly one matching run resolves; none (expired) or several (ambiguous) open nothing.
+  const targetState: 'bare' | 'pending' | 'invalid' | 'run' = !notificationTarget ? 'bare'
+    : noticeRevision ? (!lookedUp ? 'pending' : lookedUp.runs.length === 1 ? 'run' : 'invalid')
+    : noticeRunParam ? 'run' : 'bare'
+  const noticeRun = targetState !== 'run' ? undefined : noticeRevision ? lookedUp?.runs[0] : noticeRunParam
   const locationRef = useRef(location); locationRef.current = location
   const surfaceMode = route.page === 'work' ? 'work' : 'chat'
   const [settingsDirty, setSettingsDirty] = useState(false)
@@ -280,9 +308,11 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
   const scrollView = useRef<{ key: string; element: HTMLElement | null }>({ key: '', element: null })
   const [submitting, setSubmitting] = useState(false)
   const [recoveryRun, setRecoveryRun] = useState<RunRecovery>()
+  const [interruptedRunIds, setInterruptedRunIds] = useState<Record<string, string | undefined>>({})
   const [runActions, setRunActions] = useState<Record<string, 'resume' | 'end'>>({})
   const runActionLocks = useRef(new Map<string, symbol>())
   const [toast, setToast] = useState('')
+  const [pendingFocus, setPendingFocus] = useState('')
   const eventClose = useRef<(() => void) | undefined>(undefined)
   const streamRunRef = useRef<string | undefined>(undefined)
   const assistantIdRef = useRef<string | undefined>(undefined)
@@ -340,6 +370,7 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
     historyAbort.current?.abort(); const controller = new AbortController(); historyAbort.current = controller
     setMenuId(undefined); setLoadError(''); setStatus([]); setReviewNote('')
     setRunning(false); setStopping(false); setStopError(''); stopLock.current = false; setRecoveryRun(undefined)
+    setInterruptedRunIds(current => ({ ...current, [conversation.id]: undefined }))
     if (saveSelection) window.localStorage.setItem(historyStorageKey, conversation.id)
     try {
       const page = transport.messages ? await transport.messages(conversation.id, undefined, controller.signal) : { before: undefined, items: await apiJson<MessageList>(transport, `/api/web/conversations/${encodeURIComponent(conversation.id)}/messages`, { signal: controller.signal }) }
@@ -357,6 +388,7 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
       }
       if (requestId.current !== id || selectedIdRef.current !== conversation.id) return
       const restored = snapshotStatus(snapshot)
+      setInterruptedRunIds(current => ({ ...current, [conversation.id]: snapshot.state === 'interrupted' ? conversation.activeRunId : undefined }))
       setStatus(restored)
       setReviewNote(snapshot.reviewNote ?? '')
       if (snapshot.state === 'interrupted') setRecoveryRun({ conversationId: conversation.id, runId: conversation.activeRunId, state: 'interrupted' })
@@ -384,7 +416,7 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
       const { activeRunId: _storedActiveRunId, ...assistantSummary } = view.conversation
       setAssistantConversation({ ...assistantSummary, ...(active ? { activeRunId: active.runId } : {}), kind: 'assistant' })
       setAssistantReceipts(view.receipts)
-      setWorkInteractions(view.workInteractions.map(interaction => ({ kind: 'interaction', runId: interaction.runId, conversationId: interaction.conversationId, conversationTitle: interaction.title, ...(interaction.projectId ? { projectId: interaction.projectId } : {}), approvalPolicy: interaction.approvalPolicy, groupId: interaction.groupId, interactionKind: interaction.kind, items: interaction.items })))
+      setWorkInteractions(view.workInteractions.map(interaction => ({ kind: 'interaction', runId: interaction.runId, conversationId: interaction.conversationId, conversationTitle: interaction.title, ...(interaction.projectId ? { projectId: interaction.projectId } : {}), approvalPolicy: interaction.approvalPolicy, groupId: interaction.groupId, requestedAt: interaction.requestedAt, action: interaction.action, interactionKind: interaction.kind, items: interaction.items })))
       setOlderCursor(view.before)
       selectedIdRef.current = view.conversation.id
       setSelectedId(view.conversation.id)
@@ -621,6 +653,7 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
   }, [documentKey, routeRevision, loading, selectedId, messages, status, traces, artifactIndex.artifacts])
 
   const startRun = useCallback((runId: string, conversationId: string, after = 0) => {
+    setInterruptedRunIds(current => ({ ...current, [conversationId]: undefined }))
     eventClose.current?.()
     streamRunRef.current = runId
     if (selectedIdRef.current === conversationId) { setRunning(true); setRecoveryRun(undefined) }
@@ -629,15 +662,37 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
     let closed = false
     let unsubscribe: (() => void) | undefined
     eventClose.current = () => { closed = true; unsubscribe?.() }
+    const isCurrent = () => !closed && streamRunRef.current === runId && selectedIdRef.current === conversationId
+    const finishRun = () => {
+      eventClose.current?.(); eventClose.current = undefined
+      if (streamRunRef.current === runId) streamRunRef.current = undefined
+      setReviewNote('')
+      setConversations(items => items.map(item => item.id === conversationId ? withoutActiveRun(item) : item))
+      if (assistantIdRef.current === conversationId) {
+        void apiJson<{ conversation: WebConversation; messages: MessageList; receipts: WebAssistantMessageReceipt[]; workInteractions: WebAssistantWorkInteraction[] }>(transport, '/api/assistant').then(view => {
+          setAssistantReceipts(view.receipts)
+          setWorkInteractions(view.workInteractions.map(interaction => ({ kind: 'interaction', runId: interaction.runId, conversationId: interaction.conversationId, conversationTitle: interaction.title, ...(interaction.projectId ? { projectId: interaction.projectId } : {}), approvalPolicy: interaction.approvalPolicy, groupId: interaction.groupId, requestedAt: interaction.requestedAt, action: interaction.action, interactionKind: interaction.kind, items: interaction.items })))
+          if (selectedIdRef.current === conversationId) setMessages(mergeMessages(conversationId, view.messages.filter(message => message.role !== 'system')))
+        }).catch(() => undefined)
+      } else void readLatestMessages(transport, conversationId).then(result => {
+        if (selectedIdRef.current === conversationId) setMessages(mergeMessages(conversationId, result.filter(message => message.role !== 'system')))
+      }).catch(() => undefined)
+      if (selectedIdRef.current === conversationId) { setRunning(false); setStopping(false); setStopError(''); stopLock.current = false }
+    }
     const onEvent = (event: WebRunEvent) => {
+      // A finished/replaced subscription can still deliver buffered IPC or SSE
+      // callbacks. They must not overwrite the reply shown after an approval.
+      if (!isCurrent()) return
       if (event.type === 'resync' && event.runId === runId && selectedIdRef.current === conversationId) {
         lastSeq = event.seq
         if (event.data.laneState) queueTrace(runId, { type: 'lanes', runId, seq: event.seq, data: event.data.laneState })
         if (event.data.complete) queueTrace(runId, event.data.complete)
         setStatus(snapshotStatus(event.data)); setRunning(event.data.state === 'running')
+        setInterruptedRunIds(current => ({ ...current, [conversationId]: event.data.state === 'interrupted' ? runId : undefined }))
         setReviewNote(event.data.reviewNote ?? '')
         if (event.data.state === 'interrupted') setRecoveryRun({ conversationId, runId, state: 'interrupted' })
         if (conversationId !== assistantIdRef.current) void readLatestMessages(transport, conversationId).then(items => { if (selectedIdRef.current === conversationId) setMessages(mergeMessages(conversationId, items)) }).catch(() => undefined)
+        if (conversationId === assistantIdRef.current && event.data.state !== 'running') finishRun()
         return
       }
       if ((event.conversationId && event.conversationId !== conversationId) || event.runId !== runId || event.seq <= lastSeq) return
@@ -647,59 +702,46 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
       // The state snapshot already rendered these. Replaying them after a trace
       // rewind would put answered approvals and stale tool rows back on screen.
       if (event.seq <= after && (event.type === 'status' || event.type === 'tool' || event.type === 'lanes' || event.type === 'waiting' || event.type === 'interactions' || event.type === 'text')) return
-      if (event.type === 'status') setStatus(current => replaceStatus(current, { kind: 'status', label: event.data.label ?? (event.data.kind === 'context' ? '正在整理上下文' : '正在处理') }))
+      if (event.type === 'status') setStatus(current => {
+        const admission = event.data.admission ?? current.find(item => item.kind === 'status')?.admission
+        return replaceStatus(current, { kind: 'status', admission, label: admissionLabel(admission) ?? event.data.label ?? (event.data.kind === 'context' ? '正在整理上下文' : '正在处理') })
+      })
       if (event.type === 'tool') setStatus(current => replaceStatus(current, toolRunStatus(event.data)))
       if (event.type === 'waiting') setStatus(current => replaceStatus(current, { kind: 'interaction', runId, groupId: `effect:${event.data.effectId}`, interactionKind: event.data.input.kind === 'ask' ? 'ask' : 'approval', items: [{ effectId: event.data.effectId, input: event.data.input }] }))
       if (event.type === 'interactions') {
         setReviewNote(event.data.reviewNote ?? '')
         setStatus(current => {
           const kept = current.filter(item => item.kind !== 'interaction')
-          const groups = event.data.interactions.map(group => ({ kind: 'interaction' as const, runId, groupId: group.groupId, interactionKind: group.kind, items: group.items }))
+          const groups = event.data.interactions.map(group => ({ kind: 'interaction' as const, runId, groupId: group.groupId, requestedAt: group.requestedAt, interactionKind: group.kind, items: group.items }))
           return [...kept, ...groups]
         })
       }
       if (event.type === 'chat_message') { rememberMessage(conversationId, event.data.message); setMessages(current => [...current.filter(item => item.id !== event.data.message.id), event.data.message]) }
       if (event.type === 'input_response') {
-        const message: WebMessage = { id: event.data.messageId, role: 'assistant', text: event.data.text, runId, createdAt: new Date().toISOString() }
-        rememberMessage(conversationId, message)
-        setMessages(current => [...current.filter(item => item.id !== message.id), message])
+        const { messageId, text, replyToId, steeringState, createdAt } = event.data
+        const message: WebMessage = { id: messageId, role: 'assistant', text, runId, createdAt: createdAt ?? new Date().toISOString(), ...(replyToId ? { replyToId } : {}), ...(steeringState ? { steeringState } : {}) }
+        localMessages.current.set(conversationId, updateInputResponse(localMessages.current.get(conversationId) ?? [], message))
+        setMessages(current => updateInputResponse(current, message))
       }
       if (event.type === 'text' && conversationId !== assistantIdRef.current) setMessages(current => replaceRunMessage(current, runId, event.data))
       if (event.type === 'complete') {
         const outcome = event.data.status
         const label = presentRun({ state: outcome, completion: event.data }).label
         setReviewNote(''); setRunning(false)
-        setStatus(current => replaceStatus(current.filter(item => item.kind !== 'interaction'), { kind: 'complete', label, outcome }))
+        setStatus(current => replaceStatus(current.filter(item => item.kind !== 'interaction'), { kind: 'complete', runId, label, outcome }))
       }
-      if (event.type === 'error') setStatus(current => replaceStatus(current, { kind: 'complete', label: event.data.message, outcome: 'failed' }))
-      if (event.type === 'run_finished') {
-        eventClose.current?.(); eventClose.current = undefined
-        if (streamRunRef.current === runId) streamRunRef.current = undefined
-        setReviewNote('')
-        setConversations(items => items.map(item => item.id === conversationId ? withoutActiveRun(item) : item))
-        if (assistantIdRef.current === conversationId) {
-          void apiJson<{ conversation: WebConversation; messages: MessageList; receipts: WebAssistantMessageReceipt[]; workInteractions: WebAssistantWorkInteraction[] }>(transport, '/api/assistant').then(view => {
-            setAssistantReceipts(view.receipts)
-            setWorkInteractions(view.workInteractions.map(interaction => ({ kind: 'interaction', runId: interaction.runId, conversationId: interaction.conversationId, conversationTitle: interaction.title, ...(interaction.projectId ? { projectId: interaction.projectId } : {}), approvalPolicy: interaction.approvalPolicy, groupId: interaction.groupId, interactionKind: interaction.kind, items: interaction.items })))
-            if (selectedIdRef.current === conversationId) setMessages(mergeMessages(conversationId, view.messages.filter(message => message.role !== 'system')))
-          }).catch(() => undefined)
-        } else void readLatestMessages(transport, conversationId).then(result => {
-          if (selectedIdRef.current === conversationId) setMessages(mergeMessages(conversationId, result.filter(message => message.role !== 'system')))
-        }).catch(() => undefined)
-        if (selectedIdRef.current === conversationId) { setRunning(false); setStopping(false); setStopError(''); stopLock.current = false }
-      }
+      if (event.type === 'error') setStatus(current => replaceStatus(current, { kind: 'complete', runId, label: event.data.message, outcome: 'failed' }))
+      if (event.type === 'run_finished') finishRun()
     }
     const subscribe = (cursor: number) => {
       if (closed || selectedIdRef.current !== conversationId) return
       lastSeq = cursor
       const onError = () => {
+        if (!isCurrent()) return
         setToast('连接中断，正在尝试恢复…')
         window.setTimeout(() => setToast(''), 3000)
       }
-      unsubscribe = conversationId === assistantIdRef.current && transport.subscribeChat ? transport.subscribeChat(runId, cursor, onEvent, onError) : transport.subscribe(`/api/runs/${encodeURIComponent(runId)}/events?after=${cursor}`, onEvent, () => {
-        setToast('连接中断，正在尝试恢复…')
-        window.setTimeout(() => setToast(''), 3000)
-      })
+      unsubscribe = conversationId === assistantIdRef.current && transport.subscribeChat ? transport.subscribeChat(runId, cursor, onEvent, onError) : transport.subscribe(`/api/runs/${encodeURIComponent(runId)}/events?after=${cursor}`, onEvent, onError)
       if (closed) unsubscribe()
     }
     if (conversationId === assistantIdRef.current) subscribe(after)
@@ -759,7 +801,7 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
         const view = await apiJson<{ conversation: WebConversation; messages: MessageList; receipts: WebAssistantMessageReceipt[]; workInteractions: WebAssistantWorkInteraction[] }>(transport, '/api/assistant', { signal: controller.signal })
         if (stopped || routeRef.current.page !== 'chat') return
         setAssistantReceipts(view.receipts)
-        setWorkInteractions(view.workInteractions.map(interaction => ({ kind: 'interaction', runId: interaction.runId, conversationId: interaction.conversationId, conversationTitle: interaction.title, ...(interaction.projectId ? { projectId: interaction.projectId } : {}), approvalPolicy: interaction.approvalPolicy, groupId: interaction.groupId, interactionKind: interaction.kind, items: interaction.items })))
+        setWorkInteractions(view.workInteractions.map(interaction => ({ kind: 'interaction', runId: interaction.runId, conversationId: interaction.conversationId, conversationTitle: interaction.title, ...(interaction.projectId ? { projectId: interaction.projectId } : {}), approvalPolicy: interaction.approvalPolicy, groupId: interaction.groupId, requestedAt: interaction.requestedAt, action: interaction.action, interactionKind: interaction.kind, items: interaction.items })))
         const active = [...view.receipts].reverse().find(item => item.state === 'replying')
         const { activeRunId: _storedActiveRunId, ...assistantSummary } = view.conversation
         setAssistantConversation({ ...assistantSummary, ...(active ? { activeRunId: active.runId } : {}), kind: 'assistant' })
@@ -786,7 +828,14 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
     return () => { stopped = true; controller.abort(); off?.(); clearTimeout(timer); if (poll !== undefined) window.clearInterval(poll) }
   }, [paired, route.page, startRun, transport])
 
-  const messageQueue = useMessageQueue(transport, queueScope, paired && serviceConnected, (queue, entry, runId) => {
+  const refreshWorkMessages = (conversationId: string) => {
+    if (selectedIdRef.current !== conversationId) return
+    void readLatestMessages(transport, conversationId).then(items => {
+      if (selectedIdRef.current === conversationId) setMessages(mergeMessages(conversationId, items))
+    }).catch(() => undefined)
+  }
+  const messageQueue = useMessageQueue(transport, queueScope, paired && serviceConnected, (queue, entry, runId, replyOnly) => {
+    if (replyOnly) { refreshWorkMessages(queue.conversationId); return }
     const message: WebMessage = { text: entry.payload.text, ...(entry.payload.attachments?.length ? { attachments: entry.payload.attachments } : {}), ...(entry.payload.skills?.length ? { skills: entry.payload.skills } : {}), ...(entry.payload.richContent ? { richContent: entry.payload.richContent } : {}), ...(entry.payload.mentionedFiles?.length ? { mentionedFiles: entry.payload.mentionedFiles } : {}), id: `msg-${entry.requestId}`, requestId: entry.requestId, runId, role: 'user', deliveryState: 'replying', createdAt: entry.createdAt }
     rememberMessage(queue.conversationId, message)
     setConversations(items => items.map(item => item.id === queue.conversationId ? { ...item, activeRunId: runId } : item))
@@ -824,7 +873,8 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
     const mentionedFiles = payload && 'text' in payload ? payload.mentionedFiles : undefined
     const richContent = payload && 'text' in payload ? payload.richContent : undefined
     const assistantContext = surfaceMode === 'chat' ? chatReferenceFromQuery(route.query) : undefined
-    const outgoing = messagePayload({ text, attachments, skills, mentionedFiles, richContent, assistantContext })
+    const qualityReviewEnabled = surfaceMode === 'work' ? payload && 'text' in payload ? payload.qualityReviewEnabled : drafts[selectedId ?? 'new']?.qualityReviewEnabled : undefined
+    const outgoing = messagePayload({ text, attachments, skills, mentionedFiles, richContent, assistantContext, qualityReviewEnabled })
     const hasAttachments = Boolean(attachments?.length)
 
     const sendEpoch = routeEpoch.current
@@ -908,7 +958,7 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
     submittedDelivery.current.set(requestId, behavior)
     const pendingId = `pending-${requestId}`
     if (!(payload && 'text' in payload && payload.requestId)) rememberSubmittedDraft(requestId, initialSelection ?? 'new')
-    const optimisticMessage: WebMessage = { id: pendingId, requestId, deliveryState: 'queued', role: 'user', text, createdAt: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}), ...(skills?.length ? { skills } : {}), ...(mentionedFiles?.length ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}) }
+    const optimisticMessage: WebMessage = { id: pendingId, requestId, deliveryState: 'queued', role: 'user', text, ...(qualityReviewEnabled === undefined ? {} : { qualityReviewEnabled }), createdAt: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}), ...(skills?.length ? { skills } : {}), ...(mentionedFiles?.length ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}) }
     rememberMessage(initialSelection ?? 'new', optimisticMessage)
     setMessages(current => [...current.filter(message => message.id !== pendingId), optimisticMessage])
     try {
@@ -933,6 +983,11 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
           ...outgoing, requestId, delivery: behavior === 'immediate' ? 'immediate' : 'whenIdle',
         }
       )
+      if (response.replyOnly) {
+        refreshWorkMessages(conversationId)
+        clearSubmittedDraft(requestId)
+        return true
+      }
       patchLocalMessage(conversationId, pendingId, { deliveryState: 'replying', runId: response.runId })
       if (selectedIdRef.current === conversationId) {
         setMessages(current => current.map(message => message.id === pendingId ? { ...message, deliveryState: 'replying', runId: response.runId } : message))
@@ -977,6 +1032,11 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
       const original = await retryMessagePayload(transport, conversationId, message)
       if (selectedIdRef.current !== conversationId || routeEpoch.current !== retryEpoch) return
       const response = await submitWorkMessage(transport, conversationId, { ...original, requestId: message.requestId, delivery: submittedDelivery.current.get(message.requestId) === 'immediate' ? 'immediate' : 'whenIdle' })
+      if (response.replyOnly) {
+        refreshWorkMessages(conversationId)
+        clearSubmittedDraft(message.requestId)
+        return
+      }
       patchLocalMessage(conversationId, message.id, { deliveryState: 'replying', runId: response.runId })
       if (selectedIdRef.current === conversationId) { setMessages(items => items.map(item => item.id === message.id ? { ...item, deliveryState: 'replying', runId: response.runId } : item)); setLoadError(''); startRun(response.runId, conversationId) }
       setConversations(items => items.map(item => item.id === conversationId ? { ...item, activeRunId: response.runId } : item))
@@ -1158,8 +1218,26 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
     finally { pinPending.current.delete(conversation.id) }
   }
 
+  const conversationBusy = (conversation: WebConversation) => {
+    if (!conversation.activeRunId) return false
+    if (runActions[`${conversation.id}:${conversation.activeRunId}`]) return true
+    if (conversation.id !== selectedId) return false
+    return running || submitting || interruptedRunIds[conversation.id] !== conversation.activeRunId
+  }
+  const confirmConversationIdle = async (conversation: WebConversation) => {
+    if (!conversation.activeRunId) return true
+    if (conversationBusy(conversation)) return false
+    if (interruptedRunIds[conversation.id] === conversation.activeRunId) return true
+    try {
+      const snapshot = await apiJson<{ state?: string }>(transport, `/api/runs/${encodeURIComponent(conversation.activeRunId)}/state`)
+      if (snapshot.state !== 'interrupted') return false
+      const runId = conversation.activeRunId
+      setInterruptedRunIds(current => ({ ...current, [conversation.id]: runId }))
+      return true
+    } catch { return false }
+  }
   const archiveConversation = async (conversation: WebConversation) => {
-    if (conversation.activeRunId) { setToast('运行中或待恢复的对话不能归档。'); return }
+    if (!await confirmConversationIdle(conversation)) { setToast('任务仍在运行或状态待确认，暂时不能归档。'); return }
     try {
       await apiJson(transport, `/api/conversations/${encodeURIComponent(conversation.id)}`, jsonRequest('PATCH', { archived: true }))
       const remaining = conversations.filter(item => item.id !== conversation.id)
@@ -1169,7 +1247,7 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
         if (remaining[0]) await openConversation(remaining[0])
         else createConversation()
       }
-    } catch (error) { setToast(error instanceof ApiError && error.status === 409 ? '对话有待恢复任务，不能归档。' : '归档失败，请重试。') }
+    } catch (error) { setToast(error instanceof ApiError && error.status === 409 ? '任务仍在运行，暂时不能归档。' : '归档失败，请重试。') }
   }
 
   const refreshProjects = async () => {
@@ -1233,7 +1311,7 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
   }
 
   const deleteConversation = async (conversation: WebConversation) => {
-    if (conversation.activeRunId) { setToast('运行中的对话不能删除。'); return }
+    if (!await confirmConversationIdle(conversation)) { setToast('任务仍在运行或状态待确认，暂时不能删除。'); return }
     if (!await dialogs.confirm(`删除“${conversation.title}”？此操作无法撤销。`)) return
     try {
       await apiJson(transport, `/api/conversations/${encodeURIComponent(conversation.id)}`, { method: 'DELETE' })
@@ -1269,10 +1347,52 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
   const interactionCandidates = [
     ...(surfaceMode === 'chat' ? workInteractions : []),
     ...[...status].reverse().filter((item): item is Extract<RunStatus, { kind: 'interaction' }> => item.kind === 'interaction'),
-  ].filter(item => item.items.length > 0)
+  ].filter((item, index, items) => item.items.length > 0 && items.findIndex(other => interactionKey(other) === interactionKey(item)) === index)
+  // A bare group (no run, no resolvable revision) opens only when exactly one pending run owns it; an ambiguous or unresolved target opens nothing.
+  const bareGroupUnique = new Set(interactionCandidates.filter(item => item.groupId === notificationTarget).map(item => item.runId)).size <= 1
+  const targetsInteraction = (runId: string, groupId: string) => groupId === notificationTarget && (targetState === 'run' ? runId === noticeRun : targetState === 'bare' && bareGroupUnique)
+  // An explicit notification target shows only its own actionable question (approvals stay listed); without one all pending items stay visible.
+  // The global overview keeps every pending item; only the cards shown in the thread follow an explicit notification target.
+  const pendingOverview = [...interactionCandidates].filter(item => !item.conversationId || item.conversationId === selected?.id || workInteractions.some(work => interactionKey(work) === interactionKey(item))).sort((a, b) => Number(interactionKey(a) === pendingFocus) - Number(interactionKey(b) === pendingFocus))
+  const chatInteractions = pendingOverview.filter(item => !notificationTarget || item.interactionKind !== 'ask' || targetsInteraction(item.runId, item.groupId))
+  const locateInteraction = (item: PendingInteraction) => {
+    followBottom.current = true
+    // An explicit user choice replaces the notification target (run + group, no stale revision) so the chosen question is the one shown and answered.
+    if (notificationTarget && item.interactionKind === 'ask') patchQuery({ notification: item.groupId, noticeRun: item.runId, noticeRevision: undefined }, true)
+    setPendingFocus(interactionKey(item))
+    window.requestAnimationFrame(() => {
+      const target = document.getElementById(interactionElementId(item))
+      target?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+      target?.focus({ preventScroll: true })
+    })
+  }
   const activeInteraction = notificationTarget
-    ? interactionCandidates.find(item => item.groupId === notificationTarget)
+    ? interactionCandidates.find(item => targetsInteraction(item.runId, item.groupId))
     : interactionCandidates[0]
+  useEffect(() => {
+    if (loading || loadError || !selectedId || !['chat', 'work'].includes(route.page) || document.visibilityState !== 'visible' || !document.hasFocus()) return
+    let cancelled = false
+    void (async () => {
+      const response = await transport.request('/api/notifications')
+      if (!response.ok || cancelled) return
+      const notices = await response.json() as Array<{ id: string; revision: string; readAt?: number; conversationId: string; runId: string; groupId?: string; kind: string }>
+      const requestedRevision = new URLSearchParams(location.search).get('noticeRevision')
+      let displayedInteraction = false
+      if (activeInteraction) {
+        const state = await transport.request(`/api/runs/${encodeURIComponent(activeInteraction.runId)}/state`)
+        if (state.ok) {
+          const snapshot = await state.json()
+          displayedInteraction = snapshot.interactions?.some((group: { groupId: string; kind: string; items: unknown[] }) => group.groupId === activeInteraction.groupId && group.kind === activeInteraction.interactionKind && JSON.stringify(group.items) === JSON.stringify(activeInteraction.items)) ?? false
+        }
+      }
+      const targets = notices.filter(item => !item.readAt && (item.conversationId === selectedId || item.kind !== 'complete' && activeInteraction?.conversationId === item.conversationId && activeInteraction?.runId === item.runId) &&
+        (!notificationId || (item.groupId ?? item.id) === notificationId && (!requestedRevision || requestedRevision === item.revision)) &&
+        (item.kind === 'complete' ? messages.some(message => message.runId === item.runId && message.role === 'assistant' && Boolean(message.text)) : displayedInteraction && activeInteraction?.runId === item.runId && activeInteraction.groupId === item.groupId))
+        .map(({ id, revision }) => ({ id, revision }))
+      if (!cancelled && targets.length) await transport.request('/api/notifications/read', { method: 'POST', body: JSON.stringify({ targets }) })
+    })().catch(() => undefined)
+    return () => { cancelled = true }
+  }, [transport, selectedId, loading, loadError, messages, status, workInteractions, location.search, route.page, readVisibility])
   const visibleConversations = useMemo(() => conversations
     .filter(item => `${item.title} ${item.cwd} ${projects.find(project => project.id === item.projectId)?.name ?? ''}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
     .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || (sidebarSort === 'created' ? b.createdAt.localeCompare(a.createdAt) : b.updatedAt.localeCompare(a.updatedAt))), [conversations, projects, query, sidebarSort])
@@ -1293,8 +1413,8 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
           ...orderedProjects.filter(item => item.id !== conversation.projectId).map(item => ({ key: item.id, label: item.name, disabled: !item.available, onClick: () => void moveConversation(conversation, item) })),
         ] },
         { type: 'divider' },
-        { key: 'archive', icon: <Icon name="archive" size={15}/>, label: '归档', disabled: Boolean(conversation.activeRunId), onClick: () => void archiveConversation(conversation) },
-        { key: 'delete', icon: <Icon name="close" size={15}/>, label: '删除', danger: true, disabled: Boolean(conversation.activeRunId), onClick: () => void deleteConversation(conversation) },
+        { key: 'archive', icon: <Icon name="archive" size={15}/>, label: '归档', disabled: conversationBusy(conversation), onClick: () => void archiveConversation(conversation) },
+        { key: 'delete', icon: <Icon name="close" size={15}/>, label: '删除', danger: true, disabled: conversationBusy(conversation), onClick: () => void deleteConversation(conversation) },
       ], onClick: () => setMenuId(undefined),
     }
     return <Dropdown key={conversation.id} classNames={{ root: 'sidebar-menu' }} destroyOnHidden trigger={['click', 'contextMenu']} open={menuId === conversation.id} onOpenChange={open => setMenuId(open ? conversation.id : undefined)} menu={menu}>
@@ -1305,7 +1425,7 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
           </Popover>
           <div className="history-row-actions">
             <PulseButton className={`history-quick-action ${conversation.pinned ? 'is-pinned' : ''}`} aria-pressed={Boolean(conversation.pinned)} aria-label={`${conversation.pinned ? '取消置顶' : '置顶'}对话：${conversation.title}`} onClick={event => { event.stopPropagation(); void togglePinned(conversation) }}><Icon name="pin" size={14}/></PulseButton>
-            <PulseButton className="history-quick-action" aria-label={`归档对话：${conversation.title}`} disabled={Boolean(conversation.activeRunId)} onClick={event => { event.stopPropagation(); void archiveConversation(conversation) }}><Icon name="archive" size={14}/></PulseButton>
+            <PulseButton className="history-quick-action" aria-label={`归档对话：${conversation.title}`} disabled={conversationBusy(conversation)} onClick={event => { event.stopPropagation(); void archiveConversation(conversation) }}><Icon name="archive" size={14}/></PulseButton>
             <PulseButton className="row-menu-button" aria-label={`对话操作：${conversation.title}`} aria-expanded={menuId === conversation.id}><Icon name="more" size={16}/></PulseButton>
           </div>
         </>
@@ -1411,22 +1531,31 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
   if (route.page === 'missing') return <main className="empty"><h1>页面不存在</h1><PulseButton onClick={() => go('/chat', true)}>返回聊天</PulseButton></main>
 
   const activeRunId = selected?.activeRunId
-  const latestProcessRunId = activeRunId ?? [...messages].reverse().find(message => message.runId)?.runId
+  const explanationRuns = new Set(messages.filter(message => message.id.startsWith('msg-answer-')).map(message => message.runId))
+  const latestProcessRunId = activeRunId ?? [...messages].reverse().find(message => message.runId && !explanationRuns.has(message.runId))?.runId
   const completeItem = [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'complete' }> => item.kind === 'complete')
+  // Work callbacks and old snapshots share the event transport with chat, but
+  // only the latest user reply's own unresolved receipt can show chat feedback.
+  const latestChatReceipt = assistantReceipts.at(-1)
+  const chatCompleteItem = !running && completeItem?.runId === latestChatReceipt?.runId && latestChatReceipt?.state !== 'completed' ? completeItem : undefined
   const interactionItem = [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'interaction' }> => item.kind === 'interaction')
   const latestTool = [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'tool' }> => item.kind === 'tool')
   const activeTrace = activeRunId ? traces[activeRunId] : undefined
   const traceSteps = activeTrace ? activeTrace.order.flatMap(id => activeTrace.lanes[id]?.steps ?? []) : []
-  const phaseLabel = compactRunLabel({ running, ...(completeItem ? { completeLabel: completeItem.label } : {}), ...(interactionItem ? { interaction: interactionItem.interactionKind } : {}), steps: traceSteps, ...(latestTool?.processPending ? { latestToolPending: true } : {}) })
+  const admission = [...status].reverse().find(item => item.kind === 'status')?.admission
+  const phaseLabel = compactRunLabel({ running, admission, recovering: activeTrace?.health?.execution === 'recovering', ...(completeItem ? { completeLabel: completeItem.label } : {}), ...(interactionItem ? { interaction: interactionItem.interactionKind } : {}), steps: traceSteps, ...(latestTool?.processPending ? { latestToolPending: true } : {}) })
   const recoveryVisible = Boolean(surfaceMode === 'work' && !workReadOnly && !running && recoveryRun && activeRunId && recoveryRun.conversationId === selected?.id && recoveryRun.runId === activeRunId)
   const emptyConversation = messages.length === 0 && !recoveryVisible && !(surfaceMode === 'work' && (artifactIndex.artifacts.length > 0 || route.query.has('artifactRun')))
   const composerApproval = <ApprovalPolicySelect borderless value={approvalPolicy} unavailable={!approvalReady} onRetry={retryApprovalPolicy} disabled={approvalSaving || !sessionCapabilities.localAdmin} onChange={policy => { void setApprovalPolicy(policy) }} />
   const renderMessages = () => {
+    const timeline = placeInputResponses(messages)
     if (surfaceMode === 'chat') {
-      const items = messages.filter(message => !message.id.startsWith('stream-')).map(message => <MessageBubble key={`${selectedId}:${message.id}`} mode="chat" notificationTarget={notificationTarget} message={message} retry={retryBubble} onOpenWork={openBubbleWork} imageApi={resolveBubbleImage} onFileClick={openBubbleFile} transport={transport} conversationId={selectedId} />)
+      const items = timeline.filter(message => !message.id.startsWith('stream-')).map(message => <MessageBubble key={`${selectedId}:${message.id}`} mode="chat" notificationTarget={notificationTarget} message={message.workAction && (!notificationTarget && chatInteractions.some(item => item.runId === message.workAction!.runId && item.groupId === message.workAction!.interaction.groupId) || notificationTarget && message.workAction.interaction.kind === 'ask' && !targetsInteraction(message.workAction.runId, message.workAction.interaction.groupId)) ? (({ workAction: _action, ...rest }) => rest)(message) : message} retry={retryBubble} onOpenWork={openBubbleWork} imageApi={resolveBubbleImage} onFileClick={openBubbleFile} transport={transport} conversationId={selectedId} />)
       if ((running || submitting) && !(activeInteraction && (!activeInteraction.conversationId || activeInteraction.conversationId === selected?.id)) && !stopping) items.push(<ChatTypingBubble key="chat-typing"/>)
-      if (completeItem && ['failed', 'interrupted', 'cancelled'].includes(completeItem.outcome)) items.push(<article key="chat-feedback" className="message message--chat assistant"><div className="message-bubble-row"><div className="bubble" role="status">{completeItem.outcome === 'cancelled' ? '回复已停止。' : completeItem.outcome === 'interrupted' ? '回复中断了，可以重新发送。' : '这次没能完成回复，请重试。'}</div></div></article>)
-      if (activeInteraction && (!activeInteraction.conversationId || activeInteraction.conversationId === selected?.id) && !messages.some(message => message.workAction && message.workAction.runId === activeInteraction.runId && message.workAction.interaction.groupId === activeInteraction.groupId)) items.push(<article key={`chat-interaction:${activeInteraction.runId}:${activeInteraction.groupId}`} className="message message--chat assistant"><div className="message-bubble-row"><div className="bubble"><ChatInteractionContent key={`${activeInteraction.runId}:${activeInteraction.groupId}`} notificationTarget={notificationTarget} interaction={activeInteraction} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)}/></div></div></article>)
+      if (chatCompleteItem && ['failed', 'interrupted', 'cancelled'].includes(chatCompleteItem.outcome)) items.push(<article key="chat-feedback" className="message message--chat assistant"><div className="message-bubble-row"><div className="bubble" role="status">{chatCompleteItem.outcome === 'cancelled' ? '回复已停止。' : chatCompleteItem.outcome === 'interrupted' ? '回复中断了，可以重新发送。' : '这次没能完成回复，请重试。'}</div></div></article>)
+      // A targeted notification keeps the callback card, which owns the durable reply route; otherwise the live card replaces it.
+      const cardKeys = new Set(!notificationTarget ? [] : timeline.flatMap(message => message.workAction && message.workAction.state !== 'answered' && message.workAction.state !== 'obsolete' ? [`${message.workAction.runId}:${message.workAction.interaction.groupId}`] : []))
+      for (const interaction of chatInteractions.filter(item => !cardKeys.has(`${item.runId}:${item.groupId}`))) items.push(<article key={`chat-interaction:${interactionKey(interaction)}`} id={interactionElementId(interaction)} tabIndex={-1} className="message message--chat assistant"><div className="message-bubble-row"><div className={interaction.interactionKind === 'ask' ? 'message-card-content' : 'bubble'}>{interaction.action ? <ChatWorkPrompt action={interaction.action} transport={transport} notificationTarget={notificationTarget}/> : <ChatInteractionContent key={interactionKey(interaction)} notificationTarget={notificationTarget} interaction={interaction} submit={answers => answer(interaction.runId, interaction.groupId, answers, interaction.conversationId ?? selected?.id)}/>}</div></div></article>)
       return items
     }
     const shown = new Set<string>()
@@ -1438,20 +1567,20 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
       return <RunRecoveryCard key={`recovery:${runId}`} state={recoveryRun.state} pending={pendingRunAction} resume={() => void recoverRun(recoveryRun.runId, 'resume')} end={() => void recoverRun(recoveryRun.runId, 'end')} />
     }
     const lastMessage = new Map<string, number>()
-    messages.forEach((message, index) => { if (message.runId) lastMessage.set(message.runId, index) })
+    timeline.forEach((message, index) => { if (message.runId) lastMessage.set(message.runId, index) })
     const deliveriesShown = new Set<string>()
     const deliveries = (runId: string) => {
       deliveriesShown.add(runId)
       return selectedId ? <ConversationArtifacts key={`artifacts:${selectedId}:${runId}`} conversationId={selectedId} runId={runId} artifacts={artifactIndex.artifacts.filter(artifact => artifact.runId === runId)} transport={transport} position={route.query} onNavigate={patchQuery} /> : null
     }
-    const items = messages.flatMap((message, index) => {
+    const items = timeline.flatMap((message, index) => {
       const out: ReactElement[] = []
       const runId = message.runId
-      if (message.role === 'assistant' && runId && runId !== liveTraceId && !shown.has(runId)) {
+      if (message.role === 'assistant' && !message.replyToId && runId && runId !== liveTraceId && !shown.has(runId)) {
         shown.add(runId)
         const live = traces[runId]
-        if (live) out.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
-        else if (persistedTraceFallback) out.push(<PersistedRunTrace key={`trace:${runId}`} runId={runId} transport={transport} onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
+        if (live) out.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} onDiffClick={openBubbleDiff} compact />)
+        else if (persistedTraceFallback) out.push(<PersistedRunTrace key={`trace:${runId}`} runId={runId} transport={transport} onDiffClick={openBubbleDiff} />)
         const card = recoveryCard(runId); if (card) out.push(card)
       }
       out.push(<MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={retryBubble} onOpenWork={openBubbleWork} imageApi={resolveBubbleImage} onFileClick={openBubbleFile} onDiffClick={surfaceMode === 'work' && message.role === 'assistant' ? openBubbleDiff : undefined} transport={transport} conversationId={selectedId} />)
@@ -1459,7 +1588,7 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
       return out
     })
     for (const [runId, live] of Object.entries(traces)) if (runId !== liveTraceId && !shown.has(runId)) {
-      items.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
+      items.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} onDiffClick={openBubbleDiff} compact />)
       const card = recoveryCard(runId); if (card) items.push(card)
       if (!deliveriesShown.has(runId)) { const card = deliveries(runId); if (card) items.push(card) }
     }
@@ -1471,7 +1600,7 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
       for (const runId of runIds) if (!deliveriesShown.has(runId)) { const card = deliveries(runId); if (card) items.push(card) }
       if (artifactIndex.error) items.push(<p key="artifact-error" role="alert">{artifactIndex.error}</p>)
     }
-    if (liveTraceId && traces[liveTraceId]) items.push(<RunTraceView key={`trace:${liveTraceId}`} trace={traces[liveTraceId]} running onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
+    if (liveTraceId && traces[liveTraceId]) items.push(<RunTraceView key={`trace:${liveTraceId}`} trace={traces[liveTraceId]} running onDiffClick={openBubbleDiff} compact />)
     if (surfaceMode === 'work' && selected) items.push(<BudgetContinuationPrompt key={`budget:${selected.id}`} transport={transport} conversationId={selected.id} revision={`${activeRunId ?? ''}:${messages.length}`} running={running || loading || workReadOnly} onContinued={runId => { if (selectedIdRef.current === selected.id) void openConversation({ ...selected, activeRunId: runId }) }} />)
     return items
   }
@@ -1493,9 +1622,9 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
         <div className="navbar-title">{!(mobileLayout && surfaceMode === 'work') && <ConnectionMark paired={paired} serviceConnected={serviceConnected} />}<span className="title-text" title={surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}>{surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}</span></div>
         {mobileLayout && surfaceMode === 'work' && <div className="navbar-status"><ConnectionMark paired={paired} serviceConnected={serviceConnected} /><CompactRunStatus label={phaseLabel} /></div>}
         <div className="navbar-actions">
-          {paired && surfaceMode === 'work' && <TaskNotificationInbox transport={transport} open={go}/>}
+          {paired && <TaskNotificationInbox transport={transport} open={go}/>}
           {surfaceMode === 'work' && !mobileLayout && <CompactRunStatus label={phaseLabel} />}
-          {surfaceMode === 'work' ? <Dropdown open={moreOpen} onOpenChange={setMoreOpen} trigger={['click']} placement="bottomRight" menu={{ items: [...(latestProcessRunId ? [{ key: 'run-processes', label: '任务进程' }] : []), transfer.exportItem], onClick: ({ key }) => { setMoreOpen(false); if (key === 'run-processes') setProcessRunId(latestProcessRunId) } }}>
+          {surfaceMode === 'work' ? <Dropdown open={moreOpen} onOpenChange={setMoreOpen} trigger={['click']} placement="bottomRight" menu={{ items: [...(latestProcessRunId ? [{ key: 'run-processes', icon: <Icon name="terminal" size={15}/>, label: '任务进程' }] : []), transfer.exportItem, ...(selected ? [{ type: 'divider' as const }, { key: 'archive', icon: <Icon name="archive" size={15}/>, label: '归档对话', disabled: conversationBusy(selected), onClick: () => void archiveConversation(selected) }, { key: 'delete', icon: <Icon name="close" size={15}/>, label: '删除对话', danger: true, disabled: conversationBusy(selected), onClick: () => void deleteConversation(selected) }] : [])], onClick: ({ key }) => { setMoreOpen(false); if (key === 'run-processes') setProcessRunId(latestProcessRunId) } }}>
             <Tooltip title={moreOpen ? null : '更多'}><PulseButton className="navbar-tool" aria-label="更多" aria-haspopup="menu" aria-expanded={moreOpen}><Icon name="ellipsis" size={22}/></PulseButton></Tooltip>
           </Dropdown> : <Tooltip title="设置"><PulseButton className="navbar-tool" aria-label="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings" size={21}/></PulseButton></Tooltip>}
           {surfaceMode === 'work' && (mobileLayout ? detailsButton : <Popover open={detailsOpen} onOpenChange={setDetailsOpen} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}>{detailsButton}</Popover>)}
@@ -1503,6 +1632,7 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
         </div>
 
       </header>
+      {surfaceMode === 'chat' && <PendingWorkSummary items={pendingOverview} onLocate={locateInteraction}/>}
       {surfaceMode === 'work' && selected?.control && <div className="work-control-bar" role="status"><span>{workReadOnly ? '聊天助理管理中 · 可查看执行详情' : '你正在接管此工作会话'}</span><PulseButton disabled={controlChanging} onClick={() => void changeWorkControl()}>{workReadOnly ? '接管' : '归还聊天助理'}</PulseButton></div>}
       {surfaceMode === 'chat' && chatReferenceFromQuery(route.query) && <div className="chat-reference" role="status"><span>引用：{conversations.find(item => item.id === route.query.get('referenceConversation'))?.title ?? projects.find(item => item.id === route.query.get('project'))?.name ?? '当前项目/会话'}</span><PulseButton onClick={() => patchQuery({ referenceConversation: undefined, project: undefined })}>清除引用</PulseButton></div>}
       {!serviceConnected && window.pulseDesktop && <div className="alert" role="status"><span>后台服务未连接，仍可浏览本地记录。</span><PulseButton onClick={() => { void apiJson(transport, '/api/desktop/reconnect', jsonRequest('POST')).then(() => bootstrap()).catch(() => setToast('暂时无法连接后台服务')) }}>重新连接</PulseButton></div>}
@@ -1515,14 +1645,14 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
       </section>
       {!atBottom && <PulseButton className="jump-bottom" onClick={() => { followBottom.current = true; setAtBottom(true); messagesEl.current?.scrollTo({ top: messagesEl.current.scrollHeight, behavior: 'smooth' }) }}>回到底部 ↓</PulseButton>}
       <ChatActionArea state={deriveChatState({ running, stopping, submitting, interaction: activeInteraction, stopped: status.some(item => item.kind === 'complete' && item.outcome === 'cancelled') })} stopError={stopError} onRetryStop={() => void stopRun()} className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${emptyConversation && !activeInteraction ? 'is-empty' : ''}`}>
-        {notificationTarget && !activeInteraction && <div role="status">{loading ? '正在查找通知对应的问题…' : '通知对应的问题已处理或暂不可用，请查看任务记录。'}<PulseButton onClick={() => patchQuery({ notification: undefined })}>查看其他待办</PulseButton></div>}
+        {notificationTarget && !activeInteraction && <div role="status">{loading || targetState === 'pending' ? '正在查找通知对应的问题…' : '通知对应的问题已处理或暂不可用，请查看任务记录。'}<PulseButton onClick={() => patchQuery({ notification: undefined })}>查看其他待办</PulseButton></div>}
         {surfaceMode === 'work' && activeInteraction && !workReadOnly && <InteractionPanel localAdmin={sessionCapabilities.localAdmin} notificationTarget={notificationTarget} key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={approvalPolicy === 'delegate'} onOpenConversation={activeInteraction.conversationId ? () => go(workUrl(activeInteraction.conversationId!)) : undefined} onOpenFile={path => { const conversationId = activeInteraction.conversationId ?? selected?.id; if (!conversationId) return; const query = new URLSearchParams({ workspace: 'preview', artifact: path, artifactRun: activeInteraction.runId }); go(`${workUrl(conversationId)}?${query}`) }} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} />}
         {surfaceMode === 'work' && !workReadOnly && <MessageQueuePanel key={`queue:${selectedId}`} queue={currentQueue} controller={messageQueue.controller} onError={setToast} editDisabled={submitting || Boolean(drafts[selectedId ?? 'new']?.processing)} onEdit={payload => {
           const key = selectedId ?? 'new'
-          updateDraft(key, current => ({ ...current, markdown: [payload.text, current.markdown].filter(Boolean).join('\n\n'), document: !current.markdown.trim() ? payload.richContent?.document : payload.richContent?.document && current.document ? { type: 'doc', content: [...(payload.richContent.document.content ?? []), ...(current.document.content ?? [])] } : undefined, attachments: [...(payload.attachments ?? []).map(item => ({ ...item, data: item.data ?? '', previewUrl: item.url })), ...current.attachments.filter(item => !payload.attachments?.some(other => other.id === item.id))], revision: current.revision + 1 }))
+          updateDraft(key, current => ({ ...current, qualityReviewEnabled: payload.qualityReviewEnabled, markdown: [payload.text, current.markdown].filter(Boolean).join('\n\n'), document: !current.markdown.trim() ? payload.richContent?.document : payload.richContent?.document && current.document ? { type: 'doc', content: [...(payload.richContent.document.content ?? []), ...(current.document.content ?? [])] } : undefined, attachments: [...(payload.attachments ?? []).map(item => ({ ...item, data: item.data ?? '', previewUrl: item.url })), ...current.attachments.filter(item => !payload.attachments?.some(other => other.id === item.id))], revision: current.revision + 1 }))
           requestAnimationFrame(() => document.querySelector<HTMLElement>('#composer .tiptap')?.focus())
         }} />}
-        <RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError) || workReadOnly} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} followupBehavior={surfaceMode === 'chat' ? 'immediate' : messageQueue.behavior} onSend={async (payload, behavior) => await send(payload, behavior) === true} onStop={() => void stopRun()} toolbarExtra={surfaceMode === 'work' ? composerApproval : undefined} />
+        <RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError) || workReadOnly} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} followupBehavior={surfaceMode === 'chat' ? 'immediate' : messageQueue.behavior} onSend={async (payload, behavior) => await send(payload, behavior) === true} onStop={() => void stopRun()} toolbarExtra={surfaceMode === 'work' ? <>{composerApproval}<QualityReviewSelect value={drafts[selectedId ?? 'new']?.qualityReviewEnabled} disabled={running || submitting || loading || workReadOnly} onChange={value => updateDraft(selectedId ?? 'new', current => ({ ...current, qualityReviewEnabled: value, revision: current.revision + 1 }))} /></> : undefined} />
         <div className={`composer-meta ${route.newWork ? 'new-chat-tools' : ''}`}>
           {route.newWork ? <div className="new-conversation-project"><Icon name="folder"/><Select variant="borderless" aria-label="新对话所属项目" value={selectedProjectId ?? '__ungrouped__'} onChange={value => { const projectId = value === '__ungrouped__' ? undefined : value; patchQuery({ project: projectId }); setSelectedProjectId(projectId); if (projectId) window.localStorage.setItem('pulse-web-project', projectId); else window.localStorage.removeItem('pulse-web-project') }} options={[{ value: '__ungrouped__', label: '不归属项目' }, ...projects.map(project => ({ value: project.id, label: project.name }))]} popupMatchSelectWidth={false} /></div> : !activeInteraction && <div className="composer-hint">Pulse 可能会出错，请核对重要信息。</div>}
         </div>
@@ -1538,16 +1668,17 @@ export function PulseApp({ transport: baseTransport = browserTransport }: { tran
 
 function snapshotStatus(snapshot: WebRunSnapshot): RunStatus[] {
   const items: RunStatus[] = []
-  if (snapshot.status) items.push({ kind: 'status', label: snapshot.status.data.label ?? '正在处理' })
+  const admission = snapshotAdmission(snapshot)
+  if (snapshot.status || admission) items.push({ kind: 'status', admission, label: admissionLabel(admission) ?? snapshot.status?.data.label ?? '正在处理' })
   if (snapshot.reviewNote) items.push({ kind: 'review', label: snapshot.reviewNote })
   for (const activity of snapshot.activities) items.push(toolRunStatus(activity.data))
   if (snapshot.interactions?.length) {
-    for (const group of snapshot.interactions) items.push({ kind: 'interaction', runId: snapshot.runId, groupId: group.groupId, interactionKind: group.kind, items: group.items })
+    for (const group of snapshot.interactions) items.push({ kind: 'interaction', runId: snapshot.runId, groupId: group.groupId, requestedAt: group.requestedAt, interactionKind: group.kind, items: group.items })
   } else if (snapshot.waiting) items.push({ kind: 'interaction', runId: snapshot.runId, groupId: `effect:${snapshot.waiting.data.effectId}`, interactionKind: snapshot.waiting.data.input.kind === 'ask' ? 'ask' : 'approval', items: [{ effectId: snapshot.waiting.data.effectId, input: snapshot.waiting.data.input }] })
-  if (snapshot.complete) items.push(completeStatus(snapshot.complete.data))
+  if (snapshot.complete) items.push(completeStatus(snapshot.runId, snapshot.complete.data))
   else {
     const missing = missingCompleteStatus(snapshot.state)
-    if (missing) items.push({ kind: 'complete', outcome: missing.outcome, label: missing.label })
+    if (missing) items.push({ kind: 'complete', runId: snapshot.runId, outcome: missing.outcome, label: missing.label })
   }
   return items
 }
@@ -1557,8 +1688,8 @@ function toolRunStatus(data: { activityId: string; tool: string; status: string;
   return { kind: 'tool', activityId: data.activityId, label: readableTool(data.tool), state: data.status, ...(pending ? { processPending: true } : {}) }
 }
 
-function completeStatus(completion: RunCompletion): Extract<RunStatus, { kind: 'complete' }> {
-  return { kind: 'complete', outcome: completion.status, label: presentRun({ state: completion.status, completion }).label }
+function completeStatus(runId: string, completion: RunCompletion): Extract<RunStatus, { kind: 'complete' }> {
+  return { kind: 'complete', runId, outcome: completion.status, label: presentRun({ state: completion.status, completion }).label }
 }
 
 function replaceStatus(items: RunStatus[], value: RunStatus): RunStatus[] {
@@ -1586,6 +1717,26 @@ function replaceRunMessage(messages: WebMessage[], runId: string, text: string):
 
 function sameSavedReply(message: WebMessage, runId: string, text: string): boolean {
   return message.role === 'assistant' && message.id.startsWith('msg-') && message.runId === runId && message.text === text
+}
+
+function updateInputResponse(messages: WebMessage[], response: WebMessage): WebMessage[] {
+  const existing = messages.find(message => message.id === response.id)
+  if (!existing) return [...messages, response]
+  if (existing.steeringState && existing.steeringState !== 'pending' && response.steeringState === 'pending') return messages
+  return messages.map(message => message.id === response.id ? { ...message, ...response } : message)
+}
+
+function placeInputResponses(messages: WebMessage[]): WebMessage[] {
+  const anchorId = (message: WebMessage) => message.requestId && message.role === 'user' ? `msg-${message.requestId}` : message.id
+  const anchors = new Set(messages.filter(message => message.role === 'user').map(anchorId))
+  const replies = new Map<string, WebMessage[]>()
+  for (const message of messages) {
+    if (!message.replyToId || !anchors.has(message.replyToId)) continue
+    const siblings = replies.get(message.replyToId) ?? []
+    siblings.push(message)
+    replies.set(message.replyToId, siblings)
+  }
+  return messages.flatMap(message => message.replyToId && anchors.has(message.replyToId) ? [] : [message, ...(replies.get(anchorId(message)) ?? [])])
 }
 
 function readableTool(name: string): string {

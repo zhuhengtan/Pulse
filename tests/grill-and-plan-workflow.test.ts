@@ -8,6 +8,39 @@ import { createBuiltinSkillCapabilityPack } from '../packages/server/src/builtin
 
 afterEach(() => vi.unstubAllGlobals())
 
+it.each([false, true])('handles missing option values before showing a grill question (keepsInvalid=%s)', async keepsInvalid => {
+  const root = await mkdtemp(join(tmpdir(), 'pulse-grill-ask-repair-'))
+  let calls = 0
+  const bodies: string[] = []
+  const labels = ['应用内设置页（推荐）', '沿用文件约定', '只做 CLI 参数']
+  vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+    calls++; bodies.push(String(init.body))
+    const options = labels.map((label, index) => ({ label, description: `方案 ${index + 1}`, ...(!keepsInvalid && calls > 1 ? { value: `scope-${index}` } : {}) }))
+    return Response.json({ choices: [{ message: { tool_calls: [{ id: `ask-${calls}`, function: { name: 'ask_choice', arguments: JSON.stringify({ prompt: '全局提示词在哪里配置？', options }) } }] }, finish_reason: 'tool_calls' }] })
+  }))
+  const host = createLocalHost({ cwd: root, dataDir: join(root, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, approvalMode: 'auto', maxTurns: 8, maxModelCalls: 8, capabilityPacks: [createBuiltinSkillCapabilityPack()], enabledCapabilityPacks: ['builtin-skills'] })
+  try {
+    const conversation = await host.createConversation()
+    const run = await host.sendMessage(conversation.id, { text: '/grill-and-plan 先确认全局提示词的配置入口，不要实施。' })
+    let waiting: Awaited<ReturnType<typeof run.pendingInteractions>> = []
+    for await (const event of run.events) if (event.type === 'waiting') { waiting = await run.pendingInteractions(); break }
+    if (keepsInvalid) {
+      expect(await run.outcome()).toMatchObject({ status: 'failed', error: { code: 'ASK_OPTIONS_REQUIRED' } })
+      expect(calls).toBe(3)
+      expect(waiting).toEqual([])
+    } else {
+      expect(calls).toBe(2)
+      expect(waiting).toHaveLength(1)
+      expect(waiting[0]!.items[0]!.input.options).toEqual(labels.map((label, index) => ({ label, description: `方案 ${index + 1}`, value: `scope-${index}` })))
+      expect(bodies[1]).toContain('NONE of this ask batch was shown or answered')
+      expect(bodies[1]).toContain('Field: options')
+      expect(bodies[1]).toContain('label/value')
+    }
+    const ledger = JSON.parse(await readFile(join(root, 'data/conversations', conversation.id, 'runs', run.id, 'model-budget.json'), 'utf8'))
+    expect(ledger.used).toBe(calls)
+  } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
+})
+
 it.each([['暂不执行', false], ['执行', false], ['暂不执行', true], ['执行', true]] as const)('preserves the interview, long plan and %s choice across a cold restore (native=%s)', async (choice, native) => {
   const root = await mkdtemp(join(tmpdir(), 'pulse-grill-workflow-'))
   await mkdir(join(root, 'docs/plans'), { recursive: true })
@@ -50,6 +83,7 @@ it.each([['暂不执行', false], ['执行', false], ['暂不执行', true], ['�
       if (event.type !== 'waiting') continue
       waiting = await run.pendingInteractions()
       const item = waiting[0]!.items[0]!
+      if (item.input.prompt === '已达到本轮上下文容量，是否继续？') { await run.reply(item.effectId, { value: 'continue' }); continue }
       if (story === 2) await run.reply(item.effectId, { text: '你好，访客' })
       else if (story === 4) await run.reply(item.effectId, { value: '换个名字' })
       else break
@@ -62,10 +96,8 @@ it.each([['暂不执行', false], ['执行', false], ['暂不执行', true], ['�
     expect(messages.some(text => text.includes('Confirmed interaction data') && text.includes('selectedLabel') && text.includes('换个名字'))).toBe(true)
     expect(previews.some(text => text.includes(plan))).toBe(true)
     await expect(readFile(join(root, 'greet.mjs'), 'utf8')).rejects.toThrow()
-    const runtime = (first as any).active.get(run.id).runtime
     const beforeRestore = calls
-    runtime.cancelAgent = () => {}
-    await first.close()
+    await first.close({ preserveRuns: true })
     second = createLocalHost({ ...options, maxModelCalls: 256 })
     const resumed = await second.resumeRun(conversation.id)
     expect(resumed.id).toBe(run.id)
@@ -73,6 +105,12 @@ it.each([['暂不执行', false], ['执行', false], ['暂不执行', true], ['�
     expect(calls).toBe(beforeRestore)
     await expect(readFile(join(root, 'greet.mjs'), 'utf8')).rejects.toThrow()
     await resumed.reply(waiting[0]!.items[0]!.effectId, { value: native ? choice === '执行' ? 'execute' : 'hold' : choice })
+    for await (const event of resumed.events) if (event.type === 'waiting') {
+      for (const group of await resumed.pendingInteractions()) for (const item of group.items) {
+        expect(item.input.prompt).toBe('已达到本轮上下文容量，是否继续？')
+        await resumed.reply(item.effectId, { value: 'continue' })
+      }
+    }
     await resumed.outcome()
     if (choice === '暂不执行') expect(calls).toBe(beforeRestore)
     else expect(messages.slice(beforeRestore).some(text => text.includes('Confirmed interaction data') && text.includes('换个名字'))).toBe(true)

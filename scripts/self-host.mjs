@@ -12,7 +12,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, existsSync, openSync, realpathSync, statSync, writeSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -68,6 +68,8 @@ const USAGE = `self-host.mjs — 用 cwd 之外的稳定 Pulse 引擎修复工�
   --output <dir>          report.json / baseline.json 与日志目录
 
 选项:
+  --engine-snapshot <dir> 稳定引擎代码胶囊；未指定时向上查找其清单，完整复验运行闭包
+  --engine-digest <sha256> 固定胶囊摘要，防止代码与清单被一起替换；需配合 --engine-snapshot
   --config <file>         原样透传给引擎的 --config 路径（本脚本不读取内容）
   --max-attempts <n>      最多修复轮数，默认 3
   --timeout-ms <n>        单次引擎调用 / 单条检查的超时毫秒，默认 900000
@@ -75,7 +77,7 @@ const USAGE = `self-host.mjs — 用 cwd 之外的稳定 Pulse 引擎修复工�
   --baseline-only         只跑一次固定检查并记录基线，不调用模型
   --auto-approve          显式开启引擎自动审批；默认关闭（保持人工审批策略）
   --overwrite             允许覆盖 --output 内已有 report.json / baseline.json；默认拒绝覆盖
-  --transport <cli|h5>    传输方式；默认 cli。h5 仅在「连接失败且明确未创建任务」时回退 CLI
+  --transport <cli|h5>    默认 cli；h5 要求支持隔离外部门禁的服务与稳定引擎，检查前绝不合入
   --wait-for-human        H5 传输遇到 ask/审批时，在总超时内等待人工处理并继续同一 run
   --api-base <url>        开发版 API 基址，默认 ${DEFAULT_API_BASE}
   --ui-base <url>         开发版 UI 基址，默认 ${DEFAULT_UI_BASE}
@@ -291,7 +293,7 @@ export async function runChecks({
 
 export function isInside(child, parent) {
   const rel = path.relative(parent, child)
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel))
 }
 
 /** 规范化基址：必须是 http(s)，去掉尾部斜杠。 */
@@ -330,6 +332,7 @@ const BOOLEAN_FLAGS = new Set(['help', 'baseline-only', 'auto-approve', 'overwri
 export const VALUED_FLAGS = Object.freeze([
   'task-file', 'checks-file', 'cwd', 'cli-entry', 'config', 'data-dir', 'output',
   'max-attempts', 'timeout-ms', 'freeze-file', 'transport', 'api-base', 'ui-base', 'project-id',
+  'engine-snapshot', 'engine-digest',
 ])
 
 export function parseArgs(argv) {
@@ -475,6 +478,27 @@ export async function verifyFrozen(frozen, phase) {
  * 这样即便输出远超内存上限，末尾的 type=result 依然拿得到——
  * 这正是修复「4MB 截断 + clip 取开头」丢失最终结论的关键。
  */
+/** Workspace-local frozen definitions must also match in candidates/integration trees. */
+export async function verifyWorkspaceFrozen(frozen, originalCwd, candidateCwd, phase) {
+  if (!originalCwd || !candidateCwd || samePath(originalCwd) === samePath(candidateCwd)) return
+  const candidateReal = await fs.realpath(candidateCwd)
+  const originalReal = await fs.realpath(originalCwd)
+  for (const entry of frozen ?? []) {
+    // Resolve the parent only: keep a frozen file symlink's own workspace identity,
+    // and handle aliases such as macOS /var -> /private/var consistently.
+    const sourcePath = path.join(await fs.realpath(path.dirname(entry.path)), path.basename(entry.path))
+    if (!isInside(sourcePath, originalReal)) continue
+    const candidate = path.resolve(candidateReal, path.relative(originalReal, sourcePath))
+    let real, bytes
+    try { real = await fs.realpath(candidate) }
+    catch { throw new FreezeError(`${phase}：候选冻结文件不可读 ${candidate}`) }
+    if (!isInside(real, candidateReal)) throw new FreezeError(`${phase}：候选冻结文件越界 ${candidate}`)
+    try { bytes = await fs.readFile(candidate) }
+    catch { throw new FreezeError(`${phase}：候选冻结文件不可读 ${candidate}`) }
+    if (hashBuffer(bytes) !== entry.hash) throw new FreezeError(`${phase}：候选冻结文件被改动 ${candidate}`)
+  }
+}
+
 export function createEventScanner() {
   let pending = ''
   const pendingLimit = 64 * 1024
@@ -595,6 +619,14 @@ export function listActiveChildren() {
 
 export function interruptState() {
   return interruptSignal
+}
+
+function assertNotInterrupted() {
+  if (interruptSignal) throw Object.assign(new Error(`收到 ${interruptSignal}，停止尚未开始的后续操作`), { kind: 'timeout', timedOut: true })
+}
+
+function assertChecksNotTimedOut(checks) {
+  if (checks.some(check => check?.timedOut === true)) throw Object.assign(new Error('SELF_HOST_FIXED_CHECK_TIMEOUT'), { kind: 'timeout', timedOut: true })
 }
 
 /** detached 子进程自成一组：kill(-pid) 只波及本次创建的进程组。 */
@@ -949,7 +981,7 @@ export function createHttpClient({ fetchImpl = globalThis.fetch, apiBase = DEFAU
       }
       return payload
     } catch (error) {
-      // 连接层失败（根本没拿到响应）单独标记：上层据此判断能否回退 CLI。
+      // 连接层失败（根本没拿到响应）单独标记，供报告区分提交状态。
       if (error && typeof error === 'object' && error.httpStatus === undefined) error.h5ConnectError = true
       throw error
     } finally {
@@ -992,9 +1024,9 @@ export function matchProjectByCwd(projects, cwdReal) {
 
 /**
  * 从**稳定引擎自己的安装**里加载 H5WorkspaceManager，绝不 import 被修复 cwd 内的模块。
- * 加载失败就明确报错并退化为在原目录检查，绝不假装已经合入。
+ * 加载失败即停止，绝不退回在原目录检查，也不创建修复任务。
  */
-export async function loadWorkspaceManager(cliEntry, { importModule = (specifier) => import(specifier) } = {}) {
+export async function loadWorkspaceManager(cliEntry, { importModule = (specifier) => import(specifier), cwd = null, snapshotRoot = null, enforceBoundary = true } = {}) {
   const root = path.dirname(cliEntry)
   const candidates = [
     path.resolve(root, '../node_modules/@hunterzhu/pulse-server/dist/h5/workspaces.js'),
@@ -1002,21 +1034,93 @@ export async function loadWorkspaceManager(cliEntry, { importModule = (specifier
     path.resolve(root, '../@hunterzhu/pulse-server/dist/h5/workspaces.js'),
   ]
   const failures = []
+  const canonicalCwd = cwd && enforceBoundary ? await fs.realpath(cwd) : null
+  const canonicalSnapshot = snapshotRoot && enforceBoundary ? await fs.realpath(snapshotRoot) : null
   for (const candidate of candidates) {
-    let mod
+    let mod, modulePath = candidate, frozen = []
     try {
-      mod = await importModule(pathToFileURL(candidate).href)
+      if (enforceBoundary && (canonicalCwd || canonicalSnapshot)) {
+        modulePath = await fs.realpath(candidate)
+        if (canonicalCwd && isInside(modulePath, canonicalCwd)) throw new UsageError('SELF_HOST_ENGINE_MODULE_INSIDE_PROJECT')
+        if (canonicalSnapshot && !isInside(modulePath, canonicalSnapshot)) throw new UsageError('SELF_HOST_ENGINE_MODULE_OUTSIDE_SNAPSHOT')
+        frozen = await freezeMany([modulePath])
+      }
+      mod = await importModule(pathToFileURL(modulePath).href)
+      await verifyFrozen(frozen, '稳定工作区模块载入后')
     } catch (error) {
+      if (error instanceof FreezeError || /SELF_HOST_ENGINE_MODULE_/.test(error.message ?? '')) throw error
       failures.push(`${candidate}: ${error && error.message ? error.message : error}`)
       continue
     }
     if (mod && typeof mod.H5WorkspaceManager === 'function') {
-      return { H5WorkspaceManager: mod.H5WorkspaceManager, modulePath: candidate }
+      return { H5WorkspaceManager: mod.H5WorkspaceManager, modulePath, frozen }
     }
     failures.push(`${candidate}: 未导出 H5WorkspaceManager`)
   }
   throw new UsageError(`无法从稳定引擎加载 H5WorkspaceManager（${failures.join(' | ')}）`)
 }
+/** Read-only preflight. It never constructs a manager or opens the user's data. */
+export async function inspectStableEngine({ cliEntry, cwd, transport = 'cli', engineSnapshot = null, engineDigest = null, importModule = null } = {}) {
+  const cwdReal = await requireDir(cwd, '--cwd')
+  const entry = await resolveCliEntry(cliEntry, cwdReal)
+  if (engineDigest && !engineSnapshot) throw new UsageError('SELF_HOST_ENGINE_DIGEST_REQUIRES_SNAPSHOT')
+  if (engineDigest && !/^[a-f0-9]{64}$/.test(engineDigest)) throw new UsageError('SELF_HOST_ENGINE_DIGEST_INVALID')
+  let snapshot = engineSnapshot
+  if (!snapshot) {
+    for (let dir = path.dirname(entry); ; dir = path.dirname(dir)) {
+      if (existsSync(path.join(dir, '.pulse-snapshot', 'manifest.json'))) { snapshot = dir; break }
+      if (path.dirname(dir) === dir) break
+    }
+  }
+  let snapshotIdentity = null
+  let verifySnapshot = null
+  if (snapshot) {
+    ;({ verifySnapshot } = await import('./self-host-snapshot.mjs'))
+    let checked
+    try { checked = await verifySnapshot({ snapshot, cwd: cwdReal, expectedDigest: engineDigest ?? undefined }) }
+    catch (error) { throw new UsageError(`SELF_HOST_ENGINE_SNAPSHOT_INVALID: ${error.message}`) }
+    if (!checked.ok) throw new UsageError(`SELF_HOST_ENGINE_SNAPSHOT_INVALID: ${checked.violations.map(item => item.kind).join(',')}`)
+    if (await fs.realpath(path.join(checked.snapshot, checked.entries.cli)) !== entry) throw new UsageError('SELF_HOST_ENGINE_SNAPSHOT_ENTRY_MISMATCH')
+    snapshotIdentity = { snapshot: checked.snapshot, runtimeDigest: checked.runtimeDigest, externallyPinned: Boolean(engineDigest) }
+  }
+  const entryFrozen = await freezeMany([entry])
+  let loadedManager = null
+  if (transport === 'h5') {
+    loadedManager = await loadWorkspaceManager(entry, { ...(importModule ? { importModule, enforceBoundary: false } : {}), cwd: cwdReal, snapshotRoot: snapshotIdentity?.snapshot })
+    const prototype = loadedManager.H5WorkspaceManager.prototype
+    if (!prototype || ['get', 'close', 'finishVerified'].some(name => typeof prototype[name] !== 'function')) {
+      throw new UsageError('SELF_HOST_VERIFIED_MERGE_UNSUPPORTED: 稳定引擎缺少外部门禁协议，未创建修复任务')
+    }
+    if (loadedManager.H5WorkspaceManager.selfHostBeforeApply !== 1) {
+      throw new UsageError('SELF_HOST_BEFORE_APPLY_UNSUPPORTED: 稳定引擎缺少提交前中断门禁，未创建修复任务')
+    }
+    if (loadedManager.H5WorkspaceManager.selfHostInternalDataBoundary !== 1) {
+      throw new UsageError('SELF_HOST_INTERNAL_DATA_BOUNDARY_UNSUPPORTED: 稳定引擎缺少内部数据防线，未创建修复任务')
+    }
+    if (!importModule) {
+      loadedManager.modulePath = await fs.realpath(loadedManager.modulePath)
+      if (snapshotIdentity && !isInside(loadedManager.modulePath, snapshotIdentity.snapshot)) throw new UsageError('SELF_HOST_ENGINE_MODULE_OUTSIDE_SNAPSHOT')
+      entryFrozen.push(...loadedManager.frozen)
+    }
+  }
+  const identity = {
+    schema: 1, cliEntry: entry, workspaceModule: loadedManager?.modulePath ?? null,
+    verifiedMerge: transport === 'h5', beforeApply: transport === 'h5',
+    binding: snapshotIdentity ? 'runtime-closure' : transport === 'h5' ? 'entry-and-workspace-module' : 'entry-only',
+    snapshot: snapshotIdentity?.snapshot ?? null, runtimeDigest: snapshotIdentity?.runtimeDigest ?? null,
+    externallyPinned: snapshotIdentity?.externallyPinned ?? false,
+  }
+  const verify = async () => {
+    await verifyFrozen(entryFrozen, '稳定引擎身份复验')
+    if (snapshotIdentity) {
+      const checked = await verifySnapshot({ snapshot: snapshotIdentity.snapshot, cwd: cwdReal, expectedDigest: snapshotIdentity.runtimeDigest })
+      if (!checked.ok) throw new FreezeError(`SELF_HOST_ENGINE_SNAPSHOT_CHANGED: ${checked.violations.map(item => item.kind).join(',')}`)
+    }
+  }
+  await verify()
+  return { identity, verify, loadedManager }
+}
+
 /* ------------------------------------------------------------------
  * H5 传输：在调用者已有的 Pulse 项目里创建并置顶真实任务，按 run 状态跟踪
  * ------------------------------------------------------------------ */
@@ -1053,6 +1157,14 @@ export function detectNeedsAttention(payload) {
   }
   if (payload.awaitingHuman === true) return 'awaiting_human'
   return null
+}
+
+// 包装 H5 错误时保留超时事实，不改变已启动/提交不确定的边界。
+function h5RequestFailure(message, cause) {
+  const failure = new Error(message, { cause })
+  if (cause?.h5DeadlineExceeded === true) failure.h5DeadlineExceeded = true
+  if (cause?.timedOut === true || cause?.h5DeadlineExceeded === true || cause?.name === 'AbortError') failure.timedOut = true
+  return failure
 }
 
 export function createH5EngineInvoker({
@@ -1102,11 +1214,14 @@ export function createH5EngineInvoker({
     const cwdId = samePath(cwd)
     let convId = conversationId
     let pin
-    // 这一段还没有创建任何任务：只有连接层失败才允许上层回退 CLI。
+    // 这一段还没有创建任何任务；连接层失败保留未启动标记。
     try {
       // 认证必须排在所有业务请求之前：Cookie 由 createHttpClient 的内存闭包保存，
       // 后续请求自动带上 Origin 与这份 Cookie（不写盘、不进报告）。
       await call('本地会话认证', '/api/session/local', { method: 'POST' })
+      const session = await call('核对外部门禁协议', '/api/session')
+      if (session?.capabilities?.selfHostExternalValidation !== 1) throw new UsageError('SELF_HOST_EXTERNAL_VALIDATION_UNSUPPORTED：服务不支持隔离外部门禁，未创建修复任务')
+      if (session?.capabilities?.selfHostInternalDataBoundary !== 1) throw new UsageError('SELF_HOST_INTERNAL_DATA_BOUNDARY_UNSUPPORTED：服务缺少内部数据防线，未创建修复任务')
       const projects = await call('读取项目列表', '/api/projects')
       if (projectId) {
         const found = matchProjectById(projects, projectId)
@@ -1135,10 +1250,10 @@ export function createH5EngineInvoker({
       try {
         created = await call('创建会话', '/api/conversations', {
           method: 'POST',
-          body: { title: `self-host 修复任务（第 ${round} 轮）`, projectId: pin.id },
+          body: { title: `self-host 修复任务（第 ${round} 轮）`, projectId: pin.id, selfHostExternalValidation: true },
         })
       } catch (error) {
-        const failure = new Error(`H5 传输：创建会话失败（${error && error.message ? error.message : error}）`)
+        const failure = h5RequestFailure(`H5 传输：创建会话失败（${error && error.message ? error.message : error}）`, error)
         failure.h5Started = true
         failure.h5SubmitUncertain = true
         throw failure
@@ -1156,7 +1271,7 @@ export function createH5EngineInvoker({
       try {
         await call('置顶会话', `/api/conversations/${encodeURIComponent(convId)}`, { method: 'PATCH', body: { pinned: true } })
       } catch (error) {
-        const failure = new Error(`H5 传输：置顶会话失败（${error && error.message ? error.message : error}）`)
+        const failure = h5RequestFailure(`H5 传输：置顶会话失败（${error && error.message ? error.message : error}）`, error)
         failure.h5Started = true
         failure.h5ConversationId = convId
         throw failure
@@ -1173,7 +1288,7 @@ export function createH5EngineInvoker({
         body: { text: prompt, ...(requestId ? { requestId } : {}) },
       })
     } catch (error) {
-      const wrapped = new Error(`H5 传输：发送任务失败（${error && error.message ? error.message : error}）`)
+      const wrapped = h5RequestFailure(`H5 传输：发送任务失败（${error && error.message ? error.message : error}）`, error)
       wrapped.h5Started = true
       wrapped.h5SubmitUncertain = true
       wrapped.h5ConversationId = convId
@@ -1223,7 +1338,7 @@ export function createH5EngineInvoker({
       }
     } catch (error) {
       // run 已启动：不再另开任务，保留 run/link 让调用者如实报告。
-      const wrapped = new Error(`H5 传输：跟踪 run 失败（${error && error.message ? error.message : error}）`)
+      const wrapped = h5RequestFailure(`H5 传输：跟踪 run 失败（${error && error.message ? error.message : error}）`, error)
       wrapped.h5Started = true
       wrapped.h5ConversationId = convId
       wrapped.h5RunId = runId
@@ -1276,7 +1391,11 @@ export function failureBrief(attempt) {
  * ------------------------------------------------------------------ */
 
 export async function writeJsonFile(file, value) {
-  await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`
+  try {
+    await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    await fs.rename(temporary, file)
+  } finally { await fs.rm(temporary, { force: true }).catch(() => {}) }
 }
 
 export function engineExitCode(engine) {
@@ -1402,9 +1521,9 @@ export function resolveRecordCwd(record, { conversationId = null, cwd = null } =
  * 用**稳定引擎自己的** H5WorkspaceManager 读取本次 conversation 的精确记录并推导候选目录。
  * 无论成败都必须 close()：不把句柄/共享锁留给原目录复检。
  */
-export async function locateWorkspace({ cliEntry, dataDir, conversationId = null, cwd = null, importModule = null } = {}) {
+export async function locateWorkspace({ cliEntry, dataDir, conversationId = null, cwd = null, importModule = null, loadedManager = null } = {}) {
   if (!conversationId || !dataDir) return { ok: false, error: 'WORKSPACE_PRECONDITION_MISSING' }
-  const loaded = await loadWorkspaceManager(cliEntry, importModule ? { importModule } : {})
+  const loaded = loadedManager ?? await loadWorkspaceManager(cliEntry, { ...(importModule ? { importModule, enforceBoundary: false } : {}), cwd })
   const manager = new loaded.H5WorkspaceManager(dataDir)
   try {
     const record = typeof manager.get === 'function' ? await manager.get(conversationId) : undefined
@@ -1415,7 +1534,7 @@ export async function locateWorkspace({ cliEntry, dataDir, conversationId = null
   }
 }
 
-/** 仅在连接失败且确定尚未创建 H5 任务时允许回退 CLI。 */
+/** H5 隔离失败即停止，不静默降级为直接修改原目录的 CLI。 */
 export function selectInvoker({
   transport = 'cli',
   cliEntry,
@@ -1424,12 +1543,29 @@ export function selectInvoker({
   projectId = null,
   http = null,
   importModule = null,
+  engineSnapshot = null,
+  engineDigest = null,
   log = () => {},
 } = {}) {
   if (transport !== 'cli' && transport !== 'h5') throw new UsageError(`--transport 只支持 cli 或 h5，当前: ${transport}`)
   const cliInvoker = createCliEngineInvoker({ cliEntry })
+  let guardPromise, pinnedCwd
+  const guard = async (request) => {
+    const actualCwd = await requireDir(request.cwd, '--cwd')
+    if (pinnedCwd && pinnedCwd !== actualCwd) throw new UsageError('SELF_HOST_ENGINE_TARGET_CHANGED')
+    pinnedCwd = actualCwd
+    const value = await (guardPromise ??= inspectStableEngine({ cliEntry, cwd: request.cwd, transport, engineSnapshot, engineDigest, importModule }))
+    await value.verify()
+    return value
+  }
   if (transport === 'cli') {
-    return async (request = {}) => ({ ...(await cliInvoker(request)), transport: 'cli' })
+    const invoke = async (request = {}) => {
+      const stable = await guard(request)
+      try { return { ...(await cliInvoker(request)), transport: 'cli' } }
+      finally { await stable.verify() }
+    }
+    invoke.preflight = async request => (await guard(request)).identity
+    return invoke
   }
   let client = http
   async function invokeH5Only(request = {}) {
@@ -1437,8 +1573,10 @@ export function selectInvoker({
     const h5Invoker = createH5EngineInvoker({ http: client, uiBase, projectId, waitForHuman: request.waitForHuman === true })
     let knownResult = null
     try {
+      const stable = await guard(request)
       const result = await h5Invoker({ ...request, log })
       knownResult = result
+      await stable.verify()
       if (result && result.runId) {
         // 候选目录只能来自 manager.get(conversationId) 的精确记录。定位失败时
         // workspace 保持 null，让 main 直接失败，绝不回落到原目录跑检查。
@@ -1448,6 +1586,7 @@ export function selectInvoker({
           conversationId: result.conversationId ?? request.conversationId ?? null,
           cwd: request.cwd ?? null,
           importModule,
+          loadedManager: stable.loadedManager,
         })
         return {
           ...result,
@@ -1465,16 +1604,12 @@ export function selectInvoker({
       // 否则会出现两个并发修复任务。保留真实 run/link 并如实上报。
       const reason = String(error && error.message ? error.message : error)
       const started = Boolean(knownResult?.runId || error && (error.h5Started === true || error.h5RunId || error.h5ConversationId))
-      // 唯一允许降级的场景：连接层失败，且此刻确实一个任务都没创建。
-      const mayFallback = started === false && Boolean(error) && error.h5NotStarted === true && error.h5ConnectError === true
-      if (mayFallback) {
-        log(`H5 传输连接失败且明确未创建任务，回退 CLI：${reason}`)
-        const result = await cliInvoker({ ...request, log })
-        return { ...result, transport: 'cli', h5Fallback: { reason } }
-      }
+      // H5 是显式隔离模式；即使尚未建任务，也不能静默降级到直接修改原目录的 CLI。
       log(`H5 传输失败（${started ? '任务已启动，不再回退 CLI' : '结果不确定，也不回退 CLI'}）：${reason}`)
       const failure = new UsageError(`H5 传输失败，未回退 CLI：${reason}`)
       failure.h5Error = reason
+      failure.frozen = error instanceof FreezeError || error?.frozen === true
+      failure.timedOut = error?.timedOut === true || error?.h5DeadlineExceeded === true || error?.name === 'AbortError'
       failure.h5Started = started
       failure.h5RunId = knownResult?.runId ?? error?.h5RunId ?? null
       failure.h5ConversationId = knownResult?.conversationId ?? error?.h5ConversationId ?? null
@@ -1484,10 +1619,16 @@ export function selectInvoker({
   }
   // 只有主流程拿到真实 accepted 之后才会调用：用稳定引擎自己的
   // H5WorkspaceManager 收尾，绝不伪造验收文件。
-  invokeH5Only.finalize = async ({ conversationId = null, dataDir = null, cwd = null, workspace = null } = {}) => {
+  invokeH5Only.finalize = async ({ conversationId = null, dataDir = null, cwd = null, workspace = null, validate = null } = {}) => {
     if (!conversationId || !dataDir) return { merged: false, error: 'FINALIZE_PRECONDITION_MISSING' }
-    const loaded = await loadWorkspaceManager(cliEntry, importModule ? { importModule } : {})
-    const manager = new loaded.H5WorkspaceManager(dataDir)
+    const beforeApply = () => { try { assertNotInterrupted() } catch (error) { error.selfHostMerge = 'not_applied'; throw error } }
+    beforeApply()
+    const stable = await guard({ cwd })
+    beforeApply()
+    const manager = new stable.loadedManager.H5WorkspaceManager(dataDir)
+    const loaded = stable.loadedManager
+    let confirmed = null, failure = null
+    const preserve = error => { const failure = error instanceof Error ? error : new Error(String(error)); if (confirmed) failure.selfHostFinalize = confirmed; return failure }
     try {
       // 合入前重新核对本次会话的记录：conversationId 一致、项目目录一致、
       // 候选目录必须就是刚才通过检查的那个目录。任何不一致都不合入。
@@ -1497,19 +1638,30 @@ export function selectInvoker({
       if (workspace && samePath(workspace) !== samePath(resolved.cwd)) {
         return { merged: false, status: null, error: 'WORKSPACE_CANDIDATE_MISMATCH', modulePath: loaded.modulePath }
       }
-      const result = await manager.finish(conversationId, true)
+      if (typeof manager.finishVerified !== 'function' || typeof validate !== 'function') return { merged: false, error: 'SELF_HOST_VERIFIED_MERGE_UNSUPPORTED' }
+      const result = await manager.finishVerified(conversationId, async integration => {
+        try { beforeApply(); await validate(integration); await stable.verify(); beforeApply() }
+        catch (error) { error.selfHostMerge = 'not_applied'; throw error }
+      }, { beforeApply })
       const status = result && typeof result.status === 'string' ? result.status : null
-      return {
+      confirmed = {
         merged: status === 'merged' || status === 'noop',
         status,
         conflictPaths: result && result.conflictPaths ? result.conflictPaths : undefined,
+        error: result && result.error ? result.error : undefined,
         modulePath: loaded.modulePath,
       }
-    } finally {
+      await stable.verify()
+      return confirmed
+    } catch (error) { failure = preserve(error); throw failure } finally {
       // 无论成败都必须关闭：不能把 manager 的句柄/锁留给原目录复检。
-      if (manager && typeof manager.close === 'function') await manager.close()
+      if (manager && typeof manager.close === 'function') {
+        try { await manager.close() }
+        catch (error) { if (failure) failure.workspaceCloseError = String(error.message ?? error); else throw preserve(error) }
+      }
     }
   }
+  invokeH5Only.preflight = async request => (await guard(request)).identity
   return invokeH5Only
 }
 
@@ -1594,7 +1746,7 @@ export async function main(argv, { http = null, fetchImpl = null, importModule =
   const projectId = opts['project-id'] ? String(opts['project-id']) : null
 
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     startedAt: new Date().toISOString(),
     finishedAt: null,
     ok: false,
@@ -1621,8 +1773,15 @@ export async function main(argv, { http = null, fetchImpl = null, importModule =
     workspace: null,
     baseline: null,
     attempts: [],
+    stages: [],
+    engineIdentity: null,
+    delivery: { code: 'not_started', merge: 'not_requested', validation: 'not_started', activation: 'not_requested', runningVersionVerified: false },
   }
 
+  const stage = async (name, state, details = {}) => {
+    report.stages.push({ name, state, at: new Date().toISOString(), ...details })
+    await writeJsonFile(reportPath, report)
+  }
   const finish = async (exitCode, status, message) => {
     // 收尾前再确认一次中断状态：只要已经收到 SIGINT/SIGTERM，就绝不报告成功。
     // 固定检查可能在信号到达后仍然通过（例如检查进程被杀前已写完结果），
@@ -1642,19 +1801,49 @@ export async function main(argv, { http = null, fetchImpl = null, importModule =
     report.status = finalStatus
     report.message = finalMessage
     report.ok = finalStatus === STATUS.success
+    if (report.delivery.code === 'repairing') report.delivery.code = 'not_verified'
     report.finishedAt = new Date().toISOString()
+    report.stages.push({ name: 'complete', state: report.ok ? 'passed' : 'stopped', at: report.finishedAt, status: finalStatus })
     await writeJsonFile(reportPath, report)
     log(`${finalStatus}: ${finalMessage}`)
     return finalExitCode
   }
 
   try {
+    let invoke
+    if (opts['baseline-only'] !== true) {
+      await stage('engine_preflight', 'started')
+      if (!opts['cli-entry']) throw new UsageError('缺少必需参数 --cli-entry')
+      if (!taskFile) throw new UsageError('修复轮次需要 --task-file')
+      const cliEntry = await resolveCliEntry(opts['cli-entry'], cwdReal)
+      report.cliEntry = cliEntry
+      invoke = selectInvoker({
+        transport,
+        cliEntry,
+        apiBase,
+        uiBase,
+        projectId,
+        http: http ?? (fetchImpl ? createHttpClient({ fetchImpl, apiBase }) : null),
+        importModule,
+        engineSnapshot: opts['engine-snapshot'] ?? null,
+        engineDigest: opts['engine-digest'] ?? null,
+        log,
+      })
+
+      report.engineIdentity = await invoke.preflight({ cwd: cwdReal })
+      await stage('engine_preflight', 'passed', { identity: report.engineIdentity })
+    }
+    assertNotInterrupted()
+    await stage('baseline_checks', 'started')
     // 基线：只跑固定检查，绝不调用模型；不需要模型时也能给出准确结论。
     const baseline = await runRoundChecks({ checks, cwd: cwdReal, timeoutMs, outputDir, frozen, labelPrefix: 'baseline' })
     const baselineOk = baseline.length === checks.length && baseline.every((item) => item.passed === true)
     report.baseline = { at: new Date().toISOString(), allPassed: baselineOk, checks: baseline }
     await writeJsonFile(path.join(outputDir, 'baseline.json'), report.baseline)
     await verifyFrozen(frozen, '基线检查结束后')
+    await stage('baseline_checks', baselineOk ? 'passed' : 'failed')
+    assertChecksNotTimedOut(baseline)
+    assertNotInterrupted()
     if (opts['baseline-only'] === true) {
       return await finish(
         baselineOk ? EXIT.baseline : EXIT.checks,
@@ -1663,28 +1852,19 @@ export async function main(argv, { http = null, fetchImpl = null, importModule =
       )
     }
 
-    if (!opts['cli-entry']) throw new UsageError('缺少必需参数 --cli-entry')
-    if (!taskFile) throw new UsageError('修复轮次需要 --task-file')
-    const cliEntry = await resolveCliEntry(opts['cli-entry'], cwdReal)
-    report.cliEntry = cliEntry
-    const invoke = selectInvoker({
-      transport,
-      cliEntry,
-      apiBase,
-      uiBase,
-      projectId,
-      http: http ?? (fetchImpl ? createHttpClient({ fetchImpl, apiBase }) : null),
-      importModule,
-      log,
-    })
 
     let conversationId = null
     let lastFailure = null
 
     for (let round = 1; round <= maxAttempts; round += 1) {
+      assertNotInterrupted()
       // 每轮开始前先校验冻结身份：修复进程还没启动就已经被改过，直接判定篡改。
       await verifyFrozen(frozen, `第 ${round} 轮开始前`)
-      const prompt = round === 1 ? taskText : `${taskText}\n\n${failureBrief(lastFailure)}`
+      // 下一轮必须拿到真实 attempt，而不是给用户显示的摘要字符串。
+      const previousAttempt = report.attempts.at(-1)
+      const prompt = round === 1 ? taskText : `${taskText}\n\n${failureBrief(previousAttempt)}`
+      report.delivery.code = 'repairing'
+      await stage('repair', 'started', { round })
       const engine = await invoke({
         mode: round === 1 || !conversationId ? 'run' : 'resume',
         prompt,
@@ -1739,6 +1919,7 @@ export async function main(argv, { http = null, fetchImpl = null, importModule =
       // 引擎进程结束后立刻校验：修复进程本身不得改动 task / checks / freeze-file。
       await verifyFrozen(frozen, `第 ${round} 轮引擎进程结束后`)
 
+      await stage('repair', accepted === 'accepted' ? 'accepted' : 'returned', { round, conversationId, runId: report.runId, outcome: accepted })
       const needsAttention = engine && engine.needsAttention != null ? engine.needsAttention : null
       if (engine && (engine.waiting === true || needsAttention !== null)) {
         // 需人工时：不自动回答 ask 或审批，写真实 needs_attention 报告并保留任务。
@@ -1772,8 +1953,10 @@ export async function main(argv, { http = null, fetchImpl = null, importModule =
         return await finish(exitCodeFor('checks', 3), statusFor('checks', STATUS.checks, 'workspace'), lastFailure)
       }
       const candidateDir = isH5Engine ? engine.workspace : cwdReal
-      const roundChecks = await runRoundChecks({ checks, cwd: candidateDir, timeoutMs, outputDir, frozen, labelPrefix: `round-${round}` })
+      await stage('candidate_checks', 'started', { round, cwd: candidateDir })
+      const roundChecks = await runRoundChecks({ checks, cwd: candidateDir, originalCwd: cwdReal, timeoutMs, outputDir, frozen, labelPrefix: `round-${round}` })
       const checksOk = roundChecks.length === checks.length && roundChecks.every((item) => item.passed === true)
+      await stage('candidate_checks', checksOk ? 'passed' : 'failed', { round })
       appendAttempt(report, {
         round,
         at: new Date().toISOString(),
@@ -1793,6 +1976,8 @@ export async function main(argv, { http = null, fetchImpl = null, importModule =
       })
       log(`第 ${round} 轮 accepted=${accepted} 检查 ${roundChecks.filter((item) => item.passed === true).length}/${checks.length} @ ${candidateDir}`)
 
+      assertChecksNotTimedOut(roundChecks)
+      assertNotInterrupted()
       // 只有严格 accepted、引擎正常退出、固定检查全过，才允许进入成功分支。
       const strictlyAccepted = accepted === 'accepted'
       const engineCode = engineExitCode(engine)
@@ -1819,22 +2004,47 @@ export async function main(argv, { http = null, fetchImpl = null, importModule =
         return await finish(exitCodeFor('notAccepted', 6), statusFor('notAccepted', STATUS.notAccepted, 'not_accepted'), lastFailure)
       }
       if (strictlyAccepted && checksOk) {
+        report.delivery.code = 'verified'
+        report.delivery.validation = 'candidate_passed'
         // 只有真实 accepted 才允许引擎自己的 H5WorkspaceManager 合入，合入后用同一批 checks 复检原目录。
         if (engine && engine.transport === 'h5' && typeof invoke.finalize === 'function') {
-          const finalized = await invoke.finalize({ conversationId, runId: engine.runId ?? null, workspace: candidateDir, cwd: cwdReal, dataDir, log })
+          report.integrationChecks = []
+          report.delivery.merge = 'pending'
+          await stage('merge', 'started', { round })
+          const finalized = await invoke.finalize({ conversationId, runId: engine.runId ?? null, workspace: candidateDir, cwd: cwdReal, dataDir, log,
+            validate: async (integrationDir) => {
+              await verifyFrozen(frozen, '集成门禁开始前')
+              await stage('integration_checks', 'started', { round, cwd: integrationDir })
+              const integrated = await runRoundChecks({ checks, cwd: integrationDir, originalCwd: cwdReal, timeoutMs, outputDir, frozen, labelPrefix: `round-${round}-integration-${report.integrationChecks.length + 1}` })
+              report.integrationChecks.push({ cwd: integrationDir, checks: integrated })
+              await stage('integration_checks', integrated.length === checks.length && integrated.every(item => item.passed === true) ? 'passed' : 'failed', { round })
+              assertChecksNotTimedOut(integrated)
+              assertNotInterrupted()
+              if (!(integrated.length === checks.length && integrated.every(item => item.passed === true))) throw Object.assign(new Error('SELF_HOST_INTEGRATION_CHECKS_FAILED'), { kind: 'checks' })
+            },
+          })
           report.finalize = finalized && typeof finalized === 'object' ? finalized : { merged: false, error: 'FINALIZE_NOT_CONFIRMED' }
+          report.delivery.merge = finalized?.merged === true ? 'merged' : 'blocked'
+          await stage('merge', finalized?.merged === true ? 'passed' : 'blocked', { round, result: report.finalize })
           await verifyFrozen(frozen, `第 ${round} 轮合入后`)
           if (!(finalized && finalized.merged === true)) {
             lastFailure = `第 ${round} 轮 accepted 但候选目录未合入原目录，需人工确认后重跑`
             return await finish(exitCodeFor('waiting', 5), statusFor('waiting', STATUS.waiting, 'waiting'), lastFailure)
           }
+          await stage('project_checks', 'started', { round })
           const mergedChecks = await runRoundChecks({ checks, cwd: cwdReal, timeoutMs, outputDir, frozen, labelPrefix: `round-${round}-merged` })
           report.mergedChecks = mergedChecks
+          const mergedOk = mergedChecks.length === checks.length && mergedChecks.every(item => item.passed === true)
+          report.delivery.validation = mergedOk ? 'project_passed' : 'project_failed'
+          await stage('project_checks', mergedOk ? 'passed' : 'failed', { round })
+          assertChecksNotTimedOut(mergedChecks)
+          assertNotInterrupted()
           if (!(mergedChecks.length === checks.length && mergedChecks.every((item) => item.passed === true))) {
             lastFailure = `第 ${round} 轮已合入但原目录固定检查未全部通过`
             return await finish(exitCodeFor('checks', 3), statusFor('checks', STATUS.checks, 'checks'), lastFailure)
           }
         }
+        await invoke.preflight({ cwd: cwdReal })
         await verifyFrozen(frozen, '最终成功前')
         return await finish(exitCodeFor('success', 0), STATUS.success, `第 ${round} 轮本次真实任务 accepted 且全部固定检查通过`)
       }
@@ -1846,6 +2056,16 @@ export async function main(argv, { http = null, fetchImpl = null, importModule =
     await verifyFrozen(frozen, '轮次用尽前')
     return await finish(exitCodeFor('checks', 3), statusFor('checks', STATUS.checks, 'checks'), `已用满 ${maxAttempts} 轮仍未同时满足本次真实任务 accepted 与全部固定检查通过`)
   } catch (error) {
+    if (error?.selfHostFinalize) {
+      report.finalize = error.selfHostFinalize
+      report.delivery.merge = error.selfHostFinalize.merged === true ? 'merged' : 'blocked'
+      report.delivery.validation = 'not_completed_after_merge'
+      report.stages.push({ name: 'merge', state: error.selfHostFinalize.merged === true ? 'passed' : 'blocked', at: new Date().toISOString(), result: error.selfHostFinalize })
+    } else if (report.delivery.merge === 'pending') {
+      report.delivery.merge = error?.selfHostMerge === 'not_applied' ? 'blocked' : 'unknown'
+      if (report.delivery.merge === 'unknown') report.delivery.validation = 'merge_result_unknown'
+      report.stages.push({ name: 'merge', state: report.delivery.merge, at: new Date().toISOString() })
+    }
     const kind = classifySelfHostFailure(error)
     const message = error && error.message ? String(error.message) : String(error)
     if (error?.h5ConversationId) report.conversationId = error.h5ConversationId
@@ -1867,10 +2087,18 @@ export async function main(argv, { http = null, fetchImpl = null, importModule =
       code = exitCodeFor('log', 4)
       status = statusFor('log', STATUS.log, 'log')
       text = `报告或日志写盘失败：${message}`
+    } else if (kind === 'checks') {
+      code = EXIT.checks
+      status = STATUS.checks
+      text = report.delivery.merge === 'merged' ? `代码已合入，但后续验收失败：${message}` : `集成门禁未通过，未合入：${message}`
     } else if (kind === 'timeout') {
       code = exitCodeFor('timeout', 5)
       status = statusFor('timeout', STATUS.timeout, STATUS.timeout)
       text = `超时或被信号中断：${message}`
+    }
+    if (report.delivery.merge === 'unknown') {
+      code = EXIT.waiting; status = STATUS.waiting
+      text = `合入结果未确认，已停止后续动作；请核对原目录及 workspace 记录，不自动重试：${message}`
     }
     try {
       return await finish(code, status, text)
@@ -1931,9 +2159,10 @@ export function classifySelfHostFailure(error) {
   ) {
     return 'frozen'
   }
+  if (error.timedOut === true || error.h5DeadlineExceeded === true || error.aborted === true || name === 'AbortError' || kind === 'timeout' || kind === 'signal') return 'timeout'
+  if (kind === 'checks') return 'checks'
   if (error instanceof UsageError || name === 'UsageError' || kind === 'usage') return 'usage'
   if (name === 'LogError' || kind === 'log' || code === 'LOG_WRITE_FAILED') return 'log'
-  if (error.timedOut === true || error.aborted === true || name === 'AbortError' || kind === 'timeout' || kind === 'signal') return 'timeout'
   return 'engine'
 }
 
@@ -1941,15 +2170,17 @@ export function classifySelfHostFailure(error) {
  * 逐条检查：每条检查结束立刻核冻，绝不等到整批跑完才复查
  * ------------------------------------------------------------------ */
 
-export async function runRoundChecks({ checks, cwd, timeoutMs, outputDir, frozen = null, labelPrefix = 'round' } = {}) {
+export async function runRoundChecks({ checks, cwd, originalCwd = null, timeoutMs, outputDir, frozen = null, labelPrefix = 'round' } = {}) {
   const list = Array.isArray(checks) ? checks : []
   const collected = []
+  if (frozen) await verifyWorkspaceFrozen(frozen, originalCwd, cwd, `${labelPrefix} 开始前`)
   for (let index = 0; index < list.length; index += 1) {
+    assertNotInterrupted()
     const label = `${labelPrefix}-${index + 1}`
     const single = await runChecks({ checks: [list[index]], cwd, timeoutMs, outputDir, labelPrefix: label })
     const record = Array.isArray(single) && single.length > 0 ? single[0] : null
     if (record) collected.push(record)
-    if (frozen) await verifyFrozen(frozen, `${label} 结束后`)
+    if (frozen) { await verifyFrozen(frozen, `${label} 结束后`); await verifyWorkspaceFrozen(frozen, originalCwd, cwd, `${label} 结束后`) }
   }
   return collected
 }

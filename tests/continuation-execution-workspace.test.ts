@@ -54,7 +54,7 @@ it.each([[false, false], [true, false], [true, true]])('validates interrupted ar
     }
     if (changed) await writeFile(join(execution, 'generated.txt'), 'caller changed output')
     await host.close(); host = createLocalHost(options); resumed = true; work = 0
-    const next = await host.sendMessage(c.id, { text: '刚才任务中断了。检查已有产物，继续剩余工作；不要重新写入或运行生成器。' })
+    const next = await host.sendMessage(c.id, { text: 'Prüfe vorhandene Ergebnisse und setze die unterbrochene Arbeit fort. Schreibe nichts neu und starte den Generator nicht erneut.', continueTask: true })
     const nextOutcome = await next.outcome()
     const reuse = await readFile(join(runDir(next.id), 'reuse-checkpoint.json'), 'utf8').then(JSON.parse).catch(() => null)
     const operations = JSON.parse(await readFile(join(runDir(next.id), 'operations.json'), 'utf8')).operations

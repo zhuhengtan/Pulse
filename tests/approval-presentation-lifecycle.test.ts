@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { createServer, type ServerResponse } from 'node:http'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -14,6 +15,7 @@ async function fixture(timeoutMs = 5000, ask = false) {
     mockToolCalls: ask ? [{ name: 'ask.choice', input: { prompt: 'Which scope?', options: ['Small', 'Large'] } }] : [{ name: 'fs.write', input: { path: 'result.txt', content: 'approved exactly once' } }], mockAfterToolResponse: 'Done',
     approvalReview: { provider: 'ollama', model: 'scripted-reviewer', baseURL: `http://127.0.0.1:${(reviewer.address() as { port: number }).port}`, timeoutMs },
   })
+  acceptWorkRequests(host)
   const server = new H5Server(host, { dataDir: join(root, 'data'), port: 0, host: '127.0.0.1' })
   const { port } = await server.start(), base = `http://127.0.0.1:${port}`
   const session = await fetch(`${base}/api/session/local`, { method: 'POST', headers: { Origin: base } })

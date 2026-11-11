@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, expect, it, vi } from 'vitest'
 import { FilesystemTool } from '../packages/adapters/src/tools/filesystem.js'
-import { ExactPatchEditor } from '../packages/server/src/editing.js'
+import { ExactPatchEditor, PATCH_FILE_BYTES } from '../packages/server/src/editing.js'
 import { createLocalHost } from '../packages/server/src/index.js'
 import { defineLaneProgram, PulseRuntime } from '../packages/runtime/src/index.js'
 
@@ -155,11 +155,42 @@ it('leaves the target unchanged when cancellation happens after WAL preparation'
 
 it('bounds its latest-content read and refuses invalid UTF-8 before any write', async () => {
   const f = await fixture(), begin = vi.fn(); f.files.setFileJournal({ begin, landed: vi.fn() })
-  await writeFile(join(f.root, 'a.txt'), 'x'.repeat(500_001))
-  await expect(f.editor.execute(f.input)).rejects.toMatchObject({ code: 'FILE_TOO_LARGE' })
+  await writeFile(join(f.root, 'a.txt'), 'x'.repeat(PATCH_FILE_BYTES+1))
+  await expect(f.editor.execute(f.input)).rejects.toMatchObject({ code: 'FILE_TOO_LARGE', message:expect.stringContaining('not the patch fragment'), details:{kind:'patch-target-limit',path:'a.txt',bytes:PATCH_FILE_BYTES+1,maxBytes:PATCH_FILE_BYTES} })
   const binary = Buffer.from([0xff, 0xfe, 0x41]); await writeFile(join(f.root, 'a.txt'), binary)
   await expect(f.editor.execute(f.input)).rejects.toMatchObject({ code: 'FILE_NOT_UTF8' })
   expect(await readFile(join(f.root, 'a.txt'))).toEqual(binary); expect(begin).not.toHaveBeenCalled()
+})
+
+it.each([1,2] as const)('applies a small batch to a large UTF-8 source while preserving every untouched byte (version=%s)',async version=>{
+ const source='// 保留中文与换行\r\n'.repeat(35000)+'alpha=old\r\n'+'// unchanged tail\r\n'.repeat(4000)+'beta=old\r\n'
+ expect(Buffer.byteLength(source)).toBeGreaterThan(500000)
+ const f=await fixture(source),begin=vi.fn(),landed=vi.fn();f.files.setFileJournal({begin,landed})
+ const result=await new ExactPatchEditor(f.files,undefined,'normalized',version).execute(f.input)
+ const expected=source.replace('alpha=old','alpha=new').replace('beta=old','beta=new')
+ expect(await readFile(join(f.root,'a.txt'))).toEqual(Buffer.from(expected))
+ expect(result).toMatchObject({changed:true,replacements:2,beforeHash:sha(source),hash:sha(expected),bytes:Buffer.byteLength(expected)})
+ expect(begin).toHaveBeenCalledOnce();expect(landed).toHaveBeenCalledOnce()
+ expect(begin.mock.calls[0]![0].before).toEqual(Buffer.from(source))
+ await expect(new ExactPatchEditor(f.files,undefined,'normalized',version).execute(f.input)).resolves.toMatchObject({alreadyApplied:true,changed:false})
+ expect(begin).toHaveBeenCalledOnce()
+})
+
+it('rebases a large-file patch onto an unrelated concurrent edit and leaves conflicts intact',async()=>{
+ const source='// padding\n'.repeat(50000)+'alpha=old\nbeta=old\n',f=await fixture(source)
+ let checks=0
+ const editor=new ExactPatchEditor(f.files,async()=>{if(++checks===1)await writeFile(join(f.root,'a.txt'),source+'// user edit\n')},'normalized',2)
+ await expect(editor.execute(f.input)).resolves.toMatchObject({rebased:true,beforeHash:sha(source+'// user edit\n')})
+ const saved=source.replace('alpha=old','alpha=new').replace('beta=old','beta=new')+'// user edit\n'
+ expect(await readFile(join(f.root,'a.txt'),'utf8')).toBe(saved)
+ await expect(editor.execute({...f.input,patches:[{find:'missing fragment',replace:'never write'}]})).rejects.toMatchObject({code:'PATCH_CONTEXT_NOT_FOUND'})
+ expect(await readFile(join(f.root,'a.txt'),'utf8')).toBe(saved)
+})
+
+it.each([false,true])('rejects repetitive large-file targets without collecting unbounded matches (all=%s)',async all=>{
+ const f=await fixture('x'.repeat(2000000))
+ await expect(f.editor.execute({path:'a.txt',expectedHash:sha(f.baseline),all,patches:[{find:'x',replace:'y'}]})).rejects.toMatchObject({code:all?'PATCH_TOO_BROAD':'PATCH_CONTEXT_AMBIGUOUS'})
+ expect(await readFile(join(f.root,'a.txt'),'utf8')).toBe(f.baseline)
 })
 
 it('never creates a missing patch target or its parent directories', async () => {
@@ -177,7 +208,7 @@ it('coordinates real separate Node processes writing disjoint patches from one o
 }, 15_000)
 
 it.each([undefined, 2])('uses the persisted patch contract in the actual Host registry (version=%s)', async patchApplyVersion => {
-  const f = await fixture(), dataDir = join(f.root, 'data'), host = createLocalHost({ cwd: f.root, dataDir, provider: { provider: 'mock' }, taskController: false, approvalMode: 'auto', jarvis: { enabled: false } })
+  const f = await fixture('alpha=old\n'+'// keep\n'.repeat(70000)+'beta=old\n'), dataDir = join(f.root, 'data'), host = createLocalHost({ cwd: f.root, dataDir, provider: { provider: 'mock' }, taskController: false, approvalMode: 'auto', jarvis: { enabled: false } })
   try {
     const conv = await host.createConversation(), runId = 'fixture-run', runDir = join(dataDir, 'conversations', conv.id, 'runs', runId)
     await mkdir(runDir, { recursive: true }); await writeFile(join(runDir, 'input.json'), JSON.stringify({ fileSurfaceVersion: 3, patchApplyVersion }))
@@ -190,7 +221,7 @@ it.each([undefined, 2])('uses the persisted patch contract in the actual Host re
     const { agentId } = runtime.createAgent('Update both settings', program), outcome = await runtime.start(agentId).outcome(), results = runtime.state.results.get(outcome.resultRef!)!.value as any[]
     if (patchApplyVersion === 2) {
       expect(results[0]).toMatchObject({ error: null, value: { rebased: true, beforeHash: sha('// caller\n' + f.baseline), requestedBaseHash: sha(f.baseline) } })
-      expect(await f.files.read('a.txt')).toBe('// caller\nalpha=new\nbeta=new\n')
+      expect(await f.files.read('a.txt')).toBe('// caller\n'+f.baseline.replace('alpha=old','alpha=new').replace('beta=old','beta=new'))
     } else { expect(results[0].error).toBe('FILE_BASELINE_CONFLICT'); expect(await f.files.read('a.txt')).toBe('// caller\n' + f.baseline) }
   } finally { await host.close() }
 })

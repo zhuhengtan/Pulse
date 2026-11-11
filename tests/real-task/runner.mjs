@@ -148,11 +148,17 @@ export async function loadHostModelConfig() {
           const [reviewProviderId, reviewModelId] = reviewRef.split('/')
           const reviewProfile = raw.providers?.[reviewProviderId]
           const reviewModel = reviewProfile?.models?.[reviewModelId]
-          if (!reviewModel || reviewProfile.provider !== 'ollama') throw new Error('APPROVAL_REVIEW_REQUIRES_OLLAMA')
+          if (!reviewModel || !reviewProfile?.provider) throw new Error('APPROVAL_REVIEW_MODEL_UNAVAILABLE')
+          const reviewKey = reviewProfile.apiKey ?? (reviewProfile.apiKeyEnv ? process.env[reviewProfile.apiKeyEnv] : undefined)
           approvalReview = {
-            provider: 'ollama',
+            provider: reviewProfile.provider,
             model: reviewModel.modelCode ?? reviewModelId,
-            baseURL: reviewProfile.baseURL ?? 'http://127.0.0.1:11434',
+            ...(reviewProfile.baseURL ? { baseURL: reviewProfile.baseURL } : {}),
+            ...(reviewKey ? { apiKey: reviewKey } : {}),
+            ...(reviewProfile.apiKeyEnv ? { apiKeyEnv: reviewProfile.apiKeyEnv } : {}),
+            ...(reviewModel.remote ? { remote: true } : {}),
+            ...(reviewModel.maxContextTokens ? { maxContextTokens: reviewModel.maxContextTokens } : {}),
+            ...(reviewModel.maxOutputTokens ? { maxOutputTokens: reviewModel.maxOutputTokens } : {}),
             timeoutMs: Math.max(30_000, Math.min(60_000, raw.approvalReview.timeoutMs ?? 30_000)),
           }
         }
@@ -178,7 +184,7 @@ export async function loadHostModelConfig() {
       }
     }
   } catch (error) {
-    if (error?.message === 'APPROVAL_REVIEW_REQUIRES_OLLAMA') throw error
+    if (error?.message?.startsWith('APPROVAL_REVIEW_')) throw error
     // Fall back to environment variables below.
   }
   if (process.env.DEEPSEEK_API_KEY) {

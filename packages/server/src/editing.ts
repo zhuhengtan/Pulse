@@ -7,6 +7,9 @@ import { FilesystemTool } from '@hunterzhu/pulse-adapters'
 
 export const EDIT_BYTES = 8_192
 export const STREAM_BYTES = 16_384
+// Host-side source scanning is independent of model-visible edit fragments.
+// Match the bounded line reader's source limit; never send the whole file to the model.
+export const PATCH_FILE_BYTES = 16 * 1024 * 1024
 // Plans use a dedicated bounded writer with a no-overwrite contract.
 export const PLAN_BYTES = 16_384
 const MAX_DRAFT_BYTES = 500_000
@@ -211,12 +214,13 @@ interface FragmentMatch {
   replace: string
 }
 
-function findFragmentMatches(source: string, find: string, replace: string): { matches: FragmentMatch[]; level: number } {
+function findFragmentMatches(source: string, find: string, replace: string, maxMatches: number): { matches: FragmentMatch[]; level: number } {
   // Level 0: Exact byte substring
   const level0Matches: FragmentMatch[] = []
   let pos = source.indexOf(find)
   while (pos >= 0) {
     level0Matches.push({ start: pos, end: pos + find.length, replace })
+    if (level0Matches.length >= maxMatches) break
     pos = source.indexOf(find, pos + find.length)
   }
   if (level0Matches.length > 0) {
@@ -236,6 +240,7 @@ function findFragmentMatches(source: string, find: string, replace: string): { m
         adaptedReplace = replace.replace(/\n/g, '\r\n')
       }
       l1Matches.push({ start: m.index, end: m.index + m[0].length, replace: adaptedReplace })
+      if (l1Matches.length >= maxMatches) break
       if (m[0].length === 0) l1Regex.lastIndex++
     }
     if (l1Matches.length > 0) {
@@ -264,6 +269,7 @@ function findFragmentMatches(source: string, find: string, replace: string): { m
       adaptedReplace = replace.replace(/\n/g, '\r\n')
     }
     l2Matches.push({ start: m2.index, end: m2.index + m2[0].length, replace: adaptedReplace })
+    if (l2Matches.length >= maxMatches) break
     if (m2[0].length === 0) l2Regex.lastIndex++
   }
   if (l2Matches.length > 0) {
@@ -385,7 +391,7 @@ export class ExactPatchEditor {
     if ((expectedHash === undefined || rebasing) && patches.some(p => p.find !== p.replace && p.replace.includes(p.find) && source.includes(p.replace))) conflict('PATCH_CONTEXT_AMBIGUOUS')
     const edits: FragmentMatch[] = []
     for (const p of patches) {
-      const { matches } = locateFragment(source, p.find, p.replace, this.matching)
+      const { matches } = locateFragment(source, p.find, p.replace, this.matching, fragmentMatchLimit(p.find, p.replace, all && !rebasing))
       if (!matches.length) conflict('PATCH_CONTEXT_NOT_FOUND')
       if ((!all || rebasing) && matches.length > 1) conflict('PATCH_CONTEXT_AMBIGUOUS')
       const count = all ? matches.length : 1
@@ -400,15 +406,13 @@ export class ExactPatchEditor {
     const { path, patches, expectedHash, all = false } = input
     if (!patches.length || patches.length > 16 || all && patches.length !== 1 || patches.some(p => !p.find)) throw editingError('INVALID_PATCH_INPUT', 'Supply 1-16 nonempty exact fragments; all is only valid for a single fragment.')
     for (const patch of patches) { boundedEdit(patch.find); boundedEdit(patch.replace) }
-    const read = async () => {
-      const source = await this.files.readLimited(path, 500_000, signal)
-      if (source.truncated) throw editingError('FILE_TOO_LARGE', 'File exceeds the bounded patch editor.')
-      return source.content
-    }
+    // Host inspection shares the bounded source reader, not the model-visible
+    // fs.read window cap. Returning the same content does not journal or write.
+    const read = () => this.files.editText(path, PATCH_FILE_BYTES, async content => ({ content, result: content }), signal)
     try {
       if (this.applyVersion === 2) {
         if (expectedHash !== undefined && !/^[a-f0-9]{64}$/.test(expectedHash)) throw editingError('INVALID_FILE_BASELINE_HASH', 'Use the SHA-256 from a visible file read.')
-        return await this.files.editText(path, 500_000, async source => {
+        return await this.files.editText(path, PATCH_FILE_BYTES, async source => {
           const proposed = this.prepare(input, source)
           if (proposed.result.changed) await this.validate?.(path, proposed.content)
           return proposed
@@ -422,6 +426,10 @@ export class ExactPatchEditor {
       await this.files.writeIfUnchanged(path, proposed.content, expectedHash ?? proposed.result.beforeHash, signal)
       return proposed.result
     } catch (error) {
+      if ((error as { code?: string }).code === 'FILE_TOO_LARGE') {
+        const size = (error as { details?: { bytes?: number } }).details?.bytes
+        throw Object.assign(editingError('FILE_TOO_LARGE', `Patch target ${path}${size === undefined ? '' : ` (${size} bytes)`} exceeds the host source limit of ${PATCH_FILE_BYTES} bytes. This limits the target file, not the patch fragment. Smaller patches or smaller fs.read windows cannot fix it; stop and report this file as blocked.`), { details: { kind: 'patch-target-limit', path, maxBytes: PATCH_FILE_BYTES, ...(size === undefined ? {} : { bytes: size }) } })
+      }
       if ((error as { code?: string; details?: unknown }).code === 'FILE_BASELINE_CONFLICT' && !(error as { details?: unknown }).details && (this.applyVersion === 1 || (error as { beforeCommit?: boolean }).beforeCommit)) this.conflict(input, await read(), 'FILE_BASELINE_CONFLICT')
       throw error
     }
@@ -429,23 +437,29 @@ export class ExactPatchEditor {
 }
 
 interface ExactEdit { start: number; end: number; replace: string }
-function locateFragment(source: string, find: string, replace: string, matching: PatchMatching): { matches: FragmentMatch[]; level: number } {
+// Two matches prove ambiguity. Replace-all needs only enough matches to prove
+// the edit-byte limit was exceeded, even in a multi-megabyte repetitive file.
+function fragmentMatchLimit(find: string, replace: string, all: boolean): number {
+  return all ? Math.floor(EDIT_BYTES / Math.max(Buffer.byteLength(find), Buffer.byteLength(replace), 1)) + 1 : 2
+}
+function locateFragment(source: string, find: string, replace: string, matching: PatchMatching, maxMatches: number): { matches: FragmentMatch[]; level: number } {
   if (matching === 'exact') {
     const matches: FragmentMatch[] = []
     let pos = source.indexOf(find)
     while (pos >= 0) {
       matches.push({ start: pos, end: pos + find.length, replace })
+      if (matches.length >= maxMatches) break
       pos = source.indexOf(find, pos + Math.max(find.length, 1))
     }
     return { matches, level: matches.length > 0 ? 0 : -1 }
   }
-  return findFragmentMatches(source, find, replace)
+  return findFragmentMatches(source, find, replace, maxMatches)
 }
 function exactEdits(source: string, patches: ExactFragment[], all: boolean, matching: PatchMatching): ExactEdit[] | undefined {
   const edits: ExactEdit[] = []
   for (const { find, replace } of patches) {
     if (!find) return undefined
-    const { matches } = locateFragment(source, find, replace, matching)
+    const { matches } = locateFragment(source, find, replace, matching, fragmentMatchLimit(find, replace, all))
     if (matches.length === 0) return undefined
     if (!all && matches.length >= 2) return undefined
     if (all && matches.length * Math.max(Buffer.byteLength(find), Buffer.byteLength(replace)) > EDIT_BYTES) return undefined

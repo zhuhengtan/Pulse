@@ -12,7 +12,7 @@ export const automationActionSchema = z.discriminatedUnion('type', [
 export type AutomationAction = z.infer<typeof automationActionSchema>
 export interface AutomationConfig {
   browser?: { channel?: 'chromium' | 'chrome' | 'msedge'; mode?: 'dedicated' | 'existing'; profileDir?: string; command?: string; args?: string[] }
-  computer?: { helperPath?: string; displayId?: string }
+  computer?: { agentDesktopPath?: string; helperPath?: string; displayId?: string }
 }
 export interface BackendObservation {
   captureScope?: 'window' | 'display'
@@ -25,13 +25,17 @@ export interface BackendObservation {
   text?: string
   width: number
   height: number
-  image: { mediaType: 'image/png' | 'image/jpeg'; data: string }
+  refs?: string[]
+  contentFingerprint?: string
+  focusedRef?: string
+  image?: { mediaType: 'image/png' | 'image/jpeg'; data: string }
   geometry?: string
 }
 export interface AutomationBackend {
   call(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
-  observe(signal?: AbortSignal, windowId?: string): Promise<BackendObservation>
+  observe(signal?: AbortSignal, windowId?: string, includeImage?: boolean): Promise<BackendObservation>
   act(action: AutomationAction, observation: BackendObservation, signal?: AbortSignal): Promise<void>
+  validate?(observation: BackendObservation, signal?: AbortSignal): Promise<void>
   release(): Promise<void>
   setControl?(state: string, until?: number): Promise<void>
   close(): Promise<void>
@@ -48,6 +52,8 @@ export interface AutomationSessionView {
   mode: string
   state: 'ai' | 'paused' | 'human' | 'closed' | 'unknown'
   controller?: string
+  hasImage?: boolean
+  observationText?: string
   frameId?: string
   frameWidth?: number
   frameHeight?: number

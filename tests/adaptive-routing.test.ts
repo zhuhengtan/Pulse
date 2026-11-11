@@ -1,10 +1,26 @@
 import { describe, expect, it } from 'vitest'
 import { createModelEffectExecutor, type ProviderAdapter } from '@hunterzhu/pulse-adapters'
-import { AdaptiveModelRouter, InMemoryModelRegistry, type EffectRecord, type LLMRequestProjection } from '@hunterzhu/pulse-runtime'
+import { AdaptiveModelRouter, ModelRouter, InMemoryModelRegistry, type EffectRecord, type LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 
 const projection: LLMRequestProjection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'default', instruction: 'reason', privacy: 'public', privacyRefs: [] }, blocks: [{ kind: 'instruction', content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'default', privacy: 'public', privacyRefs: [] }
 
 describe('adaptive model routing', () => {
+  it.each([1, 2])('uses compatible alternatives with %i configured candidates and retains the transport retry bound', async count => {
+    const registry = new InMemoryModelRegistry()
+    for (let i = 0; i < count; i++) registry.register({ id: `model-${i}`, providerId: 'fixture', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: count - i })
+    const router = new ModelRouter(registry)
+    router.register({ task: 'reason', candidates: Array.from({ length: count }, (_, i) => `model-${i}`) })
+    const selected: string[] = []
+    const provider: ProviderAdapter = { id: 'fixture', name: 'fixture', executeAttempt: async request => { selected.push(request.model); throw Object.assign(new Error('Disconnected'), { code: 'PROVIDER_NETWORK_ERROR', retryable: true }) } }
+    const execute = createModelEffectExecutor({ router, providers: new Map([[provider.id, provider]]) })
+    for (let attemptNo = 1; attemptNo <= 3; attemptNo++) {
+      const effect = { id: 'transport', agentId: 'a', ownerLaneId: 'l', key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection }, attemptId: `attempt-${attemptNo}`, attemptNo, state: 'running', executionState: 'running', sideEffectState: 'none', retryPolicy: { maxAttempts: 3, sameModel: false } } as unknown as EffectRecord
+      const result = await execute(effect, new AbortController().signal)
+      expect(result.error?.code).toBe('PROVIDER_NETWORK_ERROR')
+      if (attemptNo < 3) expect(result.error?.retryable).toBe(true)
+    }
+    expect(selected).toEqual(count === 1 ? ['model-0', 'model-0', 'model-0'] : ['model-0', 'model-1', 'model-1'])
+  })
   it('ranks candidates from quality, latency, cost, cache, and exploration feedback', () => {
     const registry = new InMemoryModelRegistry()
     registry.register({ id: 'slow-expensive', providerId: 'p1', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 20 })

@@ -89,6 +89,7 @@ Provider 字段说明：
 - `providers.<id>.models`：该服务商提供的模型注册表。不同供应商可以有相同的模型 ID；模型代码 `modelCode` 是实际传给供应商的名称。
 - `activeModel`：当前模型引用，格式为 `供应商ID/模型ID`。交互界面中可用 `/model deepseek/gpt5.6-b` 切换；不带供应商的旧名称仅在唯一匹配时兼容。
 - `taskRouting`：为 `reason`、`plan`、`merge`、`verify` 配置有序的 `供应商ID/模型ID` 列表；按顺序尝试候选，失败时回退。没有配置的任务使用当前模型。只在用户级配置生效。
+- `qualityReviewEnabled`：任务质量复核，默认 `true`。桌面和 Web 的“设置 → 审批与代审”可修改全局默认值，工作发送栏的“复核”可覆盖本次任务。选择在启动时固定，恢复任务时沿用；关闭后跳过计划、阶段和最终质量复核，结果标为“已结束，未复核”。工具授权、安全审批、明确要求的执行确认和必需检查仍按原规则执行。
 - `capabilities.enabled`：显式启用已安装的宿主能力包。内置有 `pdf`、`spreadsheet`、`skills`；MCP 包名来自 `capabilities.mcpServers`。工作区配置不能启动进程或启用宿主扩展。
 - `capabilities.skills`：可选的技能目录名白名单；省略时自动发现全部技能，空数组表示不开放任何技能。旧配置中的名称现在只限制可选范围，不会预先加载正文。
 - `capabilities.trustedSkillRoots`：可选的绝对目录列表，额外信任其中的技能目录；路径必须是绝对路径，符号链接会被拒绝。
@@ -111,7 +112,7 @@ Provider 字段说明：
 - `maxTurns`：普通 ReAct 运行的模型/工具轮数，默认 32，可用 `--max-turns` 或 `PULSE_MAX_TURNS` 覆盖；不再充当工作任务的总调用预算。
 - `autoCompactPercent`：自动压缩阈值，按 `maxContextTokens` 的百分比估算。默认 90，可用 `--auto-compact-percent` 或 `PULSE_AUTO_COMPACT_PERCENT` 覆盖，超过 90 会降到 90，给摘要请求留出空间。达到阈值后，下一条消息发送前会调用已配置模型压缩历史，并在会话里留下 `[自动压缩]` 提示；原记录备份为 `messages.jsonl.bak`。估算会加上系统提示词的体积。更早内容如果已经只剩一条历史摘要，则不再重复压缩。摘要留在对话记录里，适配器会把它当作上下文，而不会并入系统提示词。`mock` provider 不会自动压缩。会话中也可以随时执行 `/compact` 手动压缩。
 
-定时任务通过 `pulse schedule add --every 1h --name "项目巡检" "任务内容"` 创建，`list`、`pause <id>`、`resume <id>`、`remove <id>` 管理。`pulse schedule daemon` 常驻轮询，`run-once` 只运行已到期任务。计划任务只允许 `read-only` 或明确配置的 `auto` 审批模式；执行记录保存在数据目录的 `scheduled-tasks.json` 中。它是前台 worker，操作系统登录启动服务尚需由部署环境单独配置。
+定时任务通过 `pulse schedule add --every 1h --name "项目巡检" "任务内容"` 创建，`list`、`pause <id>`、`resume <id>`、`remove <id>` 管理。`pulse schedule daemon` 常驻轮询，`run-once` 只运行已到期任务。计划任务只允许 `read-only` 或明确配置的 `auto` 审批模式；执行记录保存在数据目录的 `scheduled-tasks.json` 中。也支持 `--at 2027-01-20T10:00`、`--daily 09:00`、`--weekly mon,wed --time 10:00`，日历计划必须指定 `--timezone Asia/Shanghai` 等时区。日历计划默认跳过超时 60 秒的时点，`--missed-run run-once` 可明确允许补跑一次；夏令时跳过不存在的时刻、重复时刻只运行第一次。重启后 worker 会恢复持久化计划；需自动登录启动时，可在明确授权后安装现有 `pulse service install` 用户服务，创建任务不会自行安装服务。详见[定时任务与恢复说明](scheduled-tasks.md)。
 
 ## 网页搜索
 
@@ -195,3 +196,9 @@ Pulse 采用模块化系统提示词基座（参考 Claude Code、OpenAI Codex C
 `resume <会话ID>` 和 `--resume` 恢复该会话的未完成运行；已完成时进入历史会话。文本“继续”是向会话发送续做需求，不能代替恢复等待中的原问题。恢复保留题目、选项和默认保守项，不自动回答。
 
 `maxModelCalls` 的持久账本包含规划、审批、重试、压缩和验证，重启不清零。不要删除或清理预算文件；预算耗尽后保留现场并停止，是否发起后续工作由用户决定。`ENOTFOUND` 表示网络/DNS阻塞，应保留脱敏原因码，不记成业务实现错误。
+
+## 跨进程任务准入
+
+用户级配置可设置 `taskAdmission: { "maxRunning": 2, "maxQueued": 32 }`。`maxRunning` 必须是 1–16 的整数，`maxQueued` 必须是 0–256 的整数（0 表示不排队）；省略时默认分别为 2 和 32。项目 `.pulse/config.json` 中的此字段始终被忽略，即使使用 `--trust-workspace`。旧配置无需迁移。限额持久化后，实例参数与已存限额冲突会拒绝准入，不会自动提额；调整须经显式统一配置操作。
+
+限制作用于同一操作系统用户下采用此准入协议的 Pulse 实例，不是全机器的进程上限。后台任务排队、取消与异常恢复边界见[任务准入说明](task-admission.md)。

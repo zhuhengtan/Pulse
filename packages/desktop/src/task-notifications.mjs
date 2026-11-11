@@ -19,7 +19,7 @@ export function notificationRequestId(key, answers, attempt = 0) {
 }
 /** System notifications are an optional view over the durable task inbox. */
 export class TaskNotifications {
-    seen = new Set(); pending = new Map(); recent = []; live = new Map(); liveTargets = new Map(); replying = new Set(); submitted = new Set(); attempts = new Map(); initialized = false; disabled = false; closed = false; deliveryError = '';
+    unread = 0; seen = new Set(); pending = new Map(); recent = []; live = new Map(); liveTargets = new Map(); replying = new Set(); submitted = new Set(); attempts = new Map(); initialized = false; disabled = false; closed = false; deliveryError = '';
     constructor({ Notification, request, open, load, save, platform = process.platform, allowChoiceActions = false, changed = () => {} }) {
         Object.assign(this, { Notification, request, open, load, save, platform, allowChoiceActions, changed });
     }
@@ -55,6 +55,7 @@ export class TaskNotifications {
             for (const [id, key] of this.liveTargets) if (!valid.has(key)) { this.live.get(id)?.close(); this.live.delete(id); this.liveTargets.delete(id); }
             // On restart, close orphaned/legacy question notices without touching completion history.
             for (const notice of history) if (notice.id?.startsWith('interaction:') && !valid.has(notice.id)) notice.close();
+            this.unread = items.filter(item => !item.readAt && (item.kind === 'complete' || current.has(item.id))).length;
             this.pending = current;
             this.recent = items.filter(item => item.kind === 'complete').slice(-10).reverse();
             while (this.live.size > 200) { const id = this.live.keys().next().value; this.live.get(id)?.close(); this.live.delete(id); this.liveTargets.delete(id); }

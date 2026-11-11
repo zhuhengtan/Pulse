@@ -1,7 +1,55 @@
 import type { JsonValue, StepContext } from '@hunterzhu/pulse-runtime'
+import { contentHash } from '@hunterzhu/pulse-runtime'
 import type { TaskRecord } from '../task.js'
 import { assessAcceptanceResult, type AcceptanceCheck } from './acceptance.js'
 import type { ControlledTask } from './state.js'
+
+export function browserCheckCommand(command: string, args: string[]): boolean {
+  const executable = command.split(/[/\\]/).at(-1) ?? command
+  return /^(?:google chrome|chrome|chromium|playwright)(?:\.exe)?$/i.test(executable)
+    || /^(?:node|pnpm|npm|npx|yarn|bun|vitest)(?:\.exe)?$/i.test(executable) && args.some(arg => /(?:playwright|browser|chromium|footer-measure|hover-measure)(?:[./-]|$)/i.test(arg))
+}
+
+type Invocation = { command: string; args: string[]; cwd?: string }
+function canonicalInvocation(invocation: Invocation): string[] {
+  let command = (invocation.command.replaceAll('\\', '/').split('/').at(-1) ?? invocation.command).replace(/\.(?:cmd|exe)$/i, '')
+  let args = invocation.args.filter(arg => !['-y', '--yes', '--offline', '--no-install', '--prefer-offline', '--'].includes(arg))
+  if (['npx', 'npx-cli.js', 'pnpm', 'pnpm.cjs', 'npm'].includes(command)) {
+    if (['exec', 'run'].includes(args[0] ?? '')) args = args.slice(1)
+    command = args.shift() ?? command
+  }
+  if (command === 'node' && args[0]?.match(/(?:vitest|tsc|playwright)(?:\.m?js)?$/)) command = args.shift()!.replaceAll('\\', '/').split('/').at(-1)!.replace(/\.m?js$/, '')
+  return [command, ...args]
+}
+export function checkTarget(invocation: Invocation): string {
+  const parts = canonicalInvocation(invocation), files = parts.filter(arg => /\.(?:[cm]?[jt]sx?|py|json)$/.test(arg) && !/node_modules/.test(arg)).sort()
+  return contentHash({ cwd: invocation.cwd ?? '.', target: files.length ? files : parts })
+}
+export const checkMethod = (invocation: Invocation): string => contentHash(canonicalInvocation(invocation))
+export function environmentBlock(invocation: Invocation, value: JsonValue | undefined, toolStatus?: string): { key: string; method: string; reason: string } | undefined {
+  const body = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  if (toolStatus === 'succeeded' && body.code === 0 && !body.aborted && !body.timedOut) return undefined
+  const output = String(body.stderr ?? '') + '\n' + String(body.stdout ?? body.output ?? '')
+  const violation = /(?:listen|bind)\s+(EPERM|EACCES)|(?:EPERM|EACCES).*(?:chmod|mkdir|socket|pulse-ipc)|(?:EPERM|EACCES).*open[^\n]*(?:package\.json|postcss|tsconfig)|(?:Failed to load PostCSS config)[\s\S]*?(?:EPERM|EACCES)|(?:SingletonLock|crashpad|browser launch)[^\n]*(?:permission denied|operation not permitted|failed)/i.exec(output)
+  if (!violation) return undefined
+  const operation = /postcss|package\.json|tsconfig/i.test(violation[0]) ? 'configuration-read' : /listen|bind|socket|pulse-ipc/i.test(violation[0]) ? 'local-ipc' : /chmod|mkdir/i.test(violation[0]) ? 'filesystem-permissions' : 'browser-launch'
+  return { key: `${checkTarget(invocation)}:${operation}`, method: checkMethod(invocation), reason: `${operation}: ${violation[0].slice(0, 240)}` }
+}
+export function verificationProblem(invocation: Invocation | undefined, value: JsonValue | undefined, toolStatus?: string): { code: string; reason: string } | undefined {
+  const body = value && typeof value === 'object' && !Array.isArray(value) ? value : undefined
+  const stdout = typeof body?.stdout === 'string' ? body.stdout : typeof body?.output === 'string' ? body.output : ''
+  const stderr = typeof body?.stderr === 'string' ? body.stderr : ''
+  const browser = !!invocation && browserCheckCommand(invocation.command, invocation.args)
+  const label = invocation?.command.split(/[/\\]/).at(-1) ?? 'check'
+  const failed = toolStatus !== 'succeeded' || body?.timedOut === true || body?.aborted === true || !!(body && 'code' in body && body.code !== 0)
+  const environment = invocation && environmentBlock(invocation, value, toolStatus)
+  if (failed && environment) return { code: 'CHECK_ENVIRONMENT_BLOCKED', reason: environment.reason }
+  if (failed && /listen\s+(?:EPERM|EACCES)|(?:EPERM|EACCES).*chmod/i.test(stderr + '\n' + stdout)) return { code: 'CHECK_ENVIRONMENT_BLOCKED', reason: `${label}: the test process could not bind a local listener or set required filesystem permissions.` }
+  if (browser && /(?:SingletonLock|sandbox|launch|crashpad).{0,100}(?:operation not permitted|permission denied|failed)|(?:failed|permission denied).{0,100}(?:SingletonLock|sandbox|browser launch)/i.test(stderr) && !stdout.trim()) return { code: 'CHECK_ENVIRONMENT_BLOCKED', reason: 'Browser launch was blocked by the execution environment and produced no measurements.' }
+  if (failed) return { code: 'CHECK_FAILED', reason: `${label}: ${body?.timedOut === true ? 'timed out' : body?.aborted === true ? 'aborted' : typeof body?.code === 'number' ? `exit ${body.code}` : 'execution failed'}.` }
+  if (browser && !/\b[1-9]\d*\s+passed\b|"(?:checks|measurements|assertions)"\s*:\s*(?:\[\s*[^\]\s]|\{\s*")/i.test(stdout)) return { code: 'CHECK_EVIDENCE_MISSING', reason: 'The browser command produced no test or measurement output.' }
+  return undefined
+}
 
 /** Names refer to frozen Host checks, never to guessed worker-visible files. */
 export function namedHostChecks(record: TaskRecord | undefined, task: ControlledTask): AcceptanceCheck[] {

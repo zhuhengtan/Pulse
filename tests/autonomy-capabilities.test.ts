@@ -26,7 +26,7 @@ it('preflight respects the pure step boundary even with workspace permission pol
   expect(count).toBe(2)
 })
 
-it('preflights unsupported browser images and reports desktop vision blockers before opening a session', async () => {
+it('preflights unsupported images while allowing text desktop observation', async () => {
  const {createAutomationTools}=await import('../packages/server/src/automation/tools.js')
  const requests:string[]=[], client={request:async(method:string)=>{requests.push(method);return{nativeBrowserConnected:true}}}
  const registry=new ToolRegistry()
@@ -36,9 +36,9 @@ it('preflights unsupported browser images and reports desktop vision blockers be
  expect(()=>validate('browser.observe',{sessionId:'12345678-1234-4123-8123-123456789abc',includeImage:true})).toThrow(/manifest/)
  expect(validate('browser.observe',{sessionId:'12345678-1234-4123-8123-123456789abc',includeImage:false})).toBeUndefined()
  const status=await registry.execute('capability.status',{},new AbortController().signal) as any
- expect(status.capabilities.find((c:any)=>c.id==='computer')).toMatchObject({enabled:true,registered:true,visionAvailable:false,reason:'VISION_MODEL_REQUIRED'})
- await expect(registry.execute('automation.open',{kind:'computer'},new AbortController().signal)).rejects.toMatchObject({code:'VISION_MODEL_REQUIRED'})
- expect(requests).toEqual(['capabilities'])
+ expect(status.capabilities.find((c:any)=>c.id==='computer')).toMatchObject({enabled:true,registered:true,visionAvailable:false,textObservation:true,reason:null})
+ await expect(registry.execute('automation.open',{kind:'computer'},new AbortController().signal)).resolves.toBeDefined()
+ expect(requests).toEqual(['capabilities','open'])
 })
 
 it('stops a capability-blocked stage before another model can invent a desktop workaround',async()=>{
@@ -64,5 +64,5 @@ it('routes a read-only desktop window observation without a focus command',async
  const id='12345678-1234-4123-8123-123456789abc'
  const result=await registry.execute('computer.observe',{sessionId:id,windowId:'123:1'},new AbortController().signal)
  expect(result).toMatchObject({title:'Pulse',captureScope:'window'})
- expect(calls).toEqual([['observe',[id,expect.stringMatching(/^run:/),null,true,'123:1']]])
+ expect(calls).toEqual([['observe',[id,expect.stringMatching(/^run:/),null,false,'123:1']]])
 })

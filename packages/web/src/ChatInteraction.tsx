@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { InteractionPanel, type PendingInteraction } from './InteractionPanel.js'
+import { AnsweredQuestion } from './AnsweredQuestion.js'
 import { PulseButton } from './PulseControls.js'
 import { apiJson, jsonRequest, type PulseWebTransport } from './transport.js'
 import type { ChatWorkAction } from '@hunterzhu/pulse-server/protocol'
@@ -25,12 +26,19 @@ export function ChatInteractionContent({ interaction, submit, notificationTarget
   </div>
 }
 export function ChatWorkPrompt({ action, transport, notificationTarget }: { action: ChatWorkAction; transport: PulseWebTransport; notificationTarget?: string | undefined }) {
-  const [submitted, setSubmitted] = useState(false)
-  if (notificationTarget && notificationTarget !== action.interaction.groupId) return null
-  if (action.state === 'answered' || submitted) return <small role="status">此事项已处理</small>
+  const [submitted, setSubmitted] = useState<Answers>()
+  if (action.state === 'answered' || submitted) {
+    const answers = submitted ?? action.answers
+    if (action.interaction.kind === 'ask' && answers) return <>{action.interaction.items.map(item => {
+      const answer = answers.find(answer => answer.effectId === item.effectId)
+      return answer ? <AnsweredQuestion key={item.effectId} question={{ ...item, answer: answer.value }}/> : null
+    })}</>
+    return <small role="status">此事项已处理</small>
+  }
   if (action.state === 'obsolete') return <small role="status">此事项已变化，可打开工作对话查看。</small>
+  if (notificationTarget && action.interaction.kind === 'ask' && action.interaction.groupId !== notificationTarget) return null
   const interaction: PendingInteraction = { kind: 'interaction', runId: action.runId, groupId: action.interaction.groupId, interactionKind: action.interaction.kind, items: action.interaction.items }
   return <ChatInteractionContent notificationTarget={notificationTarget} interaction={interaction} submit={async answers => {
-    try { await apiJson(transport, `/api/assistant/work/${encodeURIComponent(action.conversationId)}/replies`, jsonRequest('POST', { callbackId: action.callbackId, fingerprint: action.fingerprint, answers })); setSubmitted(true); return true } catch { return false }
+    try { await apiJson(transport, `/api/assistant/work/${encodeURIComponent(action.conversationId)}/replies`, jsonRequest('POST', { callbackId: action.callbackId, fingerprint: action.fingerprint, answers })); setSubmitted(answers); return true } catch { return false }
   }}/>
 }

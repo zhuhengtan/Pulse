@@ -1,4 +1,5 @@
 import type { WebRunEvent } from './transport.js';
+import { createRequestId } from './requestId.js';
 /** One multiplexed socket. Commands have receipts; reconnect only replays subscriptions. */
 export class ChatChannel {
     private socket: WebSocket | undefined;
@@ -128,7 +129,7 @@ export class ChatChannel {
             throw new DOMException('Aborted', 'AbortError');
         if (this.pending.size >= 32)
             throw new Error('CHAT_QUEUE_FULL');
-        const id = crypto.randomUUID();
+        const id = createRequestId('chat');
         return new Promise((resolve, reject) => {
             const cleanup = () => init.signal?.removeEventListener('abort', abort);
             const abort = () => { const item = this.pending.get(id); if (item)

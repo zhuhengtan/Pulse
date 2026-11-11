@@ -3,7 +3,7 @@ import { MockAdapter } from '../packages/adapters/src/providers/mock.js'
 import { createHostModelRouting } from '../packages/server/src/model-routing.js'
 
 describe('host model routing', () => {
-  it('uses the active model by default and translates display names to provider codes', async () => {
+  it('prefers the active model with configured fallbacks and translates display names to provider codes', async () => {
     const mock = new MockAdapter('mock')
     const executeAttempt = vi.spyOn(mock, 'executeAttempt').mockResolvedValue({ text: 'ok', toolCalls: [], finishReason: 'stop' })
     const routing = createHostModelRouting({
@@ -18,7 +18,7 @@ describe('host model routing', () => {
       activeAdapter: mock,
     })
 
-    expect(routing.router.route('reason', 'cloud_allowed').map((model) => model.id)).toEqual(['Quick'])
+    expect(routing.router.route('reason', 'cloud_allowed').map((model) => model.id)).toEqual(['Quick', 'Deep'])
     const adapter = routing.providers.get('local')!
     await adapter.executeAttempt({ request: {} as never, signal: new AbortController().signal, model: 'Deep' })
     expect(executeAttempt).toHaveBeenCalledWith(expect.objectContaining({ model: 'deep-code' }))

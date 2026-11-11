@@ -23,6 +23,7 @@ export const MANIFEST_NAME = 'manifest.json'
 export const MANIFEST_VERSION = 1
 export const SUPERVISOR_FILE_NAME = 'self-host.mjs'
 export const TOOL_FILE_NAME = 'self-host-snapshot.mjs'
+export const RUNTIME_CONTROLLER_FILE_NAME = 'self-host-runtime.mjs'
 export const CODE_DIR = 'code'
 export const STORE_DIR = '.pulse-store'
 
@@ -145,6 +146,46 @@ async function sha256File(file) {
   const hash = crypto.createHash('sha256')
   hash.update(await fsp.readFile(file))
   return hash.digest('hex')
+}
+
+/** Canonical JSON uses code-unit key ordering, never locale-dependent ordering. */
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+/** Sort multisets, retaining duplicates so invalid records cannot disappear from identity. */
+function canonicalRecords(records) {
+  if (!Array.isArray(records)) return records ?? null
+  return records.map((record) => canonicalJson(record)).sort().map((record) => JSON.parse(record))
+}
+
+/**
+ * Identity schema 1 binds the code closure, not creation time or source locations.
+ * Array order is immaterial only for manifest record collections and dependencies.
+ * Runtime paths (including package slugs) remain significant. No filesystem reads.
+ */
+export function snapshotRuntimeDigest(manifest) {
+  const nodes = Array.isArray(manifest.nodes)
+    ? manifest.nodes.map((node) => node && typeof node === 'object' && !Array.isArray(node)
+      ? { ...node, dependencies: canonicalRecords(node.dependencies) }
+      : node)
+    : manifest.nodes
+  const runtime = {
+    schema: 1,
+    manifestVersion: manifest.manifestVersion ?? null,
+    layout: manifest.layout ?? null,
+    dataPolicy: manifest.dataPolicy ?? null,
+    entries: manifest.entries ?? null,
+    files: canonicalRecords(manifest.files),
+    links: canonicalRecords(manifest.links),
+    nodes: canonicalRecords(nodes),
+    edges: canonicalRecords(manifest.edges),
+  }
+  return crypto.createHash('sha256').update(canonicalJson(runtime)).digest('hex')
 }
 
 function toPosix(p) {
@@ -797,6 +838,8 @@ function buildInvocation({ snapshotRoot, manifest, options }) {
       '--checks-file', options.checksFile || '<checks-file>',
       '--cwd', options.cwdPath,
       '--cli-entry', cli,
+      '--engine-snapshot', snapshotRoot,
+      '--engine-digest', manifest.runtimeIdentity.digest,
       '--data-dir', options.dataDir || '<existing-data-dir>',
       '--output', options.output || '<output-dir>',
     )
@@ -857,6 +900,7 @@ export async function createSnapshot(options = {}) {
     const extraCode = [
       { from: path.join(path.dirname(TOOL_FILE), SUPERVISOR_FILE_NAME), to: `supervisor/${SUPERVISOR_FILE_NAME}` },
       { from: TOOL_FILE, to: `supervisor/${TOOL_FILE_NAME}` },
+      { from: path.join(path.dirname(TOOL_FILE), RUNTIME_CONTROLLER_FILE_NAME), to: `supervisor/${RUNTIME_CONTROLLER_FILE_NAME}` },
     ]
     for (const item of extraCode) {
       const stat = await fsp.stat(item.from).catch(() => null)
@@ -884,6 +928,9 @@ export async function createSnapshot(options = {}) {
           ? `${CODE_DIR}/supervisor/${SUPERVISOR_FILE_NAME}`
           : null,
         tool: `${CODE_DIR}/supervisor/${TOOL_FILE_NAME}`,
+        runtimeController: codeFiles.some(abs => posixRel(tempRoot, abs) === `${CODE_DIR}/supervisor/${RUNTIME_CONTROLLER_FILE_NAME}`)
+          ? `${CODE_DIR}/supervisor/${RUNTIME_CONTROLLER_FILE_NAME}`
+          : null,
       },
       dataPolicy: {
         codeOnly: true,
@@ -914,6 +961,9 @@ export async function createSnapshot(options = {}) {
       links,
     }
 
+    const runtimeDigest = snapshotRuntimeDigest(manifest)
+    manifest.runtimeIdentity = { schema: 1, algorithm: 'sha256', digest: runtimeDigest }
+
     await fsp.mkdir(path.join(tempRoot, MANIFEST_DIR), { recursive: true })
     await fsp.writeFile(path.join(tempRoot, MANIFEST_DIR, MANIFEST_NAME), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 
@@ -934,6 +984,7 @@ export async function createSnapshot(options = {}) {
       snapshot: snapshotRoot,
       manifest: path.join(snapshotRoot, MANIFEST_DIR, MANIFEST_NAME),
       entries: manifest.entries,
+      runtimeDigest,
       counts: { nodes: manifest.nodes.length, files: manifest.files.length, links: manifest.links.length, edges: edges.length },
       invoke,
     }
@@ -1042,6 +1093,29 @@ export async function verifySnapshot(options = {}) {
     add('manifest-version', `manifest 版本不匹配: ${String(manifest.manifestVersion)}`)
   }
 
+  const runtimeDigest = snapshotRuntimeDigest(manifest)
+  if (Object.hasOwn(manifest, 'runtimeIdentity')) {
+    const identity = manifest.runtimeIdentity
+    if (!identity || typeof identity !== 'object' || Array.isArray(identity)
+      || identity.schema !== 1 || identity.algorithm !== 'sha256'
+      || typeof identity.digest !== 'string' || !/^[a-f0-9]{64}$/.test(identity.digest)) {
+      add('runtime-identity-invalid', 'manifest runtimeIdentity 格式无效')
+    } else if (identity.digest !== runtimeDigest) {
+      add('runtime-identity-mismatch', '运行闭包与 manifest runtimeIdentity 不一致', {
+        expected: identity.digest, actual: runtimeDigest,
+      })
+    }
+  }
+  if (options.expectedDigest !== undefined) {
+    if (typeof options.expectedDigest !== 'string' || !/^[a-f0-9]{64}$/.test(options.expectedDigest)) {
+      add('expected-digest-invalid', 'expectedDigest 必须是小写 SHA256 十六进制摘要')
+    } else if (options.expectedDigest !== runtimeDigest) {
+      add('expected-digest-mismatch', '运行闭包与外部摘要不一致', {
+        expected: options.expectedDigest, actual: runtimeDigest,
+      })
+    }
+  }
+
   const files = Array.isArray(manifest.files) ? manifest.files : []
   const linkEntries = Array.isArray(manifest.links) ? manifest.links : []
   const nodes = Array.isArray(manifest.nodes) ? manifest.nodes : []
@@ -1050,6 +1124,26 @@ export async function verifySnapshot(options = {}) {
   if (files.length === 0) add('manifest-empty', 'manifest 未记录任何运行文件')
   if (nodes.length === 0) add('manifest-empty-nodes', 'manifest 未记录任何依赖节点')
   // 合法的无生产依赖单包快照允许 edges 为空；其文件与入口仍逐项校验。
+
+  // A digest is not structural validation: reject duplicates even with a recomputed identity.
+  const checkDuplicates = (records, keyOf, label) => {
+    const seen = new Set()
+    for (const record of records) {
+      const key = keyOf(record)
+      if (key === undefined) continue
+      if (seen.has(key)) add('duplicate-record', `manifest ${label} 重复: ${key}`)
+      seen.add(key)
+    }
+  }
+  const pathKey = (record) => typeof record?.path === 'string' ? normaliseRel(record.path) : undefined
+  checkDuplicates([...files, ...linkEntries], pathKey, 'path')
+  checkDuplicates(nodes, (node) => node?.slug, 'node slug')
+  checkDuplicates(nodes, pathKey, 'node path')
+  checkDuplicates(edges, (edge) => typeof edge?.from === 'string' && typeof edge?.name === 'string'
+    ? JSON.stringify([edge.from, edge.name]) : undefined, 'edge')
+  for (const node of nodes) {
+    checkDuplicates(Array.isArray(node?.dependencies) ? node.dependencies : [], (dep) => dep?.name, 'dependency')
+  }
 
   // 先做路径包含校验：manifest 文件/链接路径在读取正文或哈希之前就必须限定在快照内。
   const guarded = { files: new Map(), links: new Map() }
@@ -1318,6 +1412,7 @@ export async function verifySnapshot(options = {}) {
     snapshot: rootReal,
     manifest: manifestPath,
     entries,
+    runtimeDigest,
     counts: {
       nodes: nodes.length,
       edges: edges.length,
@@ -1355,6 +1450,7 @@ export const SNAPSHOT_USAGE = `self-host-snapshot.mjs — 把当前已构建的 
   --output <dir>        监督脚本的运行输出目录；仅用于生成可复制命令
   --task-file <file>    监督脚本的任务文件；仅用于生成可复制命令
   --checks-file <file>  监督脚本的验收命令文件；仅用于生成可复制命令
+  --expected-digest <sha256>  verify 时绑定外部保存的运行摘要
   --json                以 JSON 输出结果
   -h, --help            显示本帮助
 
@@ -1374,7 +1470,7 @@ export const SNAPSHOT_USAGE = `self-host-snapshot.mjs — 把当前已构建的 
 const BOOLEAN_FLAGS = new Set(['--json', '--help', '-h'])
 const VALUE_FLAGS = new Set([
   '--cli-entry', '--snapshot', '--target', '--cwd',
-  '--data-dir', '--output', '--task-file', '--checks-file',
+  '--data-dir', '--output', '--task-file', '--checks-file', '--expected-digest',
 ])
 
 /** 解析 argv：支持 `--flag value` 与 `--flag=value`，子命令可为位置参数。 */
@@ -1414,6 +1510,7 @@ export function parseArgs(argv = []) {
     else if (flag === '--output') options.output = value
     else if (flag === '--task-file') options.taskFile = value
     else if (flag === '--checks-file') options.checksFile = value
+    else if (flag === '--expected-digest') options.expectedDigest = value
   }
   if (positional.length > 0) {
     const [command, ...extra] = positional
@@ -1437,7 +1534,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   if (options.command === 'verify') {
-    const result = await verifySnapshot({ snapshot: options.snapshot, cwd: options.cwd })
+    const result = await verifySnapshot({ snapshot: options.snapshot, cwd: options.cwd, expectedDigest: options.expectedDigest })
     if (options.json) {
       printJson(result)
     } else {

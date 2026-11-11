@@ -451,17 +451,19 @@ describe('Jarvis 3-tier memory integration', () => {
         const bindingPath = join(tempDir, 'data', 'conversations', conv.id, 'runs', run.id, 'jarvis.json')
         await vi.waitFor(async () => expect(JSON.parse(await readFile(bindingPath, 'utf8')).recordedEffectIds).toHaveLength(1))
         const runtime = (first as unknown as { active: Map<string, { runtime: PulseRuntime }> }).active.get(run.id)!.runtime
-        // Model process loss while preserving a resumable durable human wait.
-        runtime.cancelAgent = () => {}
-        await first.close()
+        // Preserve a proven quiescent human wait. Unknown process loss now
+        // requires explicit host-admission recovery before another launch.
+        const oldModelIds = new Set([...runtime.state.effects.values()].filter(effect => effect.kind === 'llm').map(effect => effect.id))
+        await first.close({ preserveHumanWaits: true })
         expect(closed).not.toHaveBeenCalled()
         second = createLocalHost(options)
         run = await second.resumeRun(conv.id)
         const restored = (second as unknown as { active: Map<string, { runtime: PulseRuntime }> }).active.get(run.id)!.runtime
         for await (const event of run.events) if (event.type === 'waiting') await run.reply((event.data as { effectId: string }).effectId, { text: 'Continue' })
         expect((await run.outcome()).status).toBe('succeeded')
-        const lastModel = [...restored.state.effects.values()].filter((effect) => effect.kind === 'llm').at(-1)
-        expect(JSON.stringify(lastModel?.input)).toContain('UNIQUE_JARVIS_CONTEXT_MARKER')
+        const resumedModels = [...restored.state.effects.values()].filter(effect => effect.kind === 'llm' && !oldModelIds.has(effect.id) && !effect.key.startsWith('verify'))
+        expect(resumedModels.length).toBeGreaterThan(0)
+        expect(resumedModels.some(effect => JSON.stringify(effect.input).includes('UNIQUE_JARVIS_CONTEXT_MARKER'))).toBe(true)
         expect(opened).toHaveBeenCalledTimes(1)
         expect(built).toHaveBeenCalledTimes(1)
         expect(closed).toHaveBeenCalledOnce()

@@ -4,17 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createLocalHost } from '../packages/server/src/index.js'
-import { heuristicFastAck, processFrontModel, sanitizeFrontModelResult } from '../packages/server/src/front-model.js'
-
-describe('heuristicFastAck', () => {
-  it('returns appropriate instant responses based on user keywords', () => {
-    expect(heuristicFastAck('请修复这个 bug')).toContain('排查')
-    expect(heuristicFastAck('帮我新建一个登录页面')).toContain('梳理方案')
-    expect(heuristicFastAck('解释一下这段代码')).toContain('查看相关代码')
-    expect(heuristicFastAck('重构一下数据存储')).toContain('优化')
-    expect(heuristicFastAck('你好呀')).toBe('好的，我马上开始处理。')
-  })
-})
+import { processFrontModel, sanitizeFrontModelResult } from '../packages/server/src/front-model.js'
 
 describe('processFrontModel', () => {
   it('uses the original request and clarification question when the user answers with a filename', async () => {
@@ -37,7 +27,7 @@ describe('processFrontModel', () => {
       const conversation = await host.createConversation()
       const first = await host.sendMessage(conversation.id, { text: '修复登录按钮重复提交的问题' })
       expect((await first.outcome()).text).toBe('要修改哪个文件？')
-      const second = await host.sendMessage(conversation.id, { text: 'src/login.ts' })
+      const second = await host.sendMessage(conversation.id, { text: 'src/login.ts', continueTask: true })
       for await (const _event of second.events) {}
       // A mock answer without a fix is no longer sufficient to accept the
       // original implementation request after its filename clarification.
@@ -53,9 +43,9 @@ describe('processFrontModel', () => {
     }
   })
 
-  it('falls back to heuristic ack when frontModel is not enabled', async () => {
+  it('does not send a guessed acknowledgement when frontModel is disabled', async () => {
     const res = await processFrontModel('帮我看看这个错误', undefined, { enabled: false })
-    expect(res.instantResponse).toContain('排查')
+    expect(res.instantResponse).toBe('')
     expect(res.brief).toBeUndefined()
   })
 
@@ -118,14 +108,14 @@ describe('processFrontModel', () => {
     }
   })
 
-  it('gracefully degrades to heuristic ack when Ollama times out or errors', async () => {
+  it('does not guess an acknowledgement when Ollama times out or errors', async () => {
     const res = await processFrontModel('帮我写个脚本', undefined, {
       enabled: true,
       model: 'test-model',
       baseURL: 'http://127.0.0.1:1', // unreachable port
       timeoutMs: 200,
     })
-    expect(res.instantResponse).toContain('梳理方案')
+    expect(res.instantResponse).toBe('')
     expect(res.brief).toBeUndefined()
   })
 

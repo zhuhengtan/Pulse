@@ -38,6 +38,7 @@ export interface TaskCriterionAssessment {
 }
 
 export interface TaskOutcome {
+  reviewStatus?: 'passed' | 'needs_work' | 'unavailable' | 'skipped'
   blockers?: Array<{ stageId?: string; code: string; reason: string; recovery: string }>
   interventions?: { approvalRequests: number; clarificationRequests: number }
   schemaVersion: 1
@@ -156,30 +157,6 @@ export function acceptanceCriteriaFromObjective(objective: string, document?: st
   return merged.map(({ description, start, end }, index) => ({ id: `criterion-${index + 1}`, description,
     kind: /禁止|不得|不能|必须|不要|must|never|without|do not/i.test(description) ? 'constraint' : /环境|版本|platform|environment/i.test(description) ? 'environment' : 'requirement',
     source: { hash: sourceHash, start, end, ...(document ? { document } : {}) } }))
-}
-
-/** Deliberately narrow: unrelated new requests must not inherit authorization. */
-export function isExplicitNewTask(text: string): boolean {
-  return /^(?:新任务|换个话题|另一个问题|重新开始|new task\b|start over\b)/i.test(text.trim())
-}
-
-export function isTaskContinuation(text: string): boolean {
-  const request = text.trim()
-  if (isExplicitNewTask(request) || /^(?:不要|别|不用|do not|don't)\s*(?:重试|继续|恢复|resume|continue|retry)\b/i.test(request)) return false
-  if (/^(?:重试|没做完啊?|retry)[。！!?.\s]*$/i.test(request)) return true
-  return /^(?:继续|接着|恢复(?:任务|执行)|continue(?:\b)|resume(?:\b))/i.test(request) || /^(?:(?:你|这|这个|刚才|之前|还是|仍然|怎么|为什么|为啥)[，,\s]*){0,3}(?:没有|没看到|找不到|缺少|遗漏|漏了)[^。！？!?\n]{0,30}(?:计划|文件|产物|报告|测试|功能|修改|结果)|^(?:这个|刚才的|之前的).{0,16}(?:不对|有问题|没修好)|^(?:the |that )?(?:plan|file|artifact|report|test|fix).{0,20}(?:missing|not found|still broken)/i.test(request)
-}
-
-/** Explicit interruption followed by an instruction to resume the same work. */
-export function isInterruptedTaskContinuation(text: string): boolean {
-  const request = text.trim()
-  if (isExplicitNewTask(request) || /(?:不要|别|不用|do not|don't)\s*(?:继续|恢复|resume|continue)/i.test(request)) return false
-  return /^(?:刚才|上次|之前|(?:the |my )?previous)[\s\S]{0,120}(?:中断|打断|interrupted|crashed)/i.test(request) && /(?:继续.{0,16}(?:剩余|未完成|迁移|任务|工作)|恢复(?:原|上次|之前)?(?:任务|执行)|(?:resume|continue).{0,30}(?:remaining|unfinished|task|work))/i.test(request)
-}
-
-/** A follow-up that asks for the previous run's factual work log rather than new mutations. */
-export function isExecutionSummaryFollowup(text: string): boolean {
-  return /(?:上一轮|上一次|刚才|之前|已完成|刚完成|改了什么|修改了什么|哪些文件|根因|验证(?:命令|结果)?|运行了什么|操作记录|执行记录|what did (?:you|we) change|previous run|work log|verification)/i.test(text.trim())
 }
 
 export function continueTaskRecord(previous: TaskRecord, runId: string): TaskRecord {

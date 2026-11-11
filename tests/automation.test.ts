@@ -69,6 +69,18 @@ describe('automation control and recovery boundaries',()=>{
   expect(await manager.act(session.id,String(observation.frameId),action,'submit','owner')).toMatchObject({status:'unknown'})
   expect(driver.act).toHaveBeenCalledTimes(1)
  })
+ it('requires a fresh observation after a proven undelivered computer action without replaying it',async()=>{
+  const {root,manager,driver}=await setup()
+  vi.mocked(driver.act).mockRejectedValueOnce(Object.assign(new Error('TARGET_NOT_FOCUSED'),{disposition:{delivery:'not_delivered'}}))
+  const session=await manager.open('computer','owner',root),observation=await manager.observe(session.id,'owner')
+  const action={type:'key',keys:['Enter']}
+  await expect(manager.act(session.id,String(observation.frameId),action,'safe','owner')).rejects.toThrow('TARGET_NOT_FOCUSED')
+  expect(manager.list()[0]).toMatchObject({state:'ai'})
+  expect(manager.list()[0]?.frameId).toBeUndefined()
+  expect(await manager.act(session.id,String(observation.frameId),action,'safe','owner')).toMatchObject({status:'not_delivered'})
+  expect(driver.act).toHaveBeenCalledOnce()
+  expect(await manager.observe(session.id,'owner')).toHaveProperty('frameId')
+ })
  it('serializes a browser profile across independently constructed managers',async()=>{
   const {root,manager}=await setup();await manager.open('browser','owner',root,'dedicated')
   const other=new AutomationSessionManager(root,{},true,()=>backend());managers.push(other)
@@ -211,6 +223,6 @@ it('keeps window scope and coordinate evidence attached to the exact observed fr
  const observation=await manager.observe(session.id,'scope-owner',undefined,true,'100:1')
  expect(observation).toMatchObject({title:'Pulse',captureScope:'window',targetWindowId:'100:1',captureBounds:{x:-500,y:200,width:400,height:300},accessibilityTruncated:true})
  expect(observation.pulseImage).toBeDefined()
- expect(driver.observe).toHaveBeenCalledWith(expect.any(AbortSignal),'100:1')
+ expect(driver.observe).toHaveBeenCalledWith(expect.any(AbortSignal),'100:1',true)
  expect(driver.call).not.toHaveBeenCalledWith('selectWindow',expect.anything(),expect.anything())
 })

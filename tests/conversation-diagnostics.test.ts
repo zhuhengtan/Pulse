@@ -34,10 +34,10 @@ it('exposes archived idle events and status contradictions without leaking promp
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-it.each(['Operation not permitted（macOS 隐私授权 TCC）', 'PATH_OUTSIDE_SANDBOX', 'EACCES: cannot read source', '本机路径 Operation not permitted'])('retains the unmet goal on an unchanged external access blocker: %s', note => {
+it.each(['Operation not permitted（macOS 隐私授权 TCC）', 'PATH_OUTSIDE_SANDBOX', 'EACCES: cannot read source', '本机路径 Operation not permitted'])('retains the unmet goal while permitting an authorized alternative for: %s', note => {
   const state = initialController(64)
   state.tasks = [{ id: 'inspect', goal: 'Inspect and repair the named session', check: 'Actual session repaired', criterionIds: ['c'], dependsOn: [], status: 'blocked', attempts: 1, evidenceRefs: ['original-evidence'], note }]
-  expect(unmetGoalCanChangeApproach(state)).toBe(false)
+  expect(unmetGoalCanChangeApproach(state)).toBe(true)
   expect(state.tasks[0]?.goal).toBe('Inspect and repair the named session')
 })
 

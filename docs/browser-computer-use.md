@@ -1,6 +1,6 @@
 # Browser use 与 computer use
 
-Pulse 提供受管理的 `browser`、`computer` 能力。网页结构操作可以使用文本模型；桌面与浏览器截图操作使用单独配置的视觉模型。所有操作发生在运行 Pulse 的主机，手机 H5 不会控制手机操作系统。
+Pulse 提供受管理的 `browser`、`computer` 能力。网页结构与桌面无障碍树操作可以使用文本模型；截图操作使用单独配置的视觉模型。所有操作发生在运行 Pulse 的主机，手机 H5 不会控制手机操作系统。
 
 ## 启用
 
@@ -44,41 +44,19 @@ pulse automation doctor --live --model your-provider/your-vision-model
 
 工具包括 `automation.open/status/close`、`browser.tabs/selectTab/navigate/observe/act/upload/downloads`。动作使用观察返回的 `frameId`，坐标是截图内的 0–1 比例值。页面或几何信息变化后必须重新观察。首版不暴露任意网页 JavaScript 执行接口。
 
-## 桌面与系统权限
+## 桌面与系统权限（agent-desktop）
 
-macOS 可先调用 `computer.windows`，再把返回的 `windowId` 传给 `computer.observe`，直接观察该窗口而不激活它。显式窗口观察的截图与 AX 树来自同一窗口；`captureScope`、`targetWindowId` 和 `captureBounds` 标明范围，坐标相对该截图归一化。目标已消失或无法唯一匹配时返回阻塞，不回退为整个桌面截图。Windows/Linux 的只读窗口截图目前返回 `READ_ONLY_WINDOW_CAPTURE_UNSUPPORTED`。
+Computer Use 内置 [agent-desktop v1.2.0](https://github.com/vercel-labs/agent-desktop/releases/tag/v1.2.0)，由 Pulse 的会话管理器调用固定命令集合。安装包包含平台二进制、macOS Helper / Linux clipboard owner、SHA-256 清单及上游许可证。用户无需全局安装。旧 Helper、Swift/Rust 桌面构建链及旧 `helperPath` 执行路径已删除；旧会话恢复必须重新连接并观察。Windows shell 沙箱仍使用独立的 Rust 构建，与 Computer Use 无关。
 
-`computer.selectWindow` 会激活窗口，仅在任务允许切换焦点时使用。选中窗口后的输入还会校验实际焦点与几何信息；截图中出现的停止按钮等状态只代表观察时刻。AX 树截断会通过 `accessibilityTruncated` 标明，缺少名称时不能把角色节点当作完整文字证据。
+源码环境执行 `pnpm install --frozen-lockfile --ignore-scripts`、`pnpm desktop:build`；构建下载锁定发行资产并校验，覆盖 darwin-arm64、win32-x64、linux-x64。开发覆盖路径为 `capabilities.computer.agentDesktopPath`，仍要求旁边有匹配平台、版本、文件哈希的 manifest。没有旧后端回退。
 
-源码开发环境先构建原生组件：
+`computer.observe` 默认 `includeImage: false`，返回无障碍树、元素引用和 frameId，可由文本模型操作。显式请求图片时才要求视觉模型；没有图片的观察不会生成空截图或图片引用。先用 `computer.windows` 找到窗口，再传 `windowId` 进行不激活的观察。`captureBounds` 与 `targetWindowId` 绑定坐标截图；不支持或目标不唯一时明确失败。
 
-```sh
-pnpm desktop:build
-pulse automation doctor
-pulse automation permissions
-```
+元素只能使用本次快照内的引用。坐标输入还要求截图、相同窗口几何和前台目标。动作后原 frameId 失效，必须重新观察；结果未知不会自动重放。上游无法读取某个应用的无障碍树时，只在显式请求图片的观察中继续截图，并同时返回无障碍错误；语义操作仍不可用。`computer.selectWindow` 是显式聚焦操作。
 
-构建需要 Rust；macOS 同时需要 Xcode Command Line Tools 的 Swift 编译器。只修改 Swift 且已有相同平台、架构的已校验 Rust 启动器时，可用 `node scripts/automation/build-desktop.mjs --swift-only` 仅重建 Swift 应用；修改启动器后必须完整构建。发行安装包应包含对应 `platform-arch` Helper 和校验清单，终端用户不需要 Rust。可用 `capabilities.computer.helperPath` 显式选择本机可信 Helper。
+运行 `pulse automation doctor` 分别查看辅助功能和录屏状态。macOS 授权身份以实际发起调用的宿主为准（打包的 Pulse 或开发入口），不再假定历史 Pulse Helper 授权可复用。只有无障碍树需要辅助功能；截图另需录屏权限。诊断不会自动修改 TCC 或重置权限。参见[上游 macOS 平台说明](https://agent-browser.dev/desktop/platforms/macos)。
 
-macOS 权限窗口应显示 **Pulse** 及现有 Pulse 图标，应用标识为 `com.hunterzhu.pulse.desktop`。若显示终端或 IDE 名称，应检查是否使用了旧版直接启动的 Helper，不要把宿主授权当作 Pulse 授权。正式发行可用 `PULSE_MACOS_SIGN_IDENTITY` 提供 Developer ID 签名；源码默认 ad-hoc 签名，重新编译或移动应用后可能需要重新授权。当前构建不等于已完成 Apple 公证。
-
-若屏幕录制没有弹出申请，不能据此认为已授权。`pulse automation permissions` 会返回真实状态、应用路径和手动授权指引：在系统设置 → 隐私与安全性 → 录屏与系统录音中点“＋”按返回的 applicationPath 添加新版内部 `Pulse.app`（旧运行时可能仍是 `Pulse Desktop Helper.app`） 并开启开关。辅助功能权限需单独确认。系统拒绝弹窗时不修改 TCC 数据库或自动重置其他应用权限。
-
-| 平台 | 实现与必要条件 |
-| --- | --- |
-| macOS 14+ | ScreenCaptureKit、Accessibility、CoreGraphics；独立的 native/Pulse.app 经精确路径从 Launch Services 启动，权限授予 Pulse。未授权时返回明确错误。 |
-| Windows 11 x64 | UI Automation、屏幕捕获和 SendInput；必须处于交互桌面。不自动提权，UAC 安全桌面及 UIPI 阻止的窗口不受支持。 |
-| Linux X11 | AT-SPI、GDK、X11/XTest；需要有效 DISPLAY 和图形桌面。 |
-| Linux Wayland | GNOME/KDE 的 RemoteDesktop、ScreenCast portal 与 PipeWire；首次连接需要本机用户在系统选择器中授权显示器和输入设备。 |
-
-Ubuntu 系列依赖示例：
-
-```sh
-sudo apt-get install python3-gi python3-dbus gir1.2-atspi-2.0 gir1.2-gtk-3.0 \
-  gir1.2-gstreamer-1.0 gstreamer1.0-pipewire gstreamer1.0-plugins-good libxtst6
-```
-
-其他 Linux 桌面缺少 portal 或可访问性接口时会报告不可用，不以 root 或桌面扩展绕过。窗口枚举和聚焦取决于系统接口；Wayland 只能报告可见的可访问性窗口及已授权显示器。Linux X11 的无可访问性文本控件若没有对应 Unicode 键映射，会报告不支持，不能据此宣称所有应用均支持中文输入。
+Windows 需要交互桌面和 UI Automation；不自动提权或绕过 UAC。Linux 依赖上游支持的 AT-SPI、桌面会话与输入/截图接口；实际支持范围以目标系统的 `status` 和具体操作结果为准。跨平台资产校验不等同于 Windows/Linux 真机验收。
 
 ## 暂停与接管
 
@@ -95,7 +73,7 @@ CLI：
 
 接管后在本机直接操作，完成后交还 AI。`stop` 直接操作会话管理器，不依赖模型回复。CLI 状态会给出当前截图路径。
 
-H5：进入工作模式，在“工作区 → 自动化”中检查主机能力或选择会话。本机管理员可点击“申请系统权限”触发 macOS 授权；远程配对设备不能触发该操作。接管后可以在截图上点击、拖拽、滚动，发送文本或快捷键；浏览器还支持输入网址。截图画面实际加载后才允许基于它发送动作。首版通过截图刷新提供交互，不提供视频流。
+H5：进入工作模式，在“工作区 → 自动化”中检查主机能力或选择会话。本机管理员可点击“申请系统权限”查看当前授权诊断与指引；远程配对设备不能触发该操作。接管后可以在截图上点击、拖拽、滚动，发送文本或快捷键；浏览器还支持输入网址。截图画面实际加载后才允许基于它发送动作。首版通过截图刷新提供交互，不提供视频流。
 
 本机管理员可以在自动化面板内开启配对设备的控制权限。旧设备默认关闭；未授权设备不能查看会话详情或截图，也不能输入。撤权立即阻止新请求并关闭状态连接。接管会暂停其他会话的 AI 输入；其他会话需要显式恢复。人工控制权通过租约互斥，断线或租约失效后保持暂停，不自动交还 AI。
 
@@ -146,11 +124,4 @@ PULSE_DESKTOP_LIVE=1 pnpm exec vitest run tests/live/automation-desktop.test.ts
 浏览器 Live 测试使用独立浏览器和临时本机站点；桌面 Live 测试只操作专用临时窗口。普通 CI、协议测试及交叉编译不能代替目标系统、真实设备和生产环境验收。
 
 
-macOS 权限名称来自实际发起请求的应用 bundle，而非聊天窗口标题。自动化 Swift 应用现已生成 CFBundleName/CFBundleDisplayName=Pulse，并复制既有品牌 icon.icns；内部容器文件名同步为 Pulse.app，使系统文件显示名也是 Pulse；可执行文件和正式/开发 bundle ID 保持原值。启动器仅在新路径不存在时兼容旧版 Pulse Desktop Helper.app，不创建旧名别名，也不按显示名查找外层 Electron 应用。桌面 Electron 主应用沿用 productName=Pulse、appId=com.hunterzhu.pulse.desktop 和现有 icon.icns。
-
-旧的系统列表可能缓存“Pulse Desktop Helper”名称/旧图标；仅更新源码不会立即替换已运行的旧 helper。须用新构建应用再次运行后观察。保留 bundle ID 不保证 ad-hoc 重签或移动路径后自动继承许可，系统可能要求用户重新确认；不会自动清除 TCC、重置或开启录屏/辅助功能。正式主应用和 helper 当前共享历史 bundle ID，本轮为兼容已有配置保留；未来拆分需单独设计权限身份迁移。
-
-仅构建独立验收副本时可设置 PULSE_DESKTOP_OUTPUT_DIR；配合 --swift-only 须先复制一份校验正确的 supervisor 与 manifest，不影响默认发行输出目录。
-
-
-品牌回归需验证系统公开API的实际结果：`FileManager.displayName(atPath:)`必须为Pulse，`NSWorkspace.icon(forFile:)`必须能解析现有品牌图标。只检查Info.plist字段不足以证明系统显示正确。Helper与外层Electron都叫Pulse.app时，必须用supervisor同目录下的精确绝对路径启动；授权引导返回这一内部路径。旧系统权限条目不会因为源码更新就自动改名或授权，新版ad-hoc构建可能需要用户按系统流程重新授权；不自动清TCC、删除条目或修改权限。
+以上 2026-10-14 验收属于已移除的旧桌面后端，不代表 agent-desktop 的实测结果。当前后端的配置与验证方式见[桌面文档](desktop/README.md)；本机验收记录不随源码分发。

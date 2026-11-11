@@ -64,12 +64,12 @@ it.each([['darwin', 'arm64'], ['win32', 'x64'], ['linux', 'x64']])('keeps only %
 
 it('refreshes native helper checksums after signing and still detects subsequent corruption', async () => fixture(async root => {
  const native = 'app/node_modules/@hunterzhu/pulse-server/native/darwin-arm64'
- await file(root, `${native}/manifest.json`, JSON.stringify({ protocolVersion: 1, platform: 'darwin', arch: 'arm64', hashes: { 'pulse-desktop-helper': 'before-signing' } }))
- await file(root, `${native}/pulse-desktop-helper`, 'signed helper bytes')
+ await file(root, `${native}/manifest.json`, JSON.stringify({ protocolVersion: 1, backend: 'agent-desktop', version: '1.2.0', platform: 'darwin', arch: 'arm64', hashes: { 'agent-desktop': 'before-signing' } }))
+ await file(root, `${native}/agent-desktop`, 'signed helper bytes')
  await expect(verifyNativeManifest(root, 'darwin', 'arm64')).rejects.toThrow('checksum mismatch')
  await refreshNativeManifest(root, 'darwin', 'arm64')
  await expect(verifyNativeManifest(root, 'darwin', 'arm64')).resolves.toBeUndefined()
- await file(root, `${native}/pulse-desktop-helper`, 'altered helper bytes')
+ await file(root, `${native}/agent-desktop`, 'altered helper bytes')
  await expect(verifyNativeManifest(root, 'darwin', 'arm64')).rejects.toThrow('checksum mismatch')
  await expect(refreshNativeManifest(root, 'win32', 'x64')).rejects.toThrow()
 }))

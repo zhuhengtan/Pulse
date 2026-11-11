@@ -64,7 +64,7 @@ export class AutomationSessionManager {
     return new NativeBrowserBackend(() => this.nativeHost, view.id, view.workspace, profile, { allowNetwork: this.allowNetwork, ...(this.networkHosts ? { networkHosts: this.networkHosts } : {}) })
   }
   configure(config: AutomationConfig, allowNetwork: boolean, networkHosts?: string[]): void { this.config = structuredClone(config); this.allowNetwork = allowNetwork; this.networkHosts = networkHosts }
-  private backend(kind: 'browser' | 'computer', config: AutomationConfig, workspace: string, profile: string): AutomationBackend { return this.factory ? this.factory(kind, config, workspace, profile) : kind === 'browser' ? new BrowserBackend(config.browser ?? {}, workspace, profile, this.allowNetwork, this.networkHosts) : new DesktopBackend(config.computer?.helperPath, config.computer?.displayId) }
+  private backend(kind: 'browser' | 'computer', config: AutomationConfig, workspace: string, profile: string): AutomationBackend { return this.factory ? this.factory(kind, config, workspace, profile) : kind === 'browser' ? new BrowserBackend(config.browser ?? {}, workspace, profile, this.allowNetwork, this.networkHosts) : new DesktopBackend(config.computer?.agentDesktopPath, config.computer?.displayId, join(this.dataDir, 'automation', 'agent-desktop')) }
   init(): Promise<void> { return this.initialized ??= this.load() }
   private async load(): Promise<void> {
     const directory = join(this.dataDir, 'automation', 'sessions')
@@ -159,27 +159,30 @@ export class AutomationSessionManager {
     return this.serial(session, async () => {
       const controller = session.activeController = new AbortController()
       let observation: BackendObservation
-      try { observation = await session.backend.observe(signal ? AbortSignal.any([signal, controller.signal]) : controller.signal, targetWindowId) } finally { delete session.activeController }
-      const bytes = Buffer.from(observation.image.data, 'base64')
-      if (!['image/png', 'image/jpeg'].includes(observation.image.mediaType) || bytes.length > 3 * 1024 * 1024 || bytes.length < 16 || !Number.isInteger(observation.width) || !Number.isInteger(observation.height) || observation.width < 1 || observation.height < 1) throw automationError('INVALID_AUTOMATION_IMAGE')
-      if ((observation.image.mediaType === 'image/png' && bytes.readUInt32BE(0) !== 0x89504e47) || (observation.image.mediaType === 'image/jpeg' && bytes.readUInt16BE(0) !== 0xffd8)) throw automationError('INVALID_AUTOMATION_IMAGE')
+      try { observation = await session.backend.observe(signal ? AbortSignal.any([signal, controller.signal]) : controller.signal, targetWindowId, includeImage) } finally { delete session.activeController }
       const frameId = randomUUID()
-      await writeFile(join(this.dataDir, 'automation', 'frames', frameId), bytes, { mode: 0o600, flag: 'wx' })
+      let hash: string
+      if (observation.image) {
+        const bytes = Buffer.from(observation.image.data, 'base64')
+        if (!['image/png', 'image/jpeg'].includes(observation.image.mediaType) || bytes.length > 3 * 1024 * 1024 || bytes.length < 16 || !Number.isInteger(observation.width) || !Number.isInteger(observation.height) || observation.width < 1 || observation.height < 1) throw automationError('INVALID_AUTOMATION_IMAGE')
+        if ((observation.image.mediaType === 'image/png' && bytes.readUInt32BE(0) !== 0x89504e47) || (observation.image.mediaType === 'image/jpeg' && bytes.readUInt16BE(0) !== 0xffd8)) throw automationError('INVALID_AUTOMATION_IMAGE')
+        await writeFile(join(this.dataDir, 'automation', 'frames', frameId), bytes, { mode: 0o600, flag: 'wx' })
+        hash = createHash('sha256').update(bytes).digest('hex')
+      } else hash = observation.contentFingerprint ?? createHash('sha256').update(observation.text ?? '').digest('hex')
       if (session.lastFrame) await unlink(join(this.dataDir, 'automation', 'frames', session.lastFrame)).catch(() => undefined)
-      session.lastFrame = frameId
-      const hash = createHash('sha256').update(bytes).digest('hex')
+      if (observation.image) session.lastFrame = frameId; else delete session.lastFrame
       session.unchanged = session.hash === hash ? session.unchanged : 0
       session.hash = hash; session.observation = observation
-      Object.assign(session.view, { frameId, frameWidth: observation.width, frameHeight: observation.height, title: observation.title, url: observation.url, observedAt: new Date().toISOString(), ...(observation.tabs ? { tabs: observation.tabs } : {}) })
-      return { ...session.view, text: observation.text ?? '', geometry: observation.geometry ?? '', ...(observation.captureScope ? { captureScope: observation.captureScope, targetWindowId: observation.targetWindowId, captureBounds: observation.captureBounds, accessibilityTruncated: observation.accessibilityTruncated ?? false } : {}), ...(includeImage ? { pulseImage: observation.image } : {}) }
+      Object.assign(session.view, { frameId, hasImage: Boolean(observation.image), observationText: observation.text?.slice(0, 32000) ?? '', frameWidth: observation.width, frameHeight: observation.height, title: observation.title, url: observation.url, observedAt: new Date().toISOString(), ...(observation.tabs ? { tabs: observation.tabs } : {}) })
+      return { ...session.view, text: observation.text ?? '', geometry: observation.geometry ?? '', ...(observation.captureScope ? { captureScope: observation.captureScope, targetWindowId: observation.targetWindowId, captureBounds: observation.captureBounds, accessibilityTruncated: observation.accessibilityTruncated ?? false } : {}), ...(includeImage && observation.image ? { pulseImage: observation.image } : {}) }
     })
   }
   async frame(id: string): Promise<{ bytes: Buffer; mediaType: string }> {
     const session = this.session(id)
-    if (!session.view.frameId || !session.observation) throw automationError('AUTOMATION_FRAME_MISSING')
+    if (!session.view.frameId || !session.observation?.image) throw automationError('AUTOMATION_FRAME_MISSING')
     return { bytes: await readFile(join(this.dataDir, 'automation', 'frames', session.view.frameId)), mediaType: session.observation.image.mediaType }
   }
-  screenshotPath(id: string): string | undefined { const session = this.session(id); return session.view.frameId ? join(this.dataDir, 'automation', 'frames', session.view.frameId) : undefined }
+  screenshotPath(id: string): string | undefined { const session = this.session(id); return session.observation?.image && session.view.frameId ? join(this.dataDir, 'automation', 'frames', session.view.frameId) : undefined }
   async command(id: string, method: string, params: Record<string, unknown>, owner?: string, signal?: AbortSignal): Promise<unknown> {
     const session = this.session(id, owner)
     return this.serial(session, async () => {
@@ -208,7 +211,7 @@ export class AutomationSessionManager {
       if (session.view.kind === 'computer' || session.view.kind === 'browser') {
         const controller = session.activeController = new AbortController()
         let current: BackendObservation
-        try { current = await session.backend.observe(signal ? AbortSignal.any([signal, controller.signal]) : controller.signal) } finally { delete session.activeController }
+        try { if (session.backend.validate) { await session.backend.validate(observation, signal ? AbortSignal.any([signal, controller.signal]) : controller.signal); current = observation } else current = await session.backend.observe(signal ? AbortSignal.any([signal, controller.signal]) : controller.signal) } finally { delete session.activeController }
         if (controller.signal.aborted || (owner !== undefined ? session.view.state !== 'ai' : session.view.state !== 'human' || lease !== session.lease)) throw automationError('AUTOMATION_CANCELLED')
         if (current.geometry !== observation.geometry) { delete session.view.frameId; throw automationError('AUTOMATION_GEOMETRY_CHANGED') }
       }
@@ -230,6 +233,9 @@ export class AutomationSessionManager {
         delete session.view.frameId; delete session.observation
         return applied
       } catch (error) {
+        if (session.view.kind === 'computer' && (error as { disposition?: { delivery?: string } }).disposition?.delivery === 'not_delivered') {
+          session.actionIds.set(requestId, { requestId, status: 'not_delivered' }); delete session.view.frameId; delete session.observation; await this.save(session); throw error
+        }
         session.view.state = 'unknown'; session.view.error = 'ACTION_RESULT_UNKNOWN'; await this.save(session); await session.backend.release(); throw error
       }
     })

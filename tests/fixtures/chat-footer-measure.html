@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>chat message footer hover measurement</title>
+<!-- Links point at the real source CSS; this page adds no footer rules of its own. -->
+<link rel="stylesheet" href="../../packages/web/src/messages.css">
+<link rel="stylesheet" href="../../packages/web/src/chat-surface.css">
+<style>
+  /* Harness chrome only. No .message-footer / .message-time rules are declared here. */
+  :root {
+    --ink: #202020;
+    --muted: #8a8a8a;
+    --line: #e5e5e5;
+    --soft: #f5f5f5;
+    --blue: #1677ff;
+    --surface-raised: #ffffff;
+  }
+  body { margin: 0; padding: 24px; background: #fff; color: var(--ink); font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; }
+  .harness { display: flex; flex-direction: column; gap: 22px; max-width: 900px; }
+  #readout { font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fafafa; }
+  .bubble { padding: 10px 16px; border-radius: 18px; background: var(--surface-raised); border: 1px solid var(--line); font-size: 15px; line-height: 1.65; }
+  .label { font: 12px/1.4 ui-monospace, monospace; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="chat-surface" data-chat-theme="light">
+  <div class="harness">
+    <div id="readout" aria-live="polite">measuring…</div>
+
+    <p class="label">real CSS case: .message--chat assistant message</p>
+    <div class="messages" style="display:flex;flex-direction:column;gap:14px">
+      <div class="message message--chat assistant" tabindex="0" data-measure="real">
+        <div class="message-bubble-row">
+          <div class="bubble">这是一条真实的聊天消息，用来测量时间行高度。</div>
+        </div>
+        <div class="message-footer">
+          <button type="button" class="pulse-button message-copy-action" aria-label="复制" title="复制">copy</button>
+          <time class="message-time" datetime="2024-05-01T10:20:00.000Z" title="2024-05-01 10:20" aria-label="发送时间">10:20</time>
+          <span class="message-feedback" role="status"></span>
+        </div>
+      </div>
+    </div>
+
+    <p class="label">control case: pre-fix inline replica (footer removed until hover)</p>
+    <style>
+      .legacy-replica .message-footer { display: none; }
+      .legacy-replica:hover .message-footer { display: flex; }
+    </style>
+    <div class="messages" style="display:flex;flex-direction:column;gap:14px">
+      <div class="message message--chat assistant legacy-replica" tabindex="0" data-measure="control">
+        <div class="message-bubble-row">
+          <div class="bubble">这是一条改前行为对照消息，用来证明测量页能测出高度变化。</div>
+        </div>
+        <div class="message-footer">
+          <span class="message-time">10:20</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var out = document.getElementById('readout');
+  var rows = {};
+  var order = ['real', 'control'];
+  var post = {};
+
+  function snap(el) {
+    var footer = el.querySelector('.message-footer');
+    var time = el.querySelector('.message-time');
+    return {
+      footer: footer ? footer.offsetHeight : null,
+      time: time ? time.offsetHeight : null,
+      message: el.offsetHeight,
+      hovered: el.matches(':hover'),
+      timeVisibility: time ? getComputedStyle(time).visibility : null
+    };
+  }
+
+  function fmt(tag, s) {
+    return tag + ' footer=' + s.footer + ' time=' + s.time + ' message=' + s.message +
+      ' hovered=' + s.hovered + ' timeVisibility=' + s.timeVisibility;
+  }
+
+  function render() {
+    var lines = [];
+    order.forEach(function (key) {
+      var el = rows[key];
+      if (!el) return;
+      var live = snap(el);
+      if (live.hovered) post[key] = live;
+      lines.push('[pre]  ' + fmt(key, preSnap[key]));
+      lines.push('[live] ' + fmt(key, live));
+      if (post[key]) lines.push('[post] ' + fmt(key, post[key]));
+      if (post[key] && key === 'real') {
+        var same = preSnap[key].footer === post[key].footer && preSnap[key].message === post[key].message;
+        lines.push('[verdict] real case footer/message height stable across hover: ' + (same ? 'PASS' : 'FAIL'));
+      }
+    });
+    out.textContent = lines.join('\n');
+  }
+
+  var preSnap = {};
+  order.forEach(function (key) {
+    var el = document.querySelector('[data-measure="' + key + '"]');
+    rows[key] = el;
+    preSnap[key] = snap(el);
+    out.textContent += '\n' + fmt(key, preSnap[key]);
+  });
+
+  var raf = window.requestAnimationFrame;
+  function loop() { render(); raf(loop); }
+  document.addEventListener('mousemove', render);
+  document.addEventListener('mouseover', render);
+  render();
+  loop();
+})();
+</script>
+</body>
+</html>

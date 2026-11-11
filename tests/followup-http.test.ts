@@ -28,10 +28,60 @@ async function fixture(surface: 'chat' | 'work') {
   return { host, server, base, headers, conversationId, runId, cancel, replyBatch, submit, post, path: surface === 'chat' ? '/api/assistant/messages' : `/api/conversations/${conversationId}/messages` }
 }
 describe('follow-up HTTP routing', () => {
+  it('answers a work question without starting a task or reconciling the interrupted run', async () => {
+    const f = await fixture('work')
+    ;(f.server as any).activeRuns.delete(f.runId)
+    f.host.applyLiveOptions({ ...f.host.getWorkWorkerOptions(), mockResponse: JSON.stringify({ action: 'respond', response: 'La ejecución sigue interrumpida.' }) })
+    const body = { requestId: 'work-question-001', text: '¿Por qué se quedó a medias otra vez?' }
+    const reply = await f.post(f.path, body)
+    expect(reply.status).toBe(200)
+    const receipt = await reply.json()
+    expect(receipt).toMatchObject({ replyOnly: true })
+    const retry = await f.post(f.path, body)
+    expect(await retry.json()).toEqual(receipt)
+    expect(f.submit).not.toHaveBeenCalled()
+    expect(f.cancel).not.toHaveBeenCalled()
+    const conversation = await f.host.conversationData.call('get', f.conversationId)
+    expect(conversation).toMatchObject({ activeRunId: f.runId, runs: [f.runId] })
+    const messages = await f.host.getConversationMessages(f.conversationId)
+    expect(messages).toHaveLength(2)
+    expect(messages[1]).toMatchObject({ replyToId: messages[0]!.id, role: 'assistant' })
+  })
+  it('starts work through the same endpoint only when the model returns an execution action', async () => {
+    const f = await fixture('work')
+    ;(f.server as any).activeRuns.delete(f.runId)
+    const manifest = await f.host.conversationData.call<Record<string, unknown>>('get', f.conversationId)
+    const { activeRunId: _active, ...idle } = manifest
+    await f.host.conversationData.call('save', { ...idle, runs: [] })
+    f.host.applyLiveOptions({ ...f.host.getWorkWorkerOptions(), mockResponse: '{"action":"start","response":""}' })
+    const res = await f.post(f.path, { requestId: 'work-action-001', text: 'サイドバーを詳細欄と同じ幅に変更してください。' })
+    expect(res.status).toBe(200)
+    const receipt = await res.json()
+    expect(receipt.replyOnly).toBeUndefined()
+    expect(await f.host.conversationData.call('get', f.conversationId)).toMatchObject({ runs: [receipt.runId] })
+  })
+  it('streams one linked factual reply for a mixed request while starting work', async () => {
+    const f = await fixture('work')
+    ;(f.server as any).activeRuns.delete(f.runId)
+    const manifest = await f.host.conversationData.call<Record<string, unknown>>('get', f.conversationId)
+    const { activeRunId: _active, ...idle } = manifest
+    await f.host.conversationData.call('save', { ...idle, runs: [] })
+    const response = 'Le lancement du navigateur a dépassé le délai.'
+    f.host.applyLiveOptions({ ...f.host.getWorkWorkerOptions(), mockResponse: JSON.stringify({ action: 'start', response }) })
+    const receipt = await f.post(f.path, { requestId: 'work-mixed-001', text: 'Explique cet échec, puis ajuste la configuration du navigateur.' }).then(res => res.json())
+    expect(receipt.replyOnly).toBeUndefined()
+    const stream = await fetch(`${f.base}/api/runs/${receipt.runId}/events`, { headers: f.headers }).then(res => res.text())
+    expect(stream.match(/"type":"input_response"/g)).toHaveLength(1)
+    expect(stream).toContain('msg-work-mixed-001')
+    const messages = await f.host.getConversationMessages(f.conversationId)
+    expect(messages.filter(message => message.replyToId === 'msg-work-mixed-001')).toEqual([
+      expect.objectContaining({ role: 'assistant', text: response }),
+    ])
+  })
   it.each(['chat', 'work'] as const)('routes %s immediate input to the active primary with full payload and deduplicates', async surface => {
     const f = await fixture(surface)
     const richContent: RichContent = { version: 1, document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '请先回答这个问题', marks: [{ type: 'bold' }] }] }] } }
-    const body = { richContent, requestId: 'followup-request-001', delivery: 'immediate', text: '请先回答这个问题', mentionedFiles: ['example.ts'], attachments: [{ id: 'note-attachment', name: 'note.txt', type: 'file', mediaType: 'text/plain', size: 4, data: 'data:text/plain;base64,dGVzdA==' }] }
+    const body = { richContent, requestId: 'followup-request-001', ...(surface === 'chat' ? { delivery: 'immediate' } : {}), text: '请先回答这个问题', mentionedFiles: ['example.ts'], attachments: [{ id: 'note-attachment', name: 'note.txt', type: 'file', mediaType: 'text/plain', size: 4, data: 'data:text/plain;base64,dGVzdA==' }] }
     const response = await f.post(f.path, body); expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ runId: f.runId })
     expect(f.submit).toHaveBeenCalledTimes(1); expect(f.submit.mock.calls[0]?.[2]).toMatchObject({ richContent, requestId: body.requestId, mentionedFiles: ['example.ts'], attachments: [expect.objectContaining({ id: 'note-attachment' })] })
     expect(f.cancel).not.toHaveBeenCalled()
@@ -53,11 +103,15 @@ describe('follow-up HTTP routing', () => {
       await host.init(); const conversation = await host.createConversation(), run = await host.sendMessage(conversation.id, { text: 'original task' })
       const options: HumanInputOptions = { requestId: 'fixed-host-input', mentionedFiles: ['note.txt'], attachments: [{ id: 'host-note', name: 'note.txt', type: 'file', mediaType: 'text/plain', size: 4, data: 'data:text/plain;base64,dGVzdA==' }] }
       await Promise.all([run.submitHumanInput('record this input', undefined, options), run.submitHumanInput('record this input', undefined, options)])
+      await run.submitHumanInput('我实测可以了', undefined, { requestId: 'fixed-feedback' })
       await expect(run.submitHumanInput('different', undefined, options)).rejects.toThrow('REQUEST_ID_REUSED')
       const events = []; for await (const event of run.events) events.push(event)
       const messages = (await host.getConversationMessages(conversation.id)).filter(message => message.id === 'msg-fixed-host-input')
       expect(messages).toHaveLength(1); expect(messages[0]).toMatchObject({ text: 'record this input', mentionedFiles: ['note.txt'], attachments: [expect.objectContaining({ id: 'host-note' })] })
-      expect(events.filter(event => (event.data as any)?.inputId === 'human-fixed-host-input' && (event.data as any)?.decision === 'spawn')).toHaveLength(1)
+      expect(events.filter(event => (event.data as any)?.replyToId === 'msg-fixed-host-input')).toHaveLength(1)
+      expect((await host.getConversationMessages(conversation.id)).filter(message => message.replyToId === 'msg-fixed-feedback')).toEqual([
+        expect.objectContaining({ role: 'assistant', text: expect.stringContaining('你希望我先解释') }),
+      ])
     } finally { await host.close(); await new Promise(resolve => setTimeout(resolve, 200)); await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
   })
   it('lets the assistant send instructions to running work without cancelling it', async () => {

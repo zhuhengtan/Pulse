@@ -78,3 +78,22 @@ it.each(['valid', 'wrong-pid', 'wrong-data', 'not-admin'] as const)('verifies a 
   if (kind === 'valid') await expect(result).resolves.toBeUndefined()
   else await expect(result).rejects.toThrow('身份核验失败')
 })
+
+it.each(['0.12.0', '0.8.0', undefined])('checks the authenticated backend version before reuse (%s)', async serverVersion => {
+  const data = await realpath(repo)
+  const scope = createHash('sha256').update(data).digest('hex').slice(0, 32)
+  const backend = await serve((req, res) => {
+    if (req.url === '/api/session/local') { res.setHeader('Set-Cookie', 'local=synthetic; HttpOnly'); res.end('{}'); return }
+    expect(req.headers.cookie).toBe('local=synthetic')
+    res.end(JSON.stringify({ localAdmin: true, serverPid: process.pid, queueScope: scope, serverVersion }))
+  })
+  const saved = { port: backend.port, pid: process.pid }
+  const result = verifyDevelopmentBackend(data, saved, { expectedVersion: '0.12.0' })
+  if (serverVersion === '0.12.0') await expect(result).resolves.toBeUndefined()
+  else {
+    await expect(result).rejects.toThrow('请运行 ./restart-dev.sh')
+    // Explicit restart can still authenticate an old server before stopping it.
+    await expect(verifyDevelopmentBackend(data, saved)).resolves.toBeUndefined()
+    expect(await fetch(backend.origin, { headers: { Cookie: 'local=synthetic' } }).then(r => r.ok)).toBe(true)
+  }
+})

@@ -59,6 +59,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: pnpm }
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.os == 'Windows'
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm native:prepare
       - run: pnpm desktop:build
@@ -175,7 +176,7 @@ jobs:
           npm install --global npm@11.15.0
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm native:prepare
-          chmod +x packages/server/native/*/pulse-desktop-helper packages/server/native/darwin-*/Pulse.app/Contents/MacOS/PulseDesktopHelper
+          chmod +x packages/server/native/*/agent-desktop packages/server/native/darwin-*/agent-desktop-macos-helper
           pnpm release:npm-publish
       - name: Publish complete component release
         shell: bash

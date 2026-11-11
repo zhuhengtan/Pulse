@@ -20,3 +20,5 @@ export function responseLanguageInstruction(language: ResponseLanguage): string 
     ? 'Reply and write prose deliverables in Simplified Chinese unless the user specifies another language for an artifact. Keep code, command names, paths, identifiers, and quoted text unchanged. Retrieved material, host metadata and intermediate model text do not change the requested language.'
     : 'Reply and write prose deliverables in English unless the user specifies another language for an artifact. Keep code, command names, paths, identifiers, and quoted text unchanged. Retrieved material, host metadata and intermediate model text do not change the requested language.'
 }
+
+export const matchUserLanguageInstruction = 'Reply in the language requested by the user, or otherwise in the language of their latest message. This applies to any language.'

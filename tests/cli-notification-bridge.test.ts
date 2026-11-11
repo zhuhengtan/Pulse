@@ -44,7 +44,7 @@ function fixture() {
 describe('CLI notification bridge without a server or socket', () => {
   it('projects CLI waits into the existing H5 inbox and snapshot without changing ordinary H5 runs', async () => {
     const f = fixture(); await f.producer.tick()
-    const host = { conversationData: f.store, setAssistantWorkTools: vi.fn() } as unknown as LocalHost
+    const host = { conversationData: f.store, setAssistantWorkTools: vi.fn(), taskAdmissionForRun: vi.fn(() => undefined) } as unknown as LocalHost
     // Construct the adapters only: never start/listen on the HTTP server.
     const server = new H5Server(host, { dataDir: '/tmp/pulse-unused-cli-notice-test' }) as any
     server.cliNotices = f.reader
@@ -95,7 +95,7 @@ describe('CLI notification bridge without a server or socket', () => {
   })
   it('clears stale CLI pending without recording completion and restores it when heartbeats recover', async () => {
     const f = fixture(); await f.producer.tick()
-    const server = new H5Server({ conversationData: f.store, setAssistantWorkTools: vi.fn() } as unknown as LocalHost, { dataDir: '/tmp/pulse-unused-cli-notice-test' }) as any
+    const server = new H5Server({ conversationData: f.store, setAssistantWorkTools: vi.fn(), taskAdmissionForRun: vi.fn(() => undefined) } as unknown as LocalHost, { dataDir: '/tmp/pulse-unused-cli-notice-test' }) as any
     server.cliNotices = f.reader; server.assistantInbox = { conversationId: 'assistant' }; server.finishStream = vi.fn()
     await server.syncCliNotifications()
     f.advance(16_000); await server.syncCliNotifications()
@@ -128,7 +128,7 @@ describe('CLI notification bridge without a server or socket', () => {
   })
   it('retires the CLI snapshot after H5 resumes the run, retaining its terminal state across restart', async () => {
     const f = fixture(); await f.producer.tick(); await f.producer.close()
-    const host = { conversationData: f.store, setAssistantWorkTools: vi.fn(), prepareAutomation: vi.fn(async () => {}), getTransferBinding: vi.fn(async () => undefined), resumeRun: vi.fn(async () => f.run) } as unknown as LocalHost
+    const host = { conversationData: f.store, setAssistantWorkTools: vi.fn(), taskAdmissionForRun: vi.fn(() => undefined), scheduleTask: vi.fn(async () => f.run), prepareAutomation: vi.fn(async () => {}), getTransferBinding: vi.fn(async () => undefined), resumeRun: vi.fn(async () => f.run) } as unknown as LocalHost
     const create = () => {
       const server = new H5Server(host, { dataDir: '/tmp/pulse-unused-cli-takeover' }) as any
       server.cliNotices = new CliNotificationReader(f.store, f.now)

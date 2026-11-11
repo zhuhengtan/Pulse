@@ -10,6 +10,7 @@ import '../src/style.css'
 import '../src/redesign.css'
 import '../src/messages.css'
 import '../src/composer.css'
+import '../src/workbench-theme.css'
 
 const scenario = new URLSearchParams(location.search).get('scenario') ?? 'trace'
 const fixture = routingFixture(), request = fixture.transport.request

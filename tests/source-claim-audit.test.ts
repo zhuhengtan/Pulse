@@ -20,7 +20,8 @@ it('covers assertions in summaries/tables and Chinese prose with stable IDs, exc
   expect(targets[0]?.text).toContain('My own summary')
 })
 
-it.each([false, true])('checks actual Host source quotes and final-file freshness (external=%s)', async external => {
+it.each(['current', 'external', 'paged'] as const)('checks actual Host source quotes and final-file freshness (%s)', async mode => {
+  const external = mode === 'external', paged = mode === 'paged'
   vi.spyOn(fixtureDns, 'lookup').mockImplementation((async (host: string) => {
     if (host !== 'example.com') throw new Error('UNEXPECTED_FIXTURE_DNS:' + host)
     return [{ address: '93.184.216.34', family: 4 }]
@@ -28,14 +29,26 @@ it.each([false, true])('checks actual Host source quotes and final-file freshnes
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-claim-host-'))
   const objective = 'Use https://example.com/docs to write report.md accurately explaining the documented flag.'
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)
-  let work = 0, claims = 0, modelRequests = 0
+  let work = 0, claims = 0, modelRequests = 0, sourceFetches = 0, plans = 0
+  const report = 'The flag suppresses only rendered output; an index may still be written.\nSource: https://example.com/docs\n' + (paged ? '\n```text\n' + 'fixture padding\n'.repeat(440) + '```\n' : '')
+  const workTools = [
+    ...Array.from({ length: paged ? 5 : 1 }, (_, index) => ({ name: 'web_fetch', args: { url: 'https://example.com/docs', offset: index * 2000 } })),
+    { name: 'fs_write', args: { path: 'report.md', content: report } },
+    ...(paged ? [0, 3000, 6000].map(offset => ({ name: 'fs_read', args: { path: 'report.md', offset, maxBytes: 3000 } })) : []),
+  ]
   const reply = (value: any) => Response.json({ choices: [{ message: typeof value === 'string' ? { content: value } : value, finish_reason: value.tool_calls ? 'tool_calls' : 'stop' }] })
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
-    if (String(url).startsWith('https://example.com/')) return new Response('<html><title>Flag</title><p>The flag suppresses rendered output. An index may still be written.</p></html>', { headers: { 'content-type': 'text/html' } })
+    if (String(url).startsWith('https://example.com/')) {
+      sourceFetches++
+      return new Response('<html><title>Flag</title><p>The flag suppresses rendered output. An index may still be written.</p>' + (paged ? '<pre>' + 'source context '.repeat(550) + '</pre>' : '') + '</html>', { headers: { 'content-type': 'text/html' } })
+    }
     modelRequests++
     const request = JSON.parse(String(init?.body)), text = currentRequestText(request.messages), rows = suppliedRequestResults(request.messages), refs = rows.map(r => r.id)
     if (request.messages.some((m: any) => m.content?.includes('You are the Pulse safety reviewer'))) return reply('APPROVE')
-    if (text.includes('Create an executable plan')) return reply(JSON.stringify({ tasks: [{ id: 'report', kind: 'edit', goal: 'Write report.md from the actual source', check: 'Source-supported bounded explanation', criterionIds: ids, dependsOn: [] }] }))
+    if (text.includes('Create an executable plan')) {
+      plans++
+      return reply(JSON.stringify({ tasks: [{ id: 'report', kind: 'edit', goal: 'Write report.md from the actual source', check: 'Source-supported bounded explanation', criterionIds: ids, dependsOn: [] }] }))
+    }
     if (text.includes('Verify ONLY the active')) return reply(JSON.stringify({ status: 'passed', evidenceRefs: refs, note: 'Actual report saved' }))
     if (text.includes('Independently verify every ORIGINAL')) return reply(JSON.stringify({ criteria: ids.map(criterionId => ({ criterionId, status: 'passed', evidenceRefs: refs, rationale: 'Actual report and source' })) }))
     if (text.includes('Independently check EVERY supplied claim ID')) {
@@ -45,19 +58,27 @@ it.each([false, true])('checks actual Host source quotes and final-file freshnes
       return reply(JSON.stringify({ assessments: context.claimTargets.map((target: any) => ({ claimId: target.id, criterionId: ids[0], status: 'supported', sourceRefs: [context.primarySourceRefs[0]], quote: 'The flag suppresses rendered output.', rationale: 'The claim is bounded to the named rendered-output category, not every side effect.' })) }))
     }
     if (text.includes('Independently audit the delivered content') || text.includes('Perform an independent factual audit')) return reply(JSON.stringify({ criteria: ids.map(criterionId => ({ criterionId, status: 'passed', evidenceRefs: refs, rationale: 'Actual source support' })), findings: [] }))
-    const call = ++work === 1 ? { name: 'web_fetch', args: { url: 'https://example.com/docs' } } : work === 2 ? { name: 'fs_write', args: { path: 'report.md', content: 'The flag suppresses only rendered output; an index may still be written.\nSource: https://example.com/docs\n' } } : undefined
+    const call = workTools[work++]
     return call ? reply({ content: '', tool_calls: [{ id: 'fixture-' + work, function: { name: call.name, arguments: JSON.stringify(call.args) } }] }) : reply('Report saved.')
   }))
-  const host = createLocalHost({ cwd, dataDir: join(cwd, '.host'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, approvalMode: 'auto', taskController: true, jarvis: { enabled: false }, allowNetwork: true, networkHosts: ['example.com'], maxModelCalls: 40 })
+  const host = createLocalHost({ cwd, dataDir: join(cwd, '.host'), provider: { provider: 'openai-compatible', defaultModel: 'fixture', ...(paged || external ? { maxContextTokens: 128_000 } : {}) }, approvalMode: 'auto', taskController: true, jarvis: { enabled: false }, allowNetwork: true, networkHosts: ['example.com'], maxModelCalls: 40 })
   try {
     const c = await host.createConversation(), run = await host.sendMessage(c.id, { text: objective })
-    for await (const event of run.events) if (event.type === 'waiting') await run.reply(String(event.data!.effectId), { approved: true })
+    for await (const event of run.events) if (event.type === 'waiting') {
+      if (paged) throw new Error(JSON.stringify({ unexpectedWait: event.data, work, claims, modelRequests }))
+      await run.reply(String(event.data!.effectId), { approved: true })
+    }
     await run.outcome()
     const outcome = await run.taskOutcome()
     expect(claims).toBe(1)
     expect((await run.usage()).modelCalls).toBe(modelRequests)
     expect(outcome?.status === 'accepted', JSON.stringify(outcome)).toBe(!external)
-    if (external) expect(JSON.stringify(outcome)).toContain('EVIDENCE_CHANGED')
+    if (paged) { expect(sourceFetches).toBe(5); expect(plans).toBe(1); expect(await readFile(join(cwd, 'report.md'), 'utf8')).toBe(report) }
+    if (external) {
+      expect(JSON.stringify(outcome)).toContain('EVIDENCE_CHANGED')
+      // The native freshness failure stays a typed blocker even after unchanged replans exhaust their reviews.
+      expect(outcome?.blockers).toContainEqual(expect.objectContaining({ code: 'EVIDENCE_CHANGED', recovery: 'reverify-current-inputs' }))
+    }
     else {
       const state = JSON.parse(await readFile(join(cwd, '.host/conversations', c.id, 'runs', run.id, 'task-controller.json'), 'utf8'))
       expect(state.sourceClaimAudit.assessments[0]).toMatchObject({ status: 'supported', quote: 'The flag suppresses rendered output.' })
@@ -79,7 +100,7 @@ it('requires complete IDs and exact actual primary-source quotations', () => {
   expect(claimAssessmentError(targets, [{ ...row, status: 'structural' }], ['c'], sources)).toContain('cannot exempt')
 })
 
-it.each(['supported', 'unsupported', 'missing', 'forged', 'bad-ref', 'structural-abuse', 'shape-repair', 'budget', 'repair', 'batch', 'legacy'] as const)('retains independent claim acceptance despite optimistic prior review: %s', async mode => {
+it.each(['supported', 'unsupported', 'missing', 'forged', 'bad-ref', 'structural-abuse', 'shape-repair', 'budget', 'repair', 'batch', 'legacy', 'omitted-source'] as const)('retains independent claim acceptance despite optimistic prior review: %s', async mode => {
   const qualified = 'The flag suppresses only rendered output; its index may still be written.'
   const universal = 'My own summary: the flag never writes any files.'
   let text = mode === 'batch' ? Array(9).fill(qualified).join('\n') : ['unsupported', 'repair', 'legacy'].includes(mode) ? universal : qualified
@@ -98,7 +119,7 @@ it.each(['supported', 'unsupported', 'missing', 'forged', 'bad-ref', 'structural
     }
     const visible = Array.isArray(input.inputs?.results) ? input.inputs.results : refs()
     if (effect.key.startsWith('plan')) return { value: { tasks: [{ id: `report-${++plans}`, kind: 'edit', goal: 'Write an accurate source-based report.md', check: 'Accurate factual explanation', criterionIds: ['c'], dependsOn: [] }] } }
-    if (effect.key.startsWith('verify-stage')) return { value: { status: 'passed', evidenceRefs: visible, note: 'Optimistic stage verifier' } }
+    if (effect.key.startsWith('verify-stage')) return { value: { status: 'passed', evidenceRefs: mode === 'omitted-source' ? visible.filter((ref: string) => { const r = runtime.state.results.get(ref); return !r?.producer || r.producer.kind !== 'effect' || (runtime.state.effects.get(r.producer.id)?.input as any)?.name !== 'web.fetch' }) : visible, note: 'Optimistic stage verifier' } }
     if (effect.key.startsWith('verify-task')) return { value: { criteria: [{ criterionId: 'c', status: 'passed', evidenceRefs: visible, rationale: 'Optimistic final verifier' }] } }
     if (effect.key.startsWith('verify-sources')) { sourceAudits++; return { value: { criteria: [{ criterionId: 'c', status: 'passed', evidenceRefs: visible, rationale: 'Optimistic whole-document audit' }], findings: [] } } }
     if (effect.key.startsWith('verify-claims')) {
@@ -106,7 +127,7 @@ it.each(['supported', 'unsupported', 'missing', 'forged', 'bad-ref', 'structural
       const context = input.inputs.conversation.map((m: any) => { try { return JSON.parse(m.content) } catch { return {} } }).find((m: any) => m.claimTargets)
       expect(context.claimTargets).toHaveLength(mode === 'batch' && claimCalls === 1 ? 8 : 1)
       const source = context.primarySourceRefs[0]
-      const bad = mode === 'unsupported' || mode === 'repair' && claimCalls === 1
+      const bad = mode === 'unsupported' || mode === 'legacy' || mode === 'repair' && claimCalls === 1
       return { value: { assessments: mode === 'missing' || mode === 'shape-repair' && claimCalls === 1 ? [] : context.claimTargets.map((target: any) => ({ claimId: target.id, criterionId: 'c', status: bad ? 'unsupported' : mode === 'structural-abuse' ? 'structural' : 'supported', sourceRefs: [mode === 'bad-ref' ? 'invented' : source], quote: mode === 'forged' ? 'The flag never writes any files.' : 'The flag suppresses rendered output.', rationale: bad ? 'The source names one output category, not all filesystem side effects.' : 'Scope is explicitly limited to rendered output and preserves the metadata exception.' })) } }
     }
     work++
@@ -116,9 +137,9 @@ it.each(['supported', 'unsupported', 'missing', 'forged', 'bad-ref', 'structural
   } })
   agentId = runtime.createAgent({ goal: 'Research the flag and write an accurate report.md', program, initialGlobal: { taskRecord: { schemaVersion: 1, runId: 'source-claim-fixture', objective: 'Research the flag and write an accurate report.md', acceptanceCriteria: [{ id: 'c', description: 'Accurate source-supported explanation' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } } }).agentId
   await runtime.start(agentId).outcome()
-  const accepted = ['supported', 'shape-repair', 'repair', 'batch', 'legacy'].includes(mode)
+  const accepted = ['supported', 'shape-repair', 'repair', 'batch', 'omitted-source'].includes(mode)
   expect(current().taskOutcome.status === 'accepted', JSON.stringify(current().taskOutcome)).toBe(accepted)
-  expect(claimCalls).toBe(mode === 'legacy' || mode === 'budget' ? 0 : mode === 'supported' || mode === 'unsupported' ? 1 : 2)
+  expect(claimCalls).toBe(mode === 'budget' ? 0 : ['supported', 'unsupported', 'legacy', 'omitted-source'].includes(mode) ? 1 : 2)
   if (mode === 'repair') { expect(text).toBe(qualified); expect(current().taskController.sourceClaimAudit.assessments[0].status).toBe('supported') }
   if (mode === 'batch') expect(current().taskController.sourceClaimAudit.assessments).toHaveLength(9)
 })

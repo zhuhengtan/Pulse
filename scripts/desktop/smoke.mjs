@@ -3,16 +3,42 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { closeToTray, quitFromMenu } from './smoke-lifecycle.mjs';
+import { previewProcessExit } from './preview-lifecycle.mjs';
+import { MockAdapter } from '../../packages/adapters/dist/providers/mock.js';
 import { createLocalHost, H5Server } from '../../packages/server/dist/index.js';
 const require = createRequire(new URL('../../packages/server/package.json', import.meta.url));
 const { _electron } = createRequire(require.resolve('@playwright/mcp'))('playwright');
 const electronPath = createRequire(new URL('../../packages/desktop/package.json', import.meta.url))('electron');
+// This is a transport/UI smoke test. Supply a deterministic work-router result
+// separately from the mock answer, while leaving the actual Host routing intact.
+const executeMockAttempt = MockAdapter.prototype.executeAttempt;
+MockAdapter.prototype.executeAttempt = async function (request) {
+    if (request?.request?.blocks?.some(block => typeof block.content === 'string' && block.content.includes('You route the latest user turn in a Pulse work conversation.'))) return { text: JSON.stringify({ action: 'start', response: '' }), toolCalls: [], finishReason: 'stop' };
+    return executeMockAttempt.call(this, request);
+};
 const root = await mkdtemp(join(tmpdir(), 'pulse-desktop-smoke-')), directory = join(root, 'data');
 const host = createLocalHost({ cwd: root, dataDir: directory, provider: { provider: 'mock', defaultModel: 'mock' }, providerProfiles: { mock: { provider: 'mock', defaultModel: 'mock' } }, providerModels: { mock: { provider: 'mock', model: 'mock' } }, activeModel: 'mock', assistantModel: 'mock', mockResponse: 'Desktop socket reply', jarvis: { enabled: false } });
 const server = new H5Server(host, { dataDir: directory, port: 0, host: '127.0.0.1' });
 let desktop;
 let page, timeline;
 const diagnostics = process.env.PULSE_DESKTOP_SMOKE_ARTIFACTS;
+async function closeOwnedDesktop(cleanup = false) {
+    if (!desktop) return;
+    const owned = desktop; desktop = undefined;
+    const child = owned.process(), exited = previewProcessExit(child);
+    let timer;
+    try {
+        await closeToTray(owned);
+        await quitFromMenu(owned);
+        const result = await Promise.race([exited, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('DESKTOP_CLOSE_TIMEOUT')), 15000); })]);
+        if (result.code !== 0 || result.signal) throw new Error(`DESKTOP_EXIT_FAILED:${result.code}:${result.signal}`);
+    } catch (error) {
+        if (child.exitCode === null && child.signalCode == null) child.kill('SIGKILL');
+        await exited.catch(() => {});
+        if (!cleanup) throw error;
+    } finally { clearTimeout(timer); }
+}
 async function stopTimeline() {
     if (!timeline || !diagnostics) return;
     const session = timeline; timeline = undefined;
@@ -155,7 +181,7 @@ try {
     const saved = await host.getConversationMessages(execution.id);
     if (!saved.some(message => message.role === 'user' && message.text === 'Show a short status') || !saved.some(message => message.role === 'assistant'))
         throw new Error('DESKTOP_WORK_NOT_PERSISTED');
-    await desktop.close();
+    await closeOwnedDesktop();
     desktop = undefined;
     // Closing Electron does not stop the independent service.
     const session = await fetch(`http://127.0.0.1:${server.effectivePort}/api/session/local`, { method: 'POST', headers: { Origin: `http://127.0.0.1:${server.effectivePort}` } });
@@ -173,7 +199,7 @@ try {
     await page.reload();
     await page.getByText('Work history 9999', { exact: true }).waitFor({ timeout: 10000 });
     await page.getByText('后台服务未连接，仍可浏览本地记录。', { exact: true }).waitFor({ timeout: 10000 });
-    await desktop.close();
+    await closeOwnedDesktop();
     desktop = undefined;
     if (errors.length)
         throw new Error(errors.join('\n'));
@@ -182,14 +208,16 @@ try {
 catch (error) {
     if (diagnostics) {
         await mkdir(diagnostics, { recursive: true }).catch(() => {});
-        await writeFile(join(diagnostics, 'messages.json'), JSON.stringify({ rendered: await page?.locator('.message').evaluateAll(nodes => nodes.map(node => ({ text: node.innerText, visible: Boolean(node.getClientRects().length) }))), saved: await host.getConversationMessages((await host.conversationData.call('readState', 'assistant-inbox')).conversationId) }, null, 2)).catch(() => {});
+        const rendered = await page?.locator('.message').evaluateAll(nodes => nodes.map(node => ({ text: node.innerText, visible: Boolean(node.getClientRects().length) }))).catch(() => []);
+        const saved = await host.conversationData.call('readState', 'assistant-inbox').then(inbox => host.getConversationMessages(inbox.conversationId)).catch(() => []);
+        await writeFile(join(diagnostics, 'messages.json'), JSON.stringify({ error: String(error), rendered, saved }, null, 2)).catch(() => {});
         await page?.screenshot({ path: join(diagnostics, 'failure.png') }).catch(() => {});
         await stopTimeline().catch(() => {});
     }
     throw error;
 }
 finally {
-    await desktop?.close();
+    await closeOwnedDesktop(true);
     await server.stop();
     await host.close();
     await new Promise(r => setTimeout(r, 1700));

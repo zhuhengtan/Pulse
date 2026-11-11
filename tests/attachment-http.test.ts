@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,6 +8,7 @@ import { createLocalHost, H5Server } from '@hunterzhu/pulse-server'
 it('coalesces work retries by requestId and refuses reuse for a different payload', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-upload-http-'))
   const host = createLocalHost({ cwd: dir, dataDir: dir, taskController: false, mockResponse: 'ok' })
+  acceptWorkRequests(host)
   const server = new H5Server(host, { dataDir: dir, host: '127.0.0.1', port: 0 })
   try {
     const { port } = await server.start(), base = `http://127.0.0.1:${port}`

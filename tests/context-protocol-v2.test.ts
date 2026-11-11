@@ -27,6 +27,19 @@ function fixture(nativeToolHistory = true) {
 }
 
 describe('versioned context protocol', () => {
+  it('replaces superseded native tool receipts and invalidates the cached prefix without mutating history', () => {
+    const f = fixture()
+    const original = f.build()
+    const old = f.settle(original)
+    const cached = f.build()
+    f.settle(cached, 2)
+    const before = JSON.stringify(f.state.results.get(old))
+    const current = f.build(3, { excludedResultRefs: [old] })
+    expect(JSON.stringify(current)).not.toContain('UNIQUE_RECEIPT_1')
+    expect(JSON.stringify(current)).toContain('EVIDENCE_SUPERSEDED')
+    expect(JSON.stringify(current)).toContain('UNIQUE_RECEIPT_2')
+    expect(JSON.stringify(f.state.results.get(old))).toBe(before)
+  })
   it('keeps the entire submitted message prefix and emits schemas and tool evidence once', () => {
     const f = fixture(), first = f.build(), a = toOpenAIMessages(first)
     f.settle(first)

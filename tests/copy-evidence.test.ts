@@ -94,5 +94,5 @@ it.each(['copy','move','copy-no-proof','copy-failed','move-no-change','legacy-co
  const agentId=runtime.createAgent({goal:'Copy input/a.bin to output/a.bin',program,initialGlobal:{taskRecord:{schemaVersion:1,runId:'copy-boundary',objective:'Copy input/a.bin to output/a.bin',acceptanceCriteria:[{id:'criterion-1',description:'Exact copied bytes'}],status:'in_progress',replanCount:0,attempts:[],evidenceRefs:[],excludedRefs:[]}}}).agentId
  await runtime.start(agentId).outcome()
  const agent=runtime.state.agents.get(agentId)!,state=agent.globalVersions.get(agent.latestGlobalVersion)as any
- expect(state.taskOutcome.status==='accepted').toBe(mode==='copy'||mode==='move')
+ expect(state.taskOutcome.status==='accepted').toBe(mode==='copy'||mode==='move'||mode==='legacy-copy'||mode==='legacy-move')
 })

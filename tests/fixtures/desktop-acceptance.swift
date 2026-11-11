@@ -8,6 +8,11 @@ final class Fixture: NSObject, NSApplicationDelegate {
     let slider = NSSlider(value:0,minValue:0,maxValue:1,target:nil,action:nil)
     init(root:URL) { self.root=root;super.init() }
     func applicationDidFinishLaunching(_ notification:Notification) {
+        // A programmatic AppKit fixture needs the standard Edit menu to route Cmd+A.
+        let menu = NSMenu(), appItem = NSMenuItem(), editItem = NSMenuItem(), editMenu = NSMenu(title: "Edit")
+        appItem.submenu = NSMenu(title: "Fixture"); menu.addItem(appItem)
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu; menu.addItem(editItem); NSApplication.shared.mainMenu = menu
         window.title="Pulse Desktop Acceptance"
         // Use the primary display explicitly; NSScreen.main follows the
         // active window and can otherwise choose another connected monitor.

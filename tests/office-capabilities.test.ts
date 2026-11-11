@@ -483,8 +483,8 @@ describe('office capabilities', () => {
       const outcome = await run.outcome()
       expect(await run.taskOutcome(), outcome.text).toMatchObject({ status: 'accepted' })
       const input = JSON.parse(await readFile(join(root, 'data', 'conversations', conversation.id, 'runs', run.id, 'input.json'), 'utf8'))
-      expect(input.controllerVersion).toBe('56')
-      expect(input.taskControllerPolicy ?? 'legacy').toBe('legacy')
+      expect(input.controllerVersion).toBe('58')
+      expect(input.taskControllerPolicy).toBe('continuous')
       const runtime = JSON.parse(await readFile(join(root, 'data', 'conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8')).state.state
       const names = runtime.effects.map((entry: [string, { input?: { name?: string } }]) => entry[1].input?.name).filter(Boolean)
       expect(names).toContain('fs.read')

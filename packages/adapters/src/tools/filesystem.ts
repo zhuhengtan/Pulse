@@ -36,30 +36,35 @@ function pidAlive(pid: number): boolean {
 
 export class FilesystemTool {
   private journal: FileWriteJournal | undefined
-  constructor(readonly root: string, private readonly lockTimeoutMs = 30_000) {}
+  constructor(readonly root: string, private readonly lockTimeoutMs = 30_000, private readonly expectedRoot?: string) {}
+  private assertRoot(root: string): void {
+    if (this.expectedRoot !== undefined && root !== this.expectedRoot) throw filesystemError('WORKSPACE_ACCESS_ROOT_CHANGED')
+  }
   setFileJournal(journal: FileWriteJournal | undefined): void { this.journal = journal }
   private safe(path: string): string {
     const root = resolve(this.root)
     const target = resolve(root, path)
     const within = relative(root, target)
-    if (within.startsWith('..') || isAbsolute(within)) throw filesystemError('PATH_OUTSIDE_SANDBOX')
+    if (within === '..' || within.startsWith(`..${sep}`) || isAbsolute(within)) throw filesystemError('PATH_OUTSIDE_SANDBOX')
     return target
   }
   private async existing(path: string): Promise<string> {
     const target = this.safe(path)
     const [root, resolved] = await Promise.all([realpath(this.root), realpath(target)])
+    this.assertRoot(root)
     const within = relative(root, resolved)
-    if (within.startsWith('..') || isAbsolute(within)) throw filesystemError('PATH_OUTSIDE_SANDBOX')
+    if (within === '..' || within.startsWith(`..${sep}`) || isAbsolute(within)) throw filesystemError('PATH_OUTSIDE_SANDBOX')
     return resolved
   }
   private async writable(path: string): Promise<string> {
     const root = await realpath(this.root)
+    this.assertRoot(root)
     const lexical = this.safe(path)
     const segments = relative(resolve(this.root), lexical).split(sep).filter(Boolean)
     if (segments.length === 0) throw filesystemError('PATH_OUTSIDE_SANDBOX')
     const inside = (candidate: string): void => {
       const within = relative(root, candidate)
-      if (within.startsWith('..') || isAbsolute(within)) throw filesystemError('PATH_OUTSIDE_SANDBOX')
+      if (within === '..' || within.startsWith(`..${sep}`) || isAbsolute(within)) throw filesystemError('PATH_OUTSIDE_SANDBOX')
     }
     let current = root
     let index = 0
@@ -219,16 +224,23 @@ export class FilesystemTool {
         const reader = await open(target, 'r')
         let bytes: Buffer
         try {
-          if ((await reader.stat()).size > maxBytes) throw filesystemError('FILE_TOO_LARGE')
-          const buffer = Buffer.alloc(maxBytes + 1)
+          const tooLarge = (size: number) => Object.assign(filesystemError('FILE_TOO_LARGE'), { details: { bytes: size, maxBytes } })
+          const size = (await reader.stat()).size
+          if (size > maxBytes) throw tooLarge(size)
+          // Read bounded chunks rather than allocating the entire allowed size
+          // for every tiny edit. One extra byte detects a growing oversized file.
+          const chunks: Buffer[] = []
           let length = 0
-          while (length < buffer.length) {
-            const { bytesRead } = await reader.read(buffer, length, buffer.length - length, length)
+          while (length <= maxBytes) {
+            if (signal?.aborted) throw filesystemError('ABORTED')
+            const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - length))
+            const { bytesRead } = await reader.read(buffer, 0, buffer.length, length)
             if (!bytesRead) break
+            chunks.push(buffer.subarray(0, bytesRead))
             length += bytesRead
           }
-          if (length > maxBytes) throw filesystemError('FILE_TOO_LARGE')
-          bytes = buffer.subarray(0, length)
+          if (length > maxBytes) throw tooLarge(length)
+          bytes = Buffer.concat(chunks, length)
         } finally { await reader.close() }
         const content = bytes.toString('utf8')
         if (!Buffer.from(content).equals(bytes)) throw filesystemError('FILE_NOT_UTF8')

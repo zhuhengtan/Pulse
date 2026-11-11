@@ -12,7 +12,7 @@ it('preserves a launch-time ask override when an unrelated capability setting is
   const info=await server.start(),base=`http://127.0.0.1:${info.port}`,session=await fetch(base+'/api/session/local',{method:'POST',headers:{Origin:base}}),headers={Origin:base,Cookie:session.headers.get('set-cookie')!,'Content-Type':'application/json'}
   const before=await(await fetch(base+'/api/config',{headers})).json()
   before.config.capabilities.enabled=['skills','browser','computer']
-  const response=await fetch(base+'/api/config',{method:'PUT',headers,body:JSON.stringify(before)})
+  const response=await fetch(base+'/api/config',{method:'PUT',headers,body:JSON.stringify({version:before.version,config:before.config})})
   expect(response.status).toBe(200)
   expect(host.getAutomationOptions()).toEqual({enabled:['browser','computer'],approvalMode:'ask'})
   expect(JSON.parse(await readFile(path,'utf8')).approvalMode).toBe('auto')

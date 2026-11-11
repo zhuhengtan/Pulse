@@ -1,4 +1,19 @@
 /* Message presentation is explicit: IM chat and document-style project work. */
+.pending-work-summary { flex:none; display:grid; gap:4px; max-height:140px; overflow:auto; padding:8px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
+.pending-work-summary > .pulse-button { display:flex; justify-content:flex-start; gap:12px; width:100%; height:auto; min-height:36px; text-align:left; white-space:normal; }
+.pending-work-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
+.answered-question { display:grid; gap:10px; min-width:0; padding:14px; border:1px solid var(--line); border-radius:14px; background:var(--surface-raised); color:var(--ink); }
+.answered-question + .answered-question { margin-top:12px; }
+.answered-question h3 { margin:0; font-size:15px; line-height:1.5; font-weight:500; overflow-wrap:anywhere; }
+.answered-question .question-background { margin:0; }
+.answered-question-options { margin:0; padding:0; list-style:none; }
+.answered-question-options .question-option > span:nth-child(2) { flex:1; min-width:0; }
+.answered-question-options .question-option.selected { border-color:var(--accent); }
+.question-answer-marker { flex:none; align-self:center; color:var(--muted); font-size:12px; }
+.question-radio.question-check { border-radius:4px; }
+.question-answer-text { padding:10px; border:1px solid var(--line); border-radius:8px; background:var(--soft); }
+.question-answer-text small { color:var(--muted); font-size:12px; }
+.question-answer-text p { margin:4px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; }
 :root {
   --work-content-width: min(800px, 96%);
   --work-body-font-size: 15px;
@@ -42,6 +57,8 @@
 .message.message--chat.user, .message.message--work.user { align-items: flex-end; margin-left: auto; }
 .message-bubble-row { display: flex; align-items: flex-end; gap: 6px; max-width: 100%; min-width: 0; }
 .message > .message-bubble-row > .bubble { position: relative; min-width: 0; }
+.message-card-content { position:relative; display:grid; gap:12px; min-width:0; max-width:100%; width:100%; color:var(--ink); font-size:var(--work-body-font-size); line-height:1.65; overflow-wrap:anywhere; }
+.message-card-content > .answered-question + .answered-question { margin-top:0; }
 .message-menu-anchor { position: absolute; width: 1px; height: 1px; pointer-events: none; }
 .message.message--chat > .message-bubble-row > .bubble {
   width: fit-content;
@@ -78,7 +95,8 @@
 .message .code-block pre > code { display: block; width: max-content; min-width: 100%; overflow: visible; padding: 0; }
 .message .markdown th { background: var(--soft); color: var(--ink); }
 .message .markdown th, .message .markdown td { border-color: var(--line); }
-.message.message--chat:focus-visible > .message-bubble-row > .bubble, .message .bubble.has-message-menu {
+.message.message--chat:focus-visible > .message-bubble-row > .bubble, .message .bubble.has-message-menu,
+.message:focus-visible .message-card-content > :is(.answered-question, .interaction-panel), .message-card-content.has-message-menu > :is(.answered-question, .interaction-panel) {
   border-color: var(--blue);
   outline: 2px solid color-mix(in srgb, var(--blue) 18%, transparent);
   outline-offset: 2px;
@@ -109,6 +127,7 @@
 .message-copy-action:hover { background: var(--soft); color: var(--ink); }
 .message-copy-action:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .message-feedback { overflow-wrap: anywhere; }
+.message-steering-status { color:var(--muted); font-size:12px; line-height:1.5; }
 .message-mobile-popover.adm-popover { --background: var(--surface-raised); --content-padding: 4px; color: var(--ink); }
 .message-mobile-popover .adm-popover-inner { border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
 .message-mobile-popover button {

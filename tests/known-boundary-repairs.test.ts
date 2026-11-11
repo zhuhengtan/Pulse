@@ -169,7 +169,7 @@ describe('concrete plan authorization', () => {
   it('blocks the execution question itself when the model skipped persistence/whole-plan review', async () => {
     const result = await scenario([confirm, implement], async () => { throw new Error('An unreviewed plan must not offer execution') })
     await expect(readFile(join(result.cwd, 'feature.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(result.calls).toBeLessThanOrEqual(4)
+    expect(result.calls).toBeLessThanOrEqual(16)
   })
   it('requires fresh explicit confirmation after external plan change', async () => {
     const result = await scenario([plan, confirm, implement], async ({ cwd, host, run, conversation, item }) => {

@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readFile, readdir, realpath, rm } from 'node:fs/pro
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { FilesystemTool } from '@hunterzhu/pulse-adapters'
 import { replaceStateFile } from './atomic-file.js'
+import { assertRealHistoryDirectory } from './self-host-file-history.js'
 
 let walSequence = 0
 function nextOrder(): number {
@@ -57,15 +58,22 @@ export class FileSnapshotManager {
   private readonly rollbacksDir: string
   private readonly historyDir: string
 
-  constructor(readonly root: string, readonly fsTool: FilesystemTool) {
-    this.blobsDir = resolve(root, '.pulse/file-snapshots/blobs')
-    this.walDir = resolve(root, '.pulse/file-snapshots/wal')
-    this.rollbacksDir = resolve(root, '.pulse/file-snapshots/rollbacks')
-    this.historyDir = resolve(root, '.pulse/file-snapshots/history')
+  constructor(readonly root: string, readonly fsTool: FilesystemTool, private readonly externalStore?: { storageRoot: string; validate: () => Promise<void> }) {
+    const base = externalStore ? resolve(externalStore.storageRoot) : resolve(root, '.pulse/file-snapshots')
+    this.blobsDir = join(base, 'blobs')
+    this.walDir = join(base, 'wal')
+    this.rollbacksDir = join(base, 'rollbacks')
+    this.historyDir = join(base, 'history')
   }
 
   /** Create the snapshot store one real directory at a time. A symlink is refused before any write. */
   private async ensureDirs(): Promise<void> {
+    if (this.externalStore) {
+      await this.externalStore.validate()
+      await assertRealHistoryDirectory(this.externalStore.storageRoot)
+      for (const target of [this.blobsDir, this.walDir, this.rollbacksDir, this.historyDir]) await this.ensureRealDirectory(this.externalStore.storageRoot, target)
+      return
+    }
     const lexical = resolve(this.root)
     const physicalRoot = await realpath(lexical).catch(() => { throw walError('WAL_PATH_ESCAPE') })
     const base = join(lexical, '.pulse', 'file-snapshots')
@@ -121,6 +129,7 @@ export class FileSnapshotManager {
   }
 
   private async atomicBytes(target: string, bytes: Uint8Array): Promise<void> {
+    if (this.externalStore) { await this.externalStore.validate(); if (!await this.containedDirectory(dirname(target))) throw walError('WAL_PATH_ESCAPE') }
     const existing = await lstat(target).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error })
     if (existing?.isSymbolicLink()) throw walError('WAL_PATH_ESCAPE')
     const parent = await lstat(dirname(target)).catch(() => undefined)
@@ -313,7 +322,8 @@ export class FileSnapshotManager {
 
   /** Refuse a snapshot directory whose own path or any ancestor is a symlink or leaves the workspace. Missing is not an error. */
   private async containedDirectory(target: string): Promise<boolean> {
-    const lexicalRoot = resolve(this.root)
+    if (this.externalStore) { await this.externalStore.validate(); await assertRealHistoryDirectory(this.externalStore.storageRoot) }
+    const lexicalRoot = resolve(this.externalStore?.storageRoot ?? this.root)
     const physicalRoot = await realpath(lexicalRoot).catch(() => { throw walError('WAL_PATH_ESCAPE') })
     const rel = relative(lexicalRoot, resolve(target)).replaceAll('\\', '/')
     if (rel.startsWith('..') || isAbsolute(rel) || rel === '') throw walError('WAL_PATH_ESCAPE')
@@ -435,6 +445,7 @@ export class FileSnapshotManager {
   }
 
   private async readContained(target: string): Promise<Buffer | null> {
+    await this.externalStore?.validate()
     const info = await lstat(target).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error })
     if (!info) return null
     if (info.isSymbolicLink() || !info.isFile()) throw walError('WAL_PATH_ESCAPE')
@@ -446,6 +457,7 @@ export class FileSnapshotManager {
   }
 
   private async hashOf(path: string): Promise<string | null> {
+    await this.externalStore?.validate()
     const safe = this.workspacePath(path)
     const target = resolve(this.root, safe)
     const info = await lstat(target).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error })
@@ -472,6 +484,7 @@ export class FileSnapshotManager {
   }
 
   private async restore(record: WalRecord, signal?: AbortSignal): Promise<void> {
+    await this.externalStore?.validate()
     const current = await this.hashOf(record.path)
     if (record.intendedPostHash === null) {
       if (record.beforeHash === null || record.preState !== 'present') throw walError('ROLLBACK_BASELINE_MISSING')

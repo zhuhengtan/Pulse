@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
 import { dirname, resolve, isAbsolute, join } from 'node:path'
 import { z } from 'zod'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { calendarScheduleSchema, nextCalendarOccurrence } from './scheduled-calendar.js'
 
 export const MIN_SCHEDULED_TASK_INTERVAL_MS = 1_000
 export const MAX_SCHEDULED_TASK_INTERVAL_MS = 30 * 24 * 60 * 60 * 1_000
@@ -9,17 +12,25 @@ const MAX_STORE_BYTES = 8 * 1024 * 1024
 const MAX_TASKS = 1_000
 const CLAIM_LEASE_MS = 60_000
 
+const intervalSchema = z.number().int().min(MIN_SCHEDULED_TASK_INTERVAL_MS).max(MAX_SCHEDULED_TASK_INTERVAL_MS)
+const scheduleFields = {
+  intervalMs: intervalSchema.optional(),
+  schedule: calendarScheduleSchema.optional(),
+  missedRun: z.enum(['skip', 'run-once']).optional(),
+}
+const hasSchedule = (task: { intervalMs?: number | undefined; schedule?: unknown }) => (task.intervalMs === undefined) !== (task.schedule === undefined)
 const scheduleInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   workspace: z.string().refine(isAbsolute).optional(),
   instruction: z.string().trim().min(1).max(10_000),
-  intervalMs: z.number().int().min(MIN_SCHEDULED_TASK_INTERVAL_MS).max(MAX_SCHEDULED_TASK_INTERVAL_MS),
-}).strict()
+  ...scheduleFields,
+}).strict().refine(hasSchedule, 'Specify exactly one interval or calendar schedule')
 
 const errorSchema = z.object({ code: z.string().min(1).max(80), message: z.string().max(500) }).strict()
 const runRecordSchema = z.object({
   id: z.string().uuid(),
   ownerPid: z.number().int().positive(),
+  ownerBootId: z.string().min(1).max(100).optional(),
   startedAt: z.number().int().nonnegative(),
   scheduledFor: z.number().int().nonnegative(),
   leaseExpiresAt: z.number().int().nonnegative().optional(),
@@ -29,6 +40,7 @@ const lastRunSchema = z.object({
   id: z.string().uuid(),
   startedAt: z.number().int().nonnegative(),
   finishedAt: z.number().int().nonnegative(),
+  scheduledFor: z.number().int().nonnegative().optional(),
   status: z.enum(['succeeded', 'failed', 'interrupted']),
   error: errorSchema.optional(),
 }).strict()
@@ -38,15 +50,17 @@ const taskSchema = z.object({
   name: z.string().min(1).max(120),
   workspace: z.string().refine(isAbsolute).optional(),
   instruction: z.string().min(1).max(10_000),
-  intervalMs: z.number().int().min(MIN_SCHEDULED_TASK_INTERVAL_MS).max(MAX_SCHEDULED_TASK_INTERVAL_MS),
+  ...scheduleFields,
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),
   nextRunAt: z.number().int().nonnegative(),
   paused: z.boolean(),
+  completed: z.boolean().optional(),
+  lastSkipped: z.object({ scheduledFor: z.number().int().nonnegative(), skippedAt: z.number().int().nonnegative() }).strict().optional(),
   runCount: z.number().int().nonnegative(),
   run: runRecordSchema.optional(),
   lastRun: lastRunSchema.optional(),
-}).strict()
+}).strict().refine(hasSchedule, 'Specify exactly one interval or calendar schedule')
 const storeSchema = z.object({ schemaVersion: z.literal(1), tasks: z.array(taskSchema).max(MAX_TASKS) }).strict()
 
 export type ScheduledTask = z.infer<typeof taskSchema>
@@ -56,6 +70,8 @@ export type ScheduledTaskRunStatus = z.infer<typeof lastRunSchema>['status']
 
 export interface ScheduledTaskStoreOptions {
   now?: () => number
+  /** Stable OS boot identity; a changed boot proves the prior owner stopped. */
+  bootId?: string
   isProcessAlive?: (pid: number) => boolean
   lockTimeoutMs?: number
   lockPollMs?: number
@@ -73,10 +89,30 @@ function defaultProcessAlive(pid: number): boolean {
   }
 }
 
-function advancePast(nextRunAt: number, intervalMs: number, now: number): number {
-  if (nextRunAt > now) return nextRunAt
-  const intervals = Math.floor((now - nextRunAt) / intervalMs) + 1
-  return nextRunAt + intervals * intervalMs
+function advancePast(task: ScheduledTask, now: number): void {
+  if (task.schedule?.kind === 'once') { task.completed = true; return }
+  if (task.nextRunAt > now) return
+  if (task.schedule) {
+    task.nextRunAt = nextCalendarOccurrence(task.schedule, now)!
+  } else {
+    const interval = task.intervalMs!
+    task.nextRunAt += (Math.floor((now - task.nextRunAt) / interval) + 1) * interval
+  }
+}
+
+let bootIdentity: Promise<string | undefined> | undefined
+function systemBootIdentity(): Promise<string | undefined> {
+  return bootIdentity ??= (async () => {
+    try {
+      const raw = process.platform === 'linux'
+        ? await readFile('/proc/sys/kernel/random/boot_id', 'utf8')
+        : process.platform === 'darwin'
+          ? (await promisify(execFile)('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], { timeout: 2_000 })).stdout
+          : ''
+      const value = raw.trim()
+      return /^[a-f0-9-]{36}$/i.test(value) ? value : undefined
+    } catch { return undefined }
+  })()
 }
 
 function sanitizedError(error: unknown): ScheduledTaskRunError {
@@ -99,6 +135,7 @@ export class ScheduledTaskStore {
   readonly filePath: string
   private readonly lockPath: string
   private readonly now: () => number
+  private readonly bootId: Promise<string | undefined>
   private readonly isProcessAlive: (pid: number) => boolean
   private readonly lockTimeoutMs: number
   private readonly lockPollMs: number
@@ -109,6 +146,7 @@ export class ScheduledTaskStore {
     this.filePath = resolve(filePath)
     this.lockPath = `${this.filePath}.lock`
     this.now = options.now ?? Date.now
+    this.bootId = options.bootId ? Promise.resolve(options.bootId) : systemBootIdentity()
     this.isProcessAlive = options.isProcessAlive ?? defaultProcessAlive
     this.lockTimeoutMs = options.lockTimeoutMs ?? 10_000
     this.lockPollMs = options.lockPollMs ?? 10
@@ -123,6 +161,8 @@ export class ScheduledTaskStore {
       await this.recoverInterrupted(document)
       if (document.tasks.length >= MAX_TASKS) throw taskError('SCHEDULED_TASK_LIMIT_REACHED')
       const now = this.timestamp()
+      const nextRunAt = parsed.data.schedule ? nextCalendarOccurrence(parsed.data.schedule, now) : now + parsed.data.intervalMs!
+      if (nextRunAt === undefined) throw taskError('SCHEDULE_DATE_PAST_OR_NONEXISTENT')
       const task: ScheduledTask = {
         schemaVersion: 1,
         id: randomUUID(),
@@ -130,7 +170,7 @@ export class ScheduledTaskStore {
         workspace: parsed.data.workspace ?? resolve(process.cwd()),
         createdAt: now,
         updatedAt: now,
-        nextRunAt: now + parsed.data.intervalMs,
+        nextRunAt,
         paused: false,
         runCount: 0,
       }
@@ -201,15 +241,26 @@ export class ScheduledTaskStore {
         if (recovered) await this.saveUnlocked(document)
         return []
       }
+      // Calendar schedules default to skipping stale occurrences, never a replay
+      // storm. An explicit run-once policy admits one catch-up occurrence only.
+      let skipped = false
+      for (const task of document.tasks) {
+        if (task.paused || task.run || task.completed || !task.schedule || task.missedRun === 'run-once' || task.nextRunAt >= now - 60_000) continue
+        task.lastSkipped = { scheduledFor: task.nextRunAt, skippedAt: now }
+        if (task.schedule.kind === 'once') task.completed = true
+        else task.nextRunAt = nextCalendarOccurrence(task.schedule, now - 60_001)!
+        task.updatedAt = now
+        skipped = true
+      }
       const due = document.tasks
-        .filter((task) => !task.paused && !task.run && task.nextRunAt <= now)
+        .filter((task) => !task.paused && !task.completed && !task.run && task.nextRunAt <= now)
         .sort((a, b) => a.nextRunAt - b.nextRunAt || a.createdAt - b.createdAt || a.id.localeCompare(b.id))
         .slice(0, 1)
-      if (due.length === 0) { if (recovered) await this.saveUnlocked(document); return [] }
+      if (due.length === 0) { if (recovered || skipped) await this.saveUnlocked(document); return [] }
       for (const task of due) {
         const runId = randomUUID()
-        task.run = { id: runId, ownerPid: process.pid, startedAt: now, scheduledFor: task.nextRunAt, leaseExpiresAt: now + CLAIM_LEASE_MS }
-        task.nextRunAt = advancePast(task.nextRunAt, task.intervalMs, now)
+        task.run = { id: runId, ownerPid: process.pid, ownerBootId: await this.bootId, startedAt: now, scheduledFor: task.nextRunAt, leaseExpiresAt: now + CLAIM_LEASE_MS }
+        advancePast(task, now)
         task.updatedAt = now
         task.runCount++
       }
@@ -250,9 +301,9 @@ export class ScheduledTaskStore {
       if (!task?.run || task.run.id !== runId || !task.run.quarantined) return undefined
       const { run } = task
       const now = this.timestamp()
-      task.lastRun = { id: run.id, startedAt: run.startedAt, finishedAt: now, status: 'interrupted', error: { code: 'OPERATOR_RECOVERED_QUARANTINED_RUN', message: 'An operator confirmed the previous execution and its child processes have stopped.' } }
+      task.lastRun = { id: run.id, startedAt: run.startedAt, scheduledFor: run.scheduledFor, finishedAt: now, status: 'interrupted', error: { code: 'OPERATOR_RECOVERED_QUARANTINED_RUN', message: 'An operator confirmed the previous execution and its child processes have stopped.' } }
       delete task.run
-      task.nextRunAt = advancePast(task.nextRunAt, task.intervalMs, now)
+      advancePast(task, now)
       task.updatedAt = now
       await this.saveUnlocked(document)
       return cloneTask(task)
@@ -269,9 +320,9 @@ export class ScheduledTaskStore {
       if (!task.run || task.run.id !== runId) throw taskError('SCHEDULED_TASK_RUN_MISMATCH')
       const { run } = task
       const finishedAt = Math.max(now, run.startedAt)
-      task.lastRun = { id: run.id, startedAt: run.startedAt, finishedAt, status, ...(error === undefined ? {} : { error: errorSchema.parse(error) }) }
+      task.lastRun = { id: run.id, startedAt: run.startedAt, scheduledFor: run.scheduledFor, finishedAt, status, ...(error === undefined ? {} : { error: errorSchema.parse(error) }) }
       delete task.run
-      task.nextRunAt = advancePast(task.nextRunAt, task.intervalMs, finishedAt)
+      advancePast(task, finishedAt)
       task.updatedAt = finishedAt
       await this.saveUnlocked(document)
       return cloneTask(task)
@@ -283,7 +334,7 @@ export class ScheduledTaskStore {
     await this.withLock(async () => {
       const document = await this.loadUnlocked(), task = document.tasks.find(item => item.id === id)
       if (!task?.run || task.run.id !== runId) throw taskError('SCHEDULED_TASK_RUN_MISMATCH')
-      task.nextRunAt = task.run.scheduledFor; task.runCount = Math.max(0, task.runCount - 1); delete task.run; task.updatedAt = this.timestamp()
+      task.completed = false; task.nextRunAt = task.run.scheduledFor; task.runCount = Math.max(0, task.runCount - 1); delete task.run; task.updatedAt = this.timestamp()
       await this.saveUnlocked(document)
     })
   }
@@ -302,11 +353,12 @@ export class ScheduledTaskStore {
       if (task.run.quarantined) continue
       // Lease expiry is not proof that side effects stopped. Fail closed while
       // the owner is alive (including an ambiguous reused PID).
-      if (this.isProcessAlive(task.run.ownerPid)) continue
+      const bootId = await this.bootId
+      if ((!bootId || !task.run.ownerBootId || bootId === task.run.ownerBootId) && this.isProcessAlive(task.run.ownerPid)) continue
       const { run } = task
-      task.lastRun = { id: run.id, startedAt: run.startedAt, finishedAt: now, status: 'interrupted', error: { code: 'WORKER_PROCESS_EXITED', message: 'The worker stopped before recording a result; the next interval remains scheduled.' } }
+      task.lastRun = { id: run.id, startedAt: run.startedAt, scheduledFor: run.scheduledFor, finishedAt: now, status: 'interrupted', error: { code: 'WORKER_PROCESS_EXITED', message: 'The worker stopped before recording a result; this occurrence will not be retried; recurring plans keep their next occurrence.' } }
       delete task.run
-      task.nextRunAt = advancePast(task.nextRunAt, task.intervalMs, now)
+      advancePast(task, now)
       task.updatedAt = now
       changed = true
     }
@@ -383,7 +435,7 @@ export class ScheduledTaskStore {
     while (!handle) {
       try {
         handle = await open(this.lockPath, 'wx', 0o600)
-        await handle.writeFile(JSON.stringify({ pid: process.pid, token, createdAt: Date.now() }), 'utf8')
+        await handle.writeFile(JSON.stringify({ pid: process.pid, bootId: await this.bootId, token, createdAt: Date.now() }), 'utf8')
         await handle.sync()
       } catch (cause) {
         const createdByUs = handle !== undefined
@@ -395,11 +447,12 @@ export class ScheduledTaskStore {
         }
         if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw taskError('SCHEDULED_TASK_LOCK_FAILED', cause)
         const body = await readFile(this.lockPath, 'utf8').catch(() => undefined)
-        let owner: { pid?: unknown; token?: unknown } | undefined
-        try { owner = body ? JSON.parse(body) as { pid?: unknown; token?: unknown } : undefined } catch { owner = undefined }
+        let owner: { pid?: unknown; token?: unknown; bootId?: unknown } | undefined
+        try { owner = body ? JSON.parse(body) as { pid?: unknown; token?: unknown; bootId?: unknown } : undefined } catch { owner = undefined }
         const lockStat = await stat(this.lockPath).catch(() => undefined)
+        const currentBoot = await this.bootId
         const stale = typeof owner?.pid === 'number'
-          ? !this.isProcessAlive(owner.pid)
+          ? (typeof owner.bootId === 'string' && currentBoot !== undefined && owner.bootId !== currentBoot) || !this.isProcessAlive(owner.pid)
           : lockStat !== undefined && Date.now() - lockStat.mtimeMs > 30_000
         if (stale) {
           const current = await readFile(this.lockPath, 'utf8').catch(() => undefined)

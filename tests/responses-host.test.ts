@@ -57,9 +57,7 @@ it.each(['same', 'changed-config', 'legacy-input'] as const)('keeps the actual C
     const saved = JSON.parse(await readFile(inputPath, 'utf8'))
     expect(saved.providerApiModes).toEqual({ schemaVersion: 1, modes: { fixture: 'responses' } })
     expect(JSON.stringify(saved)).not.toContain('local-private-replay')
-    const runtime = (first as any).active.get(runId).runtime
-    runtime.cancelAgent = () => {} // Simulate the existing interrupted-snapshot fixture without settling its pending approval.
-    await first.close()
+    await first.close({ preserveRuns: true })
     if (variant === 'changed-config') {
       config.providers.fixture.apiMode = 'chat-completions'
       routed.taskRouting.reason[0]!.reasoningEffort = 'low'

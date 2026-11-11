@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -128,6 +129,7 @@ describe('H5 work worker IPC', () => {
     temporaryDirectories.push(dir)
     const entry = fileURLToPath(new URL('./fixtures/h5-work-worker.mjs', import.meta.url))
     const host = createLocalHost({ cwd: dir, dataDir: dir })
+    acceptWorkRequests(host)
     const server = new H5Server(host, {
       dataDir: dir,
       host: '127.0.0.1',

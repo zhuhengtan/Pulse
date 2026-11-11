@@ -26,13 +26,14 @@ it('persists the pre-reply, merges a mid-generation supplement and never publish
   let release!: () => void, entered!: () => void
   const waiting = new Promise<void>(resolve => { release = resolve }), started = new Promise<void>(resolve => { entered = resolve })
   const requests: any[] = []
-  vi.stubGlobal('fetch', async (_url: any, init: any) => {
+  vi.stubGlobal('fetch', async (url: any, init: any) => {
+    if (String(url).endsWith('/api/generate')) return Response.json({ response: JSON.stringify({ instantResponse: '我先看看。' }) })
     requests.push(JSON.parse(init.body)); const first = requests.length === 1
     if (first) { entered(); await waiting }
     return Response.json({ choices: [{ message: { content: first ? '过时答案' : '已结合补充，用中文给出完整答案。' }, finish_reason: 'stop' }] })
   })
   const provider = { provider: 'openai-compatible' as const, baseURL: 'http://127.0.0.1:12345/v1', defaultModel: 'fixture' }
-  const host = createLocalHost({ cwd: root, dataDir: join(root, 'data'), provider, providerProfiles: { fixture: provider }, providerModels: { fixture: { provider: 'fixture', model: 'fixture' } }, activeModel: 'fixture', assistantModel: 'fixture', jarvis: { enabled: false } })
+  const host = createLocalHost({ cwd: root, dataDir: join(root, 'data'), provider, providerProfiles: { fixture: provider }, providerModels: { fixture: { provider: 'fixture', model: 'fixture' } }, activeModel: 'fixture', assistantModel: 'fixture', frontModel: { enabled: true, model: 'fixture' }, jarvis: { enabled: false } })
   try {
     const conversation = await host.createConversation()
     const handle = await host.sendMessage(conversation.id, { text: '解释这个概念', assistantChat: true })

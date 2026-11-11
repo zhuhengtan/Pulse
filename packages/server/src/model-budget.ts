@@ -1,3 +1,4 @@
+import type { VerificationDemand } from './task-controller/efficiency.js'
 import { promises as fs } from 'node:fs'
 import * as path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -43,6 +44,9 @@ export function budgetContinuationRunId(conversationId: string, sourceRunId: str
 }
 type UsageBase = { used: number; tokens: number; unknown: number; costs: Record<string, number> }
 interface State {
+  verificationReuses?: number | undefined
+  verificationDemand?: VerificationDemand | undefined
+  purposeUsage?: Record<string, { inputTokens: number; outputTokens: number; reports: number }> | undefined
   renewal?: BudgetRenewalAuthorization | undefined
   usageBase?: UsageBase | undefined
   inheritedFrom?: string | undefined
@@ -75,7 +79,7 @@ function parseState(raw: string): State {
     throw fail(CORRUPT, 'Unsupported model budget schemaVersion.')
   if (!isCount(record.limit) || !isCount(record.used))
     throw fail(CORRUPT, 'Model budget file has invalid counters.')
-  for (const key of ['reportedUsage', 'inputTokens', 'outputTokens', 'tokens', 'unknown', 'truncationEvents']) if (record[key] !== undefined && !isCount(record[key])) throw fail(CORRUPT, `Invalid budget field: ${key}`)
+  for (const key of ['reportedUsage', 'inputTokens', 'outputTokens', 'tokens', 'unknown', 'truncationEvents', 'verificationReuses']) if (record[key] !== undefined && !isCount(record[key])) throw fail(CORRUPT, `Invalid budget field: ${key}`)
   if (record.purposes !== undefined && (typeof record.purposes !== 'object' || record.purposes === null || Object.values(record.purposes).some(n => !isCount(n)))) throw fail(CORRUPT, 'Invalid budget purpose counters.')
   if (record.costs !== undefined && (typeof record.costs !== 'object' || record.costs === null || Object.values(record.costs).some(n => typeof n !== 'number' || !Number.isFinite(n) || n < 0))) throw fail(CORRUPT, 'Invalid budget costs.')
   if (record.metrics !== undefined && (typeof record.metrics !== 'object' || record.metrics === null || Object.entries(record.metrics).some(([key, value]) => !usageMetricNames.includes(key as UsageMetric) || !value || typeof value !== 'object' || typeof (value as any).total !== 'number' || !Number.isFinite((value as any).total) || (value as any).total < 0 || !isCount((value as any).known)))) throw fail(CORRUPT, 'Invalid usage metrics.')
@@ -83,7 +87,9 @@ function parseState(raw: string): State {
   if (record.inheritedFrom !== undefined && typeof record.inheritedFrom !== 'string') throw fail(CORRUPT, 'Invalid budget lineage.')
   if (record.renewal !== undefined) { const r = record.renewal as BudgetRenewalAuthorization; if (!r || r.confirmed !== true || typeof r.sourceRunId !== 'string' || !isCount(r.expectedUsed) || !isCount(r.expectedLimit)) throw fail(CORRUPT, 'Invalid budget renewal.') }
   if (record.usageBase !== undefined) { const b = record.usageBase as UsageBase; if (!b || !isCount(b.used) || !isCount(b.tokens) || !isCount(b.unknown) || !b.costs || Object.values(b.costs).some(n => !Number.isFinite(n) || n < 0)) throw fail(CORRUPT, 'Invalid inherited usage.') }
-  return { renewal: record.renewal as BudgetRenewalAuthorization | undefined, usageBase: record.usageBase as UsageBase | undefined, inheritedFrom: record.inheritedFrom as string | undefined, truncationEvents: record.truncationEvents as number | undefined, limit: record.limit, used: record.used, metrics: record.metrics as UsageMetrics | undefined, usageReceipts: record.usageReceipts as string[] | undefined, policy: record.policy as ModelBudgetPolicy | undefined, purposes: record.purposes as Record<string, number> | undefined, reportedUsage: record.reportedUsage as number | undefined, inputTokens: record.inputTokens as number | undefined, outputTokens: record.outputTokens as number | undefined, tokens: record.tokens as number | undefined, costs: record.costs as Record<string, number> | undefined, unknown: record.unknown as number | undefined }
+  if (record.verificationDemand !== undefined) { const d = record.verificationDemand as VerificationDemand; if (!d || !isCount(d.calls) || typeof d.reason !== 'string' || typeof d.repairUsed !== 'boolean') throw fail(CORRUPT, 'Invalid verification demand.') }
+  if (record.purposeUsage !== undefined && (!record.purposeUsage || typeof record.purposeUsage !== 'object' || Object.values(record.purposeUsage).some((v: any) => !v || !isCount(v.inputTokens) || !isCount(v.outputTokens) || !isCount(v.reports)))) throw fail(CORRUPT, 'Invalid purpose usage.')
+  return { verificationReuses: record.verificationReuses as number | undefined, verificationDemand: record.verificationDemand as VerificationDemand | undefined, purposeUsage: record.purposeUsage as State['purposeUsage'], renewal: record.renewal as BudgetRenewalAuthorization | undefined, usageBase: record.usageBase as UsageBase | undefined, inheritedFrom: record.inheritedFrom as string | undefined, truncationEvents: record.truncationEvents as number | undefined, limit: record.limit, used: record.used, metrics: record.metrics as UsageMetrics | undefined, usageReceipts: record.usageReceipts as string[] | undefined, policy: record.policy as ModelBudgetPolicy | undefined, purposes: record.purposes as Record<string, number> | undefined, reportedUsage: record.reportedUsage as number | undefined, inputTokens: record.inputTokens as number | undefined, outputTokens: record.outputTokens as number | undefined, tokens: record.tokens as number | undefined, costs: record.costs as Record<string, number> | undefined, unknown: record.unknown as number | undefined }
 }
 
 /** One instance per running task; LocalHost holds the conversation lock. */
@@ -143,6 +149,31 @@ export class ModelAttemptBudget {
     return budget
   }
 
+  async recordVerificationReuse(): Promise<void> {
+    const write = this.queue.then(async () => {
+      const next = { ...this.state, verificationReuses: (this.state.verificationReuses ?? 0) + 1 }
+      await this.persist(next); this.state = next
+    })
+    this.queue = write.catch(() => undefined)
+    return write
+  }
+
+  async setVerificationDemand(demand: VerificationDemand): Promise<void> {
+    const write = this.queue.then(async () => {
+      const nextDemand = this.effectiveDemand(demand)
+      if (JSON.stringify(nextDemand) === JSON.stringify(this.state.verificationDemand)) return
+      const next = { ...this.state, verificationDemand: nextDemand }
+      await this.persist(next); this.state = next
+    })
+    this.queue = write.catch(() => undefined)
+    return write
+  }
+
+  private effectiveDemand(demand: VerificationDemand): VerificationDemand {
+    const repairUsed = demand.repairUsed || this.state.verificationDemand?.repairUsed === true
+    return { ...demand, repairUsed, calls: Math.max(0, demand.calls - (repairUsed && !demand.repairUsed && demand.calls > 0 ? 1 : 0)) }
+  }
+
   async reserve(purpose = 'work'): Promise<void> {
     const run = this.queue.then(() => this.reserveOnce(purpose))
     this.queue = run.then(
@@ -177,7 +208,7 @@ export class ModelAttemptBudget {
   /** Explicit renewal extends calls only; token/cost/unknown-usage boundaries remain. */
   get canRenewCalls(): boolean {
     const policy = this.state.policy ?? {}, base = this.state.usageBase
-    const reserve = Math.min(policy.verificationReserve ?? 0, Math.max(0, this.limit - 1))
+    const reserve = this.state.verificationDemand?.calls ?? Math.min(policy.verificationReserve ?? 0, Math.max(0, this.limit - 1))
     if (this.limit - this.used > reserve) return false
     if (policy.maxTokens !== undefined && (this.state.tokens ?? 0) + (base?.tokens ?? 0) >= policy.maxTokens) return false
     for (const [currency, cap] of Object.entries(policy.maxCostByCurrency ?? {})) if ((this.state.costs?.[currency] ?? 0) + (base?.costs[currency] ?? 0) >= cap) return false
@@ -185,19 +216,20 @@ export class ModelAttemptBudget {
   }
 
   /** Host scheduling consults the same durable admission policy as dispatch. */
-  schedulingView(): { limit: number; used: number; workAllowed: boolean; verificationAllowed: boolean; finalAllowed: boolean; reason?: string } {
-    const allowed = (purpose: string) => { try { this.assertAdmission(purpose); return true } catch { return false } }
+  schedulingView(demand?: VerificationDemand): { limit: number; used: number; workAllowed: boolean; verificationAllowed: boolean; finalAllowed: boolean; reason?: string } {
+    const allowed = (purpose: string) => { try { this.assertAdmission(purpose, demand); return true } catch { return false } }
     let reason: string | undefined
-    try { this.assertAdmission('work') } catch (error) { reason = error instanceof Error ? error.message : String(error) }
+    try { this.assertAdmission('work', demand) } catch (error) { reason = error instanceof Error ? error.message : String(error) }
     return { limit: this.limit, used: this.used, workAllowed: allowed('work'), verificationAllowed: allowed('verification'), finalAllowed: allowed('final-verification'), ...(reason ? { reason } : {}) }
   }
 
-  private assertAdmission(purpose: string): void {
+  private assertAdmission(purpose: string, demand?: VerificationDemand): void {
     if (this.usedCount >= this.limitCount)
       throw fail(EXHAUSTED, 'Model call budget exhausted.')
     const policy = this.state.policy ?? {}
-    const reserved = Math.min(policy.verificationReserve ?? 0, Math.max(0, this.limit - 1))
-    const protectedCalls = purpose === 'final-verification' || purpose === 'completion-summary' ? 0 : purpose === 'verification' ? Math.min(1, reserved) : reserved
+    const dynamic = demand ? this.effectiveDemand(demand) : this.state.verificationDemand
+    const reserved = dynamic?.calls ?? Math.min(policy.verificationReserve ?? 0, Math.max(0, this.limit - 1))
+    const protectedCalls = dynamic ? (/verification|completion-summary/.test(purpose) ? 0 : reserved) : purpose === 'final-verification' || purpose === 'completion-summary' ? 0 : ['verification', 'source-verification', 'claim-verification'].includes(purpose) ? Math.min(1, reserved) : reserved
     if (this.limit - this.used <= protectedCalls) throw fail(EXHAUSTED, 'Model calls reserved for verification; checkpoint retained.')
     if (policy.maxTokens !== undefined && (this.state.tokens ?? 0) + (this.state.usageBase?.tokens ?? 0) >= policy.maxTokens) throw fail(EXHAUSTED, 'Model token budget exhausted.')
     for (const [currency, limit] of Object.entries(policy.maxCostByCurrency ?? {})) if ((this.state.costs?.[currency] ?? 0) + (this.state.usageBase?.costs[currency] ?? 0) >= limit) throw fail(EXHAUSTED, `Model cost budget exhausted (${currency}).`)
@@ -213,7 +245,7 @@ export class ModelAttemptBudget {
   }
 
   get accounting(): Readonly<State> { return structuredClone(this.state) }
-  async recordUsage(usage?: Partial<Record<UsageMetric, number>> & { outputTruncated?: boolean; costs?: Array<{ currency: string; amount: number }>; cost?: { currency: string; amount: number } }, receiptId?: string): Promise<void> {
+  async recordUsage(usage?: Partial<Record<UsageMetric, number>> & { outputTruncated?: boolean; costs?: Array<{ currency: string; amount: number }>; cost?: { currency: string; amount: number } }, receiptId?: string, purpose?: string): Promise<void> {
     const run = this.queue.then(async () => {
       if (receiptId && this.state.usageReceipts?.includes(receiptId)) return
       if (usage?.cost) usage = { ...usage, costs: [...(usage.costs ?? []), usage.cost] }
@@ -222,6 +254,10 @@ export class ModelAttemptBudget {
       const costs = { ...this.state.costs }
       for (const cost of usage?.costs ?? []) costs[cost.currency] = (costs[cost.currency] ?? 0) + cost.amount
       const next = { ...this.state, ...(usage?.outputTruncated === undefined ? {} : { truncationEvents: (this.state.truncationEvents ?? 0) + (usage.outputTruncated ? 1 : 0) }), costs, reportedUsage: (this.state.reportedUsage ?? 0) + (tokenKnown ? 1 : 0), inputTokens: (this.state.inputTokens ?? 0) + (typeof usage?.inputTokens === 'number' ? usage.inputTokens : 0), outputTokens: (this.state.outputTokens ?? 0) + (typeof usage?.outputTokens === 'number' ? usage.outputTokens : 0), tokens: (this.state.tokens ?? 0) + (typeof usage?.inputTokens === 'number' ? usage.inputTokens : 0) + (typeof usage?.outputTokens === 'number' ? usage.outputTokens : 0), unknown: Math.max(0, (this.state.unknown ?? 0) - (tokenKnown && costKnown ? 1 : 0)) }
+      if (purpose && tokenKnown) {
+        const prior = this.state.purposeUsage?.[purpose] ?? { inputTokens: 0, outputTokens: 0, reports: 0 }
+        Object.assign(next, { purposeUsage: { ...this.state.purposeUsage, [purpose]: { inputTokens: prior.inputTokens + usage!.inputTokens!, outputTokens: prior.outputTokens + usage!.outputTokens!, reports: prior.reports + 1 } } })
+      }
       const metrics = { ...this.state.metrics }
       for (const key of usageMetricNames) {
         const value = usage?.[key]

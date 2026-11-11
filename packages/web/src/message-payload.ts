@@ -1,11 +1,12 @@
 import type { ComposerPayload } from './RichComposer.js'
 import { apiJson, type PulseWebTransport, type WebMessage } from './transport.js'
 
-export type MessagePayload = Pick<WebMessage, 'text' | 'attachments' | 'skills' | 'mentionedFiles' | 'richContent' | 'assistantContext'>
+export type MessagePayload = Pick<WebMessage, 'qualityReviewEnabled' | 'text' | 'attachments' | 'skills' | 'mentionedFiles' | 'richContent' | 'assistantContext'>
 
 /** Snapshot the same complete content for delivery, durable queuing and retries. */
 export function messagePayload(source: ComposerPayload): MessagePayload {
   return structuredClone({ text: source.text,
+    ...(source.qualityReviewEnabled === undefined ? {} : { qualityReviewEnabled: source.qualityReviewEnabled }),
     ...(source.attachments !== undefined ? { attachments: source.attachments } : {}),
     ...(source.skills !== undefined ? { skills: source.skills } : {}),
     ...(source.mentionedFiles !== undefined ? { mentionedFiles: source.mentionedFiles } : {}),

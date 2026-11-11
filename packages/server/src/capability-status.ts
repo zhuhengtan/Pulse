@@ -18,9 +18,9 @@ export function capabilityStatusTool(registry: ToolRegistry, enabled: readonly s
       }
       return { schemaVersion: 1, capabilities: ['browser', 'computer'].map(id => {
         const registered = tools.includes(`${id}.observe`), configured = enabled.includes(id)
-        return { id, enabled: configured, registered, ...(visionAvailable === undefined ? {} : { visionAvailable, textObservation: id === 'browser' }), connection: !registered ? 'unavailable' : id === 'browser' && native !== undefined ? native ? 'connected' : 'disconnected' : 'unverified',
-          reason: !configured ? 'CAPABILITY_DISABLED' : !registered ? 'TOOLS_NOT_REGISTERED_IN_THIS_MODE' : id === 'browser' && native === false ? 'NATIVE_BROWSER_REQUIRED' : id === 'computer' && visionAvailable === false ? 'VISION_MODEL_REQUIRED' : null,
-          nextAction: !configured ? `Enable capabilities.enabled entry ${id} in host settings, then start a new work run.` : !registered ? 'Start a work session with the configured capability.' : id === 'browser' && native === false ? 'Connect the desktop internal browser; do not install or switch to an external browser without user direction.' : id === 'computer' && visionAvailable === false ? 'Configure a model with verified image input on the vision route; do not guess or install desktop software.' : 'Observe the target before acting; availability does not grant task authorization.',
+        return { id, enabled: configured, registered, ...(visionAvailable === undefined ? {} : { visionAvailable, textObservation: true }), connection: !registered ? 'unavailable' : id === 'browser' && native !== undefined ? native ? 'connected' : 'disconnected' : 'unverified',
+          reason: !configured ? 'CAPABILITY_DISABLED' : !registered ? 'TOOLS_NOT_REGISTERED_IN_THIS_MODE' : id === 'browser' && native === false ? 'NATIVE_BROWSER_REQUIRED' : null,
+          nextAction: !configured ? `Enable capabilities.enabled entry ${id} in host settings, then start a new work run.` : !registered ? 'Start a work session with the configured capability.' : id === 'browser' && native === false ? 'Connect the desktop internal browser; do not install or switch to an external browser without user direction.' : 'Observe the target before acting; availability does not grant task authorization.',
         }
       }), toolNames: tools }
     },

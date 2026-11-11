@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { createLocalHost, type RunHandle } from '@hunterzhu/pulse-server'
-import type { PulseRuntime } from '@hunterzhu/pulse-runtime'
 import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 
 const mark = '\uFF5C\uFF5CDSML\uFF5C\uFF5C'
@@ -40,7 +39,7 @@ describe('task controller with DeepSeek DSML tool calls', () => {
         : blob.includes('Verify ONLY the active taskController stage') ? 'verify-stage'
         : blob.includes('Independently verify every ORIGINAL') ? 'verify-task'
         : blob.includes('progress checkpoint') ? 'progress'
-        : (blob.includes('Execute only this independent taskController stage') || blob.includes('Execute only the active taskController stage')) ? `work:${active ?? 'unknown'}:${sawList ? 'listed' : 'fresh'}:${sawWrite ? 'written' : 'unwritten'}`
+        : (blob.includes('Execute only this independent taskController stage') || blob.includes('Execute only the active taskController stage') || blob.includes('Execute the current stage continuously')) ? `work:${active ?? 'unknown'}:${sawList ? 'listed' : 'fresh'}:${sawWrite ? 'written' : 'unwritten'}`
         : 'other'
       trace.push(kind)
       if (kind === 'safety') return chat('APPROVE')
@@ -130,10 +129,8 @@ describe('task controller with DeepSeek DSML tool calls', () => {
       }
       if (restore) {
         expect(await consume(run, true)).toBe(true)
-        const runtime = (first as unknown as { active: Map<string, { runtime: PulseRuntime }> }).active.get(run.id)!.runtime
-        // Model an interrupted process without turning its durable wait into cancellation.
-        runtime.cancelAgent = () => {}
-        await first.close()
+        // Preserve the durable wait through an orderly host restart.
+        await first.close({ preserveRuns: true })
         second = createLocalHost(options)
         run = await second.resumeRun(conversation.id)
       }

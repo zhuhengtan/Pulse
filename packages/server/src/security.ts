@@ -129,13 +129,13 @@ export async function within(root: string, path: string): Promise<string> {
   try {
     const resolved = await realpath(target)
     const rel = relative(resolvedRoot, resolved)
-    if (rel.startsWith('..') || isAbsolute(rel)) throw new Error('PATH_OUTSIDE_WORKSPACE')
+    if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error('PATH_OUTSIDE_WORKSPACE')
     return resolved
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause
     const parent = await realpath(resolve(target, '..'))
     const rel = relative(resolvedRoot, parent)
-    if (rel.startsWith('..') || isAbsolute(rel)) throw new Error('PATH_OUTSIDE_WORKSPACE')
+    if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error('PATH_OUTSIDE_WORKSPACE')
     return target
   }
 }

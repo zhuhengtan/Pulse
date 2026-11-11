@@ -6,6 +6,7 @@ import {
   DownOutlined,
   ReloadOutlined,
   AuditOutlined,
+  AudioOutlined,
   BulbOutlined,
   CloseOutlined,
   CopyOutlined,
@@ -89,6 +90,7 @@ const icons = {
   details: UnorderedListOutlined,
   shield: SafetyOutlined,
   audit: AuditOutlined,
+  microphone: AudioOutlined,
   attachment: PaperClipOutlined,
 } satisfies Record<string, ComponentType<{ className?: string; style?: CSSProperties; 'aria-hidden'?: boolean }>>
 

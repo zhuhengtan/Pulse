@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { once } from 'node:events'
 import { ProviderCredentialStore, resolveProviderApiKey } from '../packages/server/src/providers/credentials.js'
-import { providerPresets, resolveProviderVariant } from '../packages/server/src/providers/catalog.js'
+import { providerPresets, resolveProviderVariant, savedProviderPreset } from '../packages/server/src/providers/catalog.js'
 import { mergeDiscoveredModels, normalizeDiscoveredModel, ProviderOnboarding } from '../packages/server/src/providers/onboarding.js'
 import { createLocalHost, H5Server } from '../packages/server/src/index.js'
 import { hostOptions, parse } from '../packages/cli/src/bin.js'
@@ -144,6 +144,72 @@ async function management() {
 }
 
 describe('provider management HTTP API', () => {
+  it('edits a legacy account and refreshes its directory without migrating protocol, model IDs, credentials or routing references', async () => {
+    const api = await management()
+    vi.stubEnv('PULSE_LEGACY_TEST_KEY', 'legacy-test-secret')
+    let authorization: string | undefined
+    const baseURL = await http((req, res) => { expect(req.url).toBe('/v1/models'); authorization = req.headers.authorization; json(res, { data: [remoteModel] }) }) + '/v1'
+    const config = JSON.parse(await readFile(api.path, 'utf8'))
+    config.providers.legacy = { name: '旧服务商', provider: 'openai-compatible', apiMode: 'responses', responsesTransport: 'websocket', baseURL, apiKeyEnv: 'PULSE_LEGACY_TEST_KEY', models: { original: { modelCode: 'vendor/chat', displayName: '自定义名称', maxContextTokens: 128000 }, private: { modelCode: 'private-chat' } } }
+    config.activeModel = 'legacy/original'; config.assistantModel = 'legacy/original'
+    await writeFile(api.path, JSON.stringify(config))
+    const before = await api.get()
+    const presetResponse = await fetch(api.base + '/api/provider-presets?providerId=legacy', { headers: api.headers })
+    expect(presetResponse.status).toBe(200)
+    const presets = await presetResponse.json()
+    expect(presets.selection).toEqual({ presetId: 'saved', connectionVariant: 'current' })
+    expect(presets.presets[0].variants[0]).toMatchObject({ provider: 'openai-compatible', baseURL, editableBaseURL: true })
+    expect(JSON.stringify(presets)).not.toContain('legacy-test-secret')
+    const input = { providerId: 'legacy', presetId: 'saved', connectionVariant: 'current' }
+    const discovery = await api.post('/api/providers/discover', input)
+    expect(discovery.status).toBe(200)
+    const result = await discovery.json()
+    expect(authorization).toBe('Bearer legacy-test-secret')
+    const connection = await new ProviderOnboarding(api.path).connection(input, config)
+    expect(connection.provider).toMatchObject({ provider: 'openai-compatible', apiMode: 'responses', responsesTransport: 'websocket', baseURL })
+    const savedResponse = await api.post('/api/providers/connect', { ...input, version: before.version, name: '更新的服务商', models: result.models, setDefault: false })
+    expect(savedResponse.status).toBe(200)
+    const saved = await savedResponse.json()
+    expect(saved.providerId).toBe('legacy')
+    expect(saved.config).toMatchObject({ activeModel: 'legacy/original', assistantModel: 'legacy/original', providers: { legacy: { name: '更新的服务商', provider: 'openai-compatible', apiMode: 'responses', responsesTransport: 'websocket', baseURL, apiKeyEnv: 'PULSE_LEGACY_TEST_KEY', models: { original: { modelCode: 'vendor/chat', displayName: '自定义名称', maxContextTokens: 128000 }, private: { modelCode: 'private-chat' } } } } })
+    expect(saved.config.providers.legacy.presetId).toBeUndefined()
+    expect(saved.config.providers.legacy.credentialRef).toBeUndefined()
+    expect(Object.keys(saved.config.providers)).toEqual(['mock', 'legacy'])
+    expect(await readFile(api.path, 'utf8')).not.toContain('legacy-test-secret')
+    await expect(new ProviderOnboarding(api.path).connection({ presetId: 'saved', connectionVariant: 'current' }, config)).rejects.toThrow('PROVIDER_CONNECTION_MISMATCH')
+  })
+  it('keeps a stored non-chat model on connect and still rejects a new one as the default', async () => {
+    const api = await management()
+    vi.stubEnv('PULSE_VENDOR_TEST_KEY', 'fixture-not-a-real-key')
+    const config = JSON.parse(await readFile(api.path, 'utf8'))
+    config.providers.vendor = { name: 'Vendor', provider: 'openai-compatible', baseURL: 'https://example.com/v1', apiKeyEnv: 'PULSE_VENDOR_TEST_KEY', models: { chat: { modelCode: 'gpt-4o', displayName: 'GPT-4o' }, whisper: { modelCode: 'whisper-1', displayName: 'Whisper', purposes: ['speech'], tools: 'unsupported' } } }
+    await writeFile(api.path, JSON.stringify(config))
+    expect(normalizeDiscoveredModel({ modelCode: 'whisper-1' })).toBeUndefined()
+    expect(normalizeDiscoveredModel({ modelCode: 'gpt-4o' })?.purposes).toContain('chat')
+    const before = await api.get()
+    const models = [{ modelCode: 'gpt-4o', displayName: 'GPT-4o' }, { modelCode: 'whisper-1', displayName: 'Whisper', purposes: ['speech'], tools: 'unsupported' }]
+    const input = { providerId: 'vendor', presetId: 'saved', connectionVariant: 'current', version: before.version, setDefault: false, models }
+    const savedResponse = await api.post('/api/providers/connect', input)
+    expect(savedResponse.status).toBe(200)
+    const saved = await savedResponse.json()
+    expect(saved.config.providers.vendor.models.whisper).toMatchObject({ modelCode: 'whisper-1', purposes: ['speech'] })
+    expect(saved.config.providers.vendor.models.chat.modelCode).toBe('gpt-4o')
+    const invented = await api.post('/api/providers/connect', { ...input, version: saved.version, models: [...models, { modelCode: 'whisper-new', displayName: 'New whisper' }] })
+    expect(invented.status).toBe(400)
+    expect(await invented.json()).toMatchObject({ error: 'PROVIDER_MODEL_INVALID' })
+    const asDefault = await api.post('/api/providers/connect', { ...input, version: saved.version, modelCode: 'whisper-1', setDefault: true })
+    expect(asDefault.status).toBe(400)
+    expect(await asDefault.json()).toMatchObject({ error: 'PROVIDER_AGENT_MODEL_REQUIRED' })
+  })
+  it('refreshes a legacy local Ollama using tags without a Key and keeps local models local', async () => {
+    const { path } = await workspace()
+    const baseURL = await http((req, res) => { expect(req.url).toBe('/api/tags'); expect(req.headers.authorization).toBeUndefined(); json(res, { models: [{ name: 'qwen-local' }, { name: 'cloud-alias', remote_host: 'https://ollama.com' }] }) })
+    const config = { providers: { local: { provider: 'ollama', baseURL, models: {} } } }
+    expect(savedProviderPreset(config.providers.local).variants[0]).toMatchObject({ auth: 'none', discovery: 'ollama' })
+    const result = await new ProviderOnboarding(path).discover({ providerId: 'local', presetId: 'saved', connectionVariant: 'current' }, config)
+    expect(result.models.find(item => item.modelCode === 'qwen-local')?.remote).toBeUndefined()
+    expect(result.models.find(item => item.modelCode === 'cloud-alias')?.remote).toBe(true)
+  })
   it('saves a connection atomically without putting the Key into config, responses or backups; supports multiple accounts and Key rotation', async () => {
     const api = await management(), before = await api.get()
     const input = { presetId: 'minimax', connectionVariant: 'cn-plan', apiKey: 'first-secret', modelCode: 'MiniMax-M3.1-Flash', models: [{ modelCode: 'MiniMax-M3.1-Flash' }], version: before.version, setDefault: false }
@@ -272,12 +338,25 @@ describe('Ollama local, cloud and self-hosted onboarding', () => {
     expect(resolveModelCapability('gemma4:31b', 'ollama-cloud')).toMatchObject({ structuredOutput: 'unsupported', reasoning: 'effort_param' })
     expect(resolveModelCapability('qwen3.5:4b', 'ollama')).toMatchObject({ structuredOutput: 'native_strict', reasoning: 'effort_param' })
   })
-  it('rejects cloud models as local approval reviewers, including aliased cloud models', async () => {
+  it('allows explicitly selected cloud approval reviewers and preserves remote model metadata', async () => {
     const { path, root } = await workspace(); vi.stubEnv('PULSE_HOME', root)
     for (const model of [{ modelCode: 'gpt-oss:120b-cloud' }, { modelCode: 'alias', remote: true }]) {
       await writeFile(path, JSON.stringify({ providers: { local: { provider: 'ollama', models: { cloud: model } }, mock: { provider: 'mock', models: { mock: { modelCode: 'mock' } } } }, activeModel: 'mock/mock', approvalReview: { model: 'local/cloud' } }))
-      await expect(hostOptions(parse(['--config', path]))).rejects.toThrow('APPROVAL_REVIEW_PROVIDER_UNSUPPORTED')
+      const options = await hostOptions(parse(['--config', path]))
+      expect(options.approvalReview).toMatchObject({ provider: 'ollama', model: model.modelCode, ...(model.remote ? { remote: true } : {}) })
     }
+  })
+  it('resolves a configured review model with its own stored Key, API format and model limits', async () => {
+    const { path, root } = await workspace(); vi.stubEnv('PULSE_HOME', root)
+    const credentialRef = await new ProviderCredentialStore(path).add('selected-reviewer-secret')
+    const config = { providers: { gateway: { provider: 'openai-compatible', apiMode: 'responses', responsesTransport: 'websocket', baseURL: 'https://gateway.example/api', credentialRef, models: { reviewer: { modelCode: 'review-model', purposes: ['chat'], tools: 'unsupported', maxContextTokens: 200000, maxOutputTokens: 8192, reasoningEffort: 'low' }, image: { modelCode: 'image-model', purposes: ['image'] } } }, mock: { provider: 'mock', models: { mock: { modelCode: 'mock' } } } }, activeModel: 'mock/mock', approvalReview: { model: 'gateway/reviewer', timeoutMs: 45000 } }
+    await writeFile(path, JSON.stringify(config))
+    const options = await hostOptions(parse(['--config', path]))
+    expect(options.approvalReview).toMatchObject({ provider: 'openai-compatible', model: 'review-model', apiMode: 'responses', responsesTransport: 'websocket', baseURL: 'https://gateway.example/api', apiKey: 'selected-reviewer-secret', maxContextTokens: 200000, maxOutputTokens: 8192, reasoningEffort: 'low', timeoutMs: 45000 })
+    expect(await readFile(path, 'utf8')).not.toContain('selected-reviewer-secret')
+    config.approvalReview.model = 'gateway/image'
+    await writeFile(path, JSON.stringify(config))
+    await expect(hostOptions(parse(['--config', path]))).rejects.toThrow('APPROVAL_REVIEW_MODEL_UNSUPPORTED')
   })
   it('counts compatibility retries in the three-request probe budget', async () => {
     const { path } = await workspace(); let calls = 0

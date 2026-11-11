@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,6 +8,7 @@ import { createLocalHost, H5Server } from '../packages/server/src/index.js'
 it.each([false, true])('keeps early readers attached while a worker starts (missing lookup: %s)', async missingLookup => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-work-start-race-'))
   const host = createLocalHost({ cwd: dir, dataDir: dir, mockResponse: 'retained work result' })
+  acceptWorkRequests(host)
   const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
   let release!: () => void
   const handshake = new Promise<void>(resolve => { release = resolve })

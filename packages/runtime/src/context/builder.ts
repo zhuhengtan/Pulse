@@ -16,6 +16,7 @@ export interface ContextBuildInput {
   /** Include this lane's append-only history without implicitly exposing Global/Lane state. */
   nativeToolHistory?: boolean
   includeLaneHistory?: boolean
+  excludedResultRefs?: readonly ResultRef[]
   historySeqs?: readonly number[]
   agent: AgentRecord
   lane: LaneRecord
@@ -163,6 +164,16 @@ export class ContextBuilder {
   readonly version = '2'
   constructor(private readonly state: RuntimeState) {}
   build(input: ContextBuildInput): LLMRequestProjection {
+    if (input.excludedResultRefs?.length) {
+      const excluded = new Set(input.excludedResultRefs)
+      const results = new Map(this.state.results)
+      for (const ref of excluded) {
+        const result = results.get(ref)
+        if (result) results.set(ref, { ...result, value: { code: 'EVIDENCE_SUPERSEDED', ref, message: 'Historical receipt superseded; obtain current evidence before citing it.' }, summary: { code: 'EVIDENCE_SUPERSEDED', ref } })
+      }
+      const { excludedResultRefs, ...rest } = input
+      return new ContextBuilder({ ...this.state, results }).build({ ...rest, contextStream: `${input.contextStream ?? 'default'}:current:${hash([...excluded].sort())}`, resultRefs: (input.resultRefs ?? []).filter(ref => !excluded.has(ref)) })
+    }
     assertDslInstructionSize(input.instruction)
     const global = input.agent.globalVersions.get(input.lane.contextSnapshotVersion)
     if (global === undefined) throw new Error('UNKNOWN_CONTEXT_VERSION')

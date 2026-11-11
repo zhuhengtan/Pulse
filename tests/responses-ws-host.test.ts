@@ -31,7 +31,7 @@ it.each(['same','changed-setting'])('retains transport/private visibility throug
   const runDir=join(options.dataDir!,'conversations',c.id,'runs',run.id),saved=JSON.parse(await readFile(join(runDir,'input.json'),'utf8'));
   expect(saved.providerApiModes.transports).toEqual({fixture:'websocket'});expect(requests).toHaveLength(1);
   const before=JSON.parse(await readFile(join(runDir,'model-budget.json'),'utf8'));
-  const runtime=(first as any).active.get(run.id).runtime;runtime.cancelAgent=()=>{};await first.close();
+  await first.close({preserveRuns:true});
   if(variant==='changed-setting')config.providers.fixture.responsesTransport='http';await writeFile(configPath,JSON.stringify(config));
   second=createLocalHost(await hostOptions(parse(['--config',configPath,'--no-task-controller'])));const resumed=await second.resumeRun(c.id);
   for await(const event of resumed.events){seen.push(event);if(event.type==='waiting')await resumed.reply((event.data as any).effectId,{approved:true});}

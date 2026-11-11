@@ -1,4 +1,5 @@
 import { join, resolve } from 'node:path'
+import { homedir } from 'node:os'
 import { readFile } from 'node:fs/promises'
 import { createLocalHost } from '../../packages/server/dist/index.js'
 import { createBuiltinSkillCapabilityPack } from '../../packages/server/dist/builtin-skills.js'
@@ -22,7 +23,7 @@ if (frozen.support?.[taskId]) {
 }
 const remainingMs = () => remainingEvaluationMs(load(join(caseDir, 'started.json')).at, frozen.dataset.limits.perSampleMs)
 const assertBeforeDeadline = () => { if (remainingMs() === 0) throw Object.assign(new Error('Original evaluation deadline expired; no new request or reply allowed.'), { code: 'EVALUATION_DEADLINE' }) }
-const config = load(process.env.PULSE_CONFIG ?? '/Users/zhuhengtan/.pulse/config.json')
+const config = load(process.env.PULSE_CONFIG ?? join(homedir(), '.pulse', 'config.json'))
 const [providerCode, modelId] = (config.activeModel ?? '').split('/')
 const profile = config.providers?.[providerCode], row = profile?.models?.[modelId]
 if (providerCode !== 'deepseek' || profile?.provider !== 'deepseek' || !row?.modelCode || !process.env[profile.apiKeyEnv ?? 'DEEPSEEK_API_KEY']) throw new Error('EVAL_CONFIG_OR_CREDENTIAL_MISSING')

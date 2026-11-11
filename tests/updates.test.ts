@@ -131,7 +131,7 @@ describe('signed independent updates', () => {
       await mkdir(join(directory, 'app/node_modules/@hunterzhu/pulse-server/dist/updates'), { recursive: true })
       await writeFile(join(directory, 'app/node_modules/@hunterzhu/pulse-server/dist/updates/launcher.js'), '')
       await writeFile(join(directory, 'critical'), 'healthy')
-      await atomicJson(join(directory, 'desktop-runtime.json'), { critical: ['critical'], files: { critical: { sha256: (await import('./update-fixtures.js')).hash('healthy') } } })
+      await atomicJson(join(directory, 'desktop-runtime.json'), { critical: ['critical'], files: { critical: { sha256: (await import('./update-fixtures.js')).hash('healthy') }, 'app/node_modules/@hunterzhu/pulse-server/dist/updates/launcher.js': { sha256: (await import('./update-fixtures.js')).hash('') } } })
     }
     await mkdir(join(f.root, 'bin')); await writeFile(join(f.root, 'bin', process.platform === 'win32' ? 'pulse.cmd' : 'pulse'), 'user-owned command')
     const launcher = await installManagedLauncher(f.root, first, f.dataDir)

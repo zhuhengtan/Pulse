@@ -560,3 +560,12 @@ it('keeps approval denial and independent failure facts without intermediate ver
   expect(reply.text).toContain('unknown-price')
   expect(reply.text).not.toContain('EARLY_CANDIDATE_BODY')
 })
+
+it('preserves unresolved refusal and native failed assertions when the last recovery reaches its budget', async () => {
+  const facts = input({ presentationVersion: 2, status: 'incomplete', completed: [], files: [], blockers: ['APPROVAL_DENIED: exact operation remains refused'], pending: [{ description: 'Original delivery', reason: 'Model calls reserved for verification; checkpoint retained.' }], checks: [{ status: 'failed', description: 'Original assertions', reason: 'duplicate-summary: failed; unknown-price: failed' }] })
+  const reply = await composeCompletionReply(facts, async () => result('任务尚未完成。'))
+  expect(reply.source).toBe('fallback')
+  expect(reply.text).toContain('APPROVAL_DENIED')
+  expect(reply.text).toContain('duplicate-summary')
+  expect(reply.text).toContain('unknown-price')
+})

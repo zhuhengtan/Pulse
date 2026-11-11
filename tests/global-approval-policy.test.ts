@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,6 +10,7 @@ it('shares approval across old and new conversations, persists on restart and re
   const root = await mkdtemp(join(tmpdir(), 'pulse-global-approval-'))
   const options = { cwd: root, dataDir: root, approvalMode: 'ask' as const, mockToolCalls: [{ name: 'fs.write', input: { path: 'result.txt', content: 'test' } }] }
   let host = createLocalHost(options)
+  acceptWorkRequests(host)
   let server = new H5Server(host, { dataDir: root, port: 0, host: '127.0.0.1' })
   let reader: ReaderClient | undefined
   const connect = async () => {

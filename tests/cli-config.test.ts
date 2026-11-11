@@ -194,7 +194,7 @@ describe('ensurePulseUserConfig', () => {
       expect(options.approvalReview).toMatchObject({ provider: 'ollama', model: 'qwen3.5:4b', baseURL: 'http://127.0.0.1:11434', timeoutMs: 30_000 })
 
       await writeFile(path, `${JSON.stringify({
-        providers: { cloud: { provider: 'deepseek', models: { reviewer: { modelCode: 'deepseek-chat' } } } },
+        providers: { cloud: { provider: 'deepseek', baseURL: 'https://api.deepseek.com', apiKeyEnv: 'DEEPSEEK_API_KEY', models: { reviewer: { modelCode: 'deepseek-chat' } } } },
         activeModel: 'cloud/reviewer',
         approvalReview: { model: 'cloud/reviewer' },
       })}\n`)

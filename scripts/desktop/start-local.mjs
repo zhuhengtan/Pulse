@@ -7,10 +7,13 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { desktopPageUrl } from '../../packages/desktop/src/dev-url.mjs';
 import { assertDesktopDataReady } from '../../packages/desktop/src/data-directory.mjs';
-import { stopDevelopmentBackend, verifyDevelopmentBackend } from './restart-backend.mjs';
+import { assertDevelopmentDataDirectory, stopDevelopmentBackend, verifyDevelopmentBackend } from './restart-backend.mjs';
+import { stopDevelopmentDesktop } from './restart-desktop.mjs';
+import { verifyDevelopmentFrontend, stopDevelopmentFrontend } from './restart-frontend.mjs';
 import { selectDevelopmentBackendPort, selectDevelopmentFrontend } from './development-endpoints.mjs';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
+const backendVersion = JSON.parse(await readFile(new URL('../../packages/server/package.json', import.meta.url), 'utf8')).version;
 const exists = path => access(path).then(() => true, () => false);
 const execute = promisify(execFile);
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -40,12 +43,12 @@ async function sessionDescriptor(data) {
     try { return JSON.parse(await readFile(join(data, 'service.json'), 'utf8')); }
     catch (error) { if (error.code === 'ENOENT') return undefined; throw new Error('无法读取开发后台 service.json，请先检查该文件；脚本不会覆盖它。'); }
 }
-async function runningBackend(data) {
+async function runningBackend(data, { allowOutdated = false } = {}) {
     const saved = await sessionDescriptor(data);
     if (saved && alive(saved.pid)) {
         if (saved.protocol !== 1 || !Number.isInteger(saved.port) || saved.port < 1 || saved.port > 65535 || saved.port === 7332 || typeof saved.dataDir !== 'string' || await realpath(saved.dataDir) !== await realpath(data)) throw new Error('开发后台身份或数据目录不匹配，已保留原进程。');
         if (!await listening(saved.port)) throw new Error('开发后台进程仍存在，但端口未就绪。请检查后台状态；脚本不会自动终止任务。');
-        await verifyDevelopmentBackend(data, saved);
+        await verifyDevelopmentBackend(data, saved, allowOutdated ? {} : { expectedVersion: backendVersion });
         return saved;
     }
 }
@@ -61,7 +64,7 @@ async function backend(data, requestedPort, env, logs) {
     let child;
     // Worker mode suppresses pairing URLs/QR credentials in the persistent log;
     // it does not install an operating-system service.
-    try { child = spawn(process.execPath, [join(repo, 'packages/cli/dist/bin.js'), 'h5', 'daemon', '--port', String(requestedPort), '--data-dir', data], { cwd: repo, detached: true, stdio: ['ignore', output.fd, output.fd], env }); }
+    try { child = spawn(process.execPath, [join(repo, 'packages/cli/dist/bin.js'), 'h5', 'daemon', '--port', String(requestedPort), '--data-dir', data], { windowsHide: true, cwd: repo, detached: true, stdio: ['ignore', output.fd, output.fd], env }); }
     finally { await output.close(); }
     let failure;
     child.on('error', error => { failure = error; }); child.unref();
@@ -69,6 +72,7 @@ async function backend(data, requestedPort, env, logs) {
         if (failure || child.exitCode !== null) throw new Error(`后台启动失败，请查看 ${log}`);
         const current = await sessionDescriptor(data);
         if (current?.pid === child.pid && current.protocol === 1 && await listening(current.port)) {
+            await verifyDevelopmentBackend(data, current, { expectedVersion: backendVersion });
             console.log(`开发后台已启动：http://127.0.0.1:${current.port}（日志 ${log}）`); return current.port;
         }
         await pause(100);
@@ -86,10 +90,10 @@ async function main() {
 默认：准备依赖与编译产物，启动开发后台、Vite 热更新及 Electron。
 --web-only  只启动后台和网页，浏览器访问输出的地址。
 --no-build  跳过编译，复用已有 dist（首次启动不要使用）。
---restart  构建成功后校验并重启开发后台，保留数据及原端口，复用匹配的 Vite 和窗口；运行中任务会中断。
+--restart  构建成功后完整重启当前开发环境：Electron、语音子进程、Vite 和后台；保留数据及原端口。--web-only 时重启 Vite 和后台；运行中任务会中断。
 默认自动复用已核验的后台和匹配前端；默认端口被占用时自动选择空闲端口，保留原数据和已有进程。
 环境变量：PULSE_DEV_DIR（默认 .pulse-dev）、PULSE_WEB_DEV_PORT（默认从 7333 选择）、PULSE_DESKTOP_DEV_URL（默认从 http://127.0.0.1:5174/work/new 选择；显式指定端口时不自动更换）。
-新后台会在退出窗口/脚本后继续运行，可从 Electron 菜单停止。仅本脚本新启动的前端会随窗口/脚本退出停止。`); return;
+新后台会在退出窗口/脚本后继续运行，可从 Electron 菜单停止。本脚本新启动的前端由启动终端管理，桌面关闭或复用托盘实例后仍继续运行；Ctrl+C 停止本次前端预览。`); return;
     }
     if (args.includes('--web-only') && electronArgs.length) throw new Error('--web-only 不能同时传入 Electron 参数。');
     const [major, minor] = process.versions.node.split('.').map(Number);
@@ -99,8 +103,10 @@ async function main() {
     let url = desktopPageUrl(false, process.env.PULSE_DESKTOP_DEV_URL ?? 'http://127.0.0.1:5174/work/new');
     if (new URL(url).port === String(port)) throw new Error('前端与后台端口不能相同。');
     const dev = resolve(repo, process.env.PULSE_DEV_DIR ?? '.pulse-dev'), data = join(dev, 'h5', 'data'), logs = join(dev, 'logs');
-    const env = { ...process.env, PULSE_DATA_DIR: data, PULSE_DESKTOP_DATA_DIR: data, PULSE_DESKTOP_USER_DATA: join(dev, 'electron'), PULSE_H5_HOST: '127.0.0.1', PULSE_DESKTOP_DEV_URL: url };
+    const env = { ...process.env, PULSE_DATA_DIR: data, PULSE_DESKTOP_DATA_DIR: data, PULSE_DESKTOP_USER_DATA: join(dev, 'electron'), PULSE_H5_HOST: '127.0.0.1', PULSE_DESKTOP_DEV_URL: url, PULSE_MANAGED: '0' };
     delete env.ELECTRON_RUN_AS_NODE; delete env.PULSE_DESKTOP_RUNTIME_DIR;
+    // A dev launch runs this checkout, even from a managed installation's shell.
+    for (const key of ['PULSE_RUNTIME_DIR', 'PULSE_RUNTIME_ID', 'PULSE_BOOTSTRAP_RUNTIME', 'PULSE_UPDATE_CHILD', 'PULSE_UPDATE_OWNER', 'PULSE_UPDATE_TOKEN']) delete env[key];
     const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
     try { await execute(pnpm, ['--version'], { shell: process.platform === 'win32' }); } catch { throw new Error('未找到 pnpm，请先安装 pnpm 12.4.2。'); }
     console.log(`Pulse 本地开发环境\n工作区：${repo}\n测试数据：${data}`);
@@ -133,12 +139,25 @@ async function main() {
         try { ready = await exists(desktopRequire('electron')); } catch { /* --ignore-scripts omits the Electron binary. */ }
         if (!ready) { console.log('首次准备 Electron…'); await run(process.execPath, [desktopRequire.resolve('electron/install.js')], env); }
     }
-    const saved = await runningBackend(data);
+    const saved = await runningBackend(data, { allowOutdated: args.includes('--restart') });
     const selectedPort = saved?.port ?? await selectDevelopmentBackendPort(port, process.env.PULSE_WEB_DEV_PORT !== undefined);
     const selectedUrl = await selectDevelopmentFrontend({ repo, url, backend: `http://127.0.0.1:${selectedPort}`, explicit: process.env.PULSE_DESKTOP_DEV_URL !== undefined });
     if (selectedPort !== port && !saved) console.log(`默认后台端口 ${port} 已占用，自动使用 ${selectedPort}，已有进程保持运行。`);
     if (selectedUrl !== url) console.log(`默认前端地址不可复用，自动使用 ${selectedUrl}，已有前端保持运行。`);
     url = selectedUrl; env.PULSE_DESKTOP_DEV_URL = url;
+    env.PULSE_DEV_REQUIRE_FRESH_DESKTOP = args.includes('--restart') && !args.includes('--web-only') ? '1' : '0';
+    env.PULSE_DEV_REQUIRE_FRESH_FRONTEND = args.includes('--restart') ? '1' : '0';
+    const frontendOptions = { repo, url, backend: `http://127.0.0.1:${selectedPort}` };
+    if (args.includes('--restart')) await assertDevelopmentDataDirectory(data);
+    const frontend = args.includes('--restart') ? await verifyDevelopmentFrontend(frontendOptions) : undefined;
+    if (args.includes('--restart') && !args.includes('--web-only')) {
+        const executable = createRequire(new URL('../../packages/desktop/package.json', import.meta.url))('electron');
+        await stopDevelopmentDesktop({ userData: env.PULSE_DESKTOP_USER_DATA, appPath: join(repo, 'packages/desktop'), executable });
+    }
+    if (args.includes('--restart')) {
+        if (frontend) await stopDevelopmentFrontend({ ...frontendOptions, expected: frontend });
+        else console.log('开发前端未运行，将直接启动。');
+    }
     const restartPort = args.includes('--restart') ? await stopDevelopmentBackend({ data, repo, url, port: selectedPort }) : selectedPort;
     const actualPort = await backend(data, restartPort, env, logs);
     env.PULSE_H5_TARGET = `http://127.0.0.1:${actualPort}`;

@@ -1,11 +1,15 @@
-import { callbackWorkState, agentAnswerableQuestion, interactionFingerprint, workCallback, type WorkCallback } from '../work-callback.js'
-import { asChatWorkAgent, checkWorkControl, withWorkActor } from '../work-control.js'
+import { SceneSandbox } from '../device-use/scene-sandbox.js'
+import { TerminalDiagnostics } from '../device-use/terminal-diagnostics.js'
+import { VoiceService } from '../voice/service.js'
+import { callbackWorkState, agentAnswerableQuestion, interactionFingerprint, routineApprovalCallback, workCallback, type WorkCallback } from '../work-callback.js'
+import { asChatWorkAgent, checkWorkControl, withWorkActor, currentWorkActor } from '../work-control.js'
 import { readState } from '../updates/store.js'
 import { releaseId } from '../updates/contracts.js'
 import { readUpdateResume, saveUpdateResume, type UpdateResumeJournal } from '../updates/resume.js'
 import { scheduledWorkActive } from '../updates/liveness.js'
-import { runCompletion } from '../run-presentation.js'
+import { runCompletion, completeRunHealth } from '../run-presentation.js'
 import { withConfigFileLock } from '../config-write-lock.js'
+import { MAX_GLOBAL_PROMPT_CHARS, globalPromptPath, globalPromptVersion, readGlobalPrompt, writeGlobalPrompt } from '../global-prompt-store.js'
 import { parseExecPolicy, mergeExecPolicies, sourceExecPolicy } from '../exec-policy.js'
 import { pluginDraft, parseBuiltinPlugins, connections, pluginEnabled, readHostSurface, type PluginId } from '../builtin-plugins/config.js'
 import { safeError } from '../builtin-plugins/http.js'
@@ -29,9 +33,9 @@ import { createReadStream } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { normalizeModelConfig, parseModelSelectionId } from '../model-config.js'
 import { validateContextSettings } from '../model-settings.js'
-import { providerPresets } from '../providers/catalog.js'
+import { providerPresets, savedProviderPreset } from '../providers/catalog.js'
 import { ProviderCredentialStore } from '../providers/credentials.js'
-import { ProviderOnboarding, mergeDiscoveredModels, normalizeDiscoveredModel, providerErrorCode } from '../providers/onboarding.js'
+import { ProviderOnboarding, mergeDiscoveredModels, normalizeDiscoveredModel, providerErrorCode, retainedStoredModel } from '../providers/onboarding.js'
 import type { ModelDefinition } from '../model-config.js'
 import type { ProviderConnectionInput } from '../providers/types.js'
 import { execFile } from 'node:child_process'
@@ -45,7 +49,7 @@ import type * as pty from 'node-pty'
 import { WebSocket, WebSocketServer } from 'ws'
 import QRCode from 'qrcode'
 import type { JsonValue } from '@hunterzhu/pulse-runtime'
-import type { AssistantEvent, ConversationSummary, LocalHost, LocalHostOptions, RunHandle } from '../index.js'
+import type { AssistantEvent, ConversationSummary, LocalHost, LocalHostOptions, RunHandle, UserMessageInput } from '../index.js'
 import type { WebAttachment, WebAssistantMessageReceipt, WebLane, WebRunLanes, WebAssistantWorkInteraction, WebMessage, WebPendingInteraction, WebProject, WebRunEvent, WebRunSnapshot } from '../protocol.js'
 import { H5AuthStore } from './auth.js'
 import { createHostDirectory, hostFilesystemError, hostPathRoots, listHostPaths } from './host-filesystem.js'
@@ -54,7 +58,7 @@ import { compactTraceEvents, prepareRunEvent, traceWatermark } from './trace.js'
 import { AssistantConversationStore, type QueuedAssistantMessage } from './assistant.js'
 import { H5ProjectCatalog } from './projects.js'
 import { H5WorkspaceManager } from './workspaces.js'
-import { startH5WorkWorker, type H5WorkWorkerLaunchOptions } from './work-worker.js'
+import { startAdmittedH5WorkWorker, type H5WorkWorkerLaunchOptions } from './work-worker.js'
 import { SleepInhibitor } from './caffeinate.js'
 import { getLocalNetworkIp, isAllowedH5Host, isLoopbackIp } from './network.js'
 import { safeShellEnv, searchWorkspace, within } from '../security.js'
@@ -153,6 +157,8 @@ function preserveConfigSecrets(existing: Record<string, unknown>, candidate: Rec
 }
 
 export interface H5ServerOptions {
+  /** Explicit offline synthetic-data harness. Never enabled by environment discovery. */
+  isolatedRuntime?: boolean
   port?: number
   host?: string
   dataDir: string
@@ -197,6 +203,8 @@ export class H5Server {
   private assistantPump: Promise<void> | undefined
   private serviceLock: Awaited<ReturnType<typeof open>> | undefined
   readonly updates: UpdateManager
+  private readonly isolatedRuntime: boolean
+  private isolatedLease: string | undefined
   private maintenance = process.env.PULSE_UPDATE_MAINTENANCE === '1'
   private updateRequests = 0
   private updateTransition = false
@@ -225,6 +233,9 @@ export class H5Server {
       return snapshot.state === 'running' && Boolean(snapshot.interactions?.some(group => group.groupId === item.groupId && group.items.length))
     },
   )
+  private readonly sceneSandbox = new SceneSandbox()
+  private readonly terminalDiagnostics = new TerminalDiagnostics()
+  private voiceService: VoiceService | undefined
   private readonly serverInstanceId = randomUUID()
   private readonly runSnapshots = new Map<string, WebRunSnapshot>()
   private readonly projectionWrites = new Map<string, Promise<unknown>>()
@@ -241,12 +252,18 @@ export class H5Server {
     private readonly host: LocalHost,
     options: H5ServerOptions
   ) {
+    this.isolatedRuntime = options.isolatedRuntime === true
+    if (this.isolatedRuntime) {
+      if (options.host !== '127.0.0.1' || options.port !== 0 || options.configuration || options.workWorker || options.updates) throw new Error('ISOLATED_H5_OPTIONS_INVALID')
+      this.maintenance = true
+      this.isolatedLease = randomUUID()
+    }
     this.port = options.port ?? DEFAULT_H5_PORT
     this.effectivePort = this.port
     this.hostAddress = options.host ?? '0.0.0.0'
     this.dataDir = resolve(options.dataDir)
     this.cliNotices = new CliNotificationReader(this.host.conversationData)
-    this.updates = new UpdateManager({ dataDir: this.dataDir, backendVersion: (require('../../package.json') as { version: string }).version, development: process.env.PULSE_MANAGED !== '1', ...(process.env.PULSE_RUNTIME_DIR ? { runtimeDirectory: process.env.PULSE_RUNTIME_DIR } : {}), ...options.updates })
+    this.updates = new UpdateManager({ dataDir: this.dataDir, backendVersion: (require('../../package.json') as { version: string }).version, development: process.env.PULSE_MANAGED !== '1', ...(process.env.PULSE_RUNTIME_DIR ? { runtimeDirectory: process.env.PULSE_RUNTIME_DIR } : {}), ...options.updates, ...(this.isolatedRuntime ? { root: join(this.dataDir, 'disabled-updates'), development: true } : {}) })
     this.auth = new H5AuthStore(options.dataDir)
     this.projects = new H5ProjectCatalog(options.dataDir)
     this.workspaces = new H5WorkspaceManager(options.dataDir)
@@ -395,7 +412,7 @@ export class H5Server {
       })
     })
     server.on('upgrade', (req, socket, head) => {
-      if (this.maintenance) { socket.end('HTTP/1.1 503 Service Unavailable\r\nRetry-After: 2\r\nConnection: close\r\n\r\n'); return }
+      if (this.maintenance || this.isolatedRuntime) { socket.end('HTTP/1.1 503 Service Unavailable\r\nRetry-After: 2\r\nConnection: close\r\n\r\n'); return }
       if ((req.url ?? '').startsWith('/api/chat/socket')) void this.handleChatUpgrade(req, socket, head)
       else if (req.url === '/api/automation/native-host') void this.handleNativeBrowserUpgrade(req, socket, head)
       else if ((req.url ?? '').startsWith('/api/automation/socket')) void this.handleAutomationUpgrade(req, socket, head)
@@ -414,8 +431,10 @@ export class H5Server {
       for (const client of this.chatSockets.clients) this.sendChat(client, { type: 'changed', revision })
     })
     if (!this.maintenance) { const journal = await readUpdateResume(this.dataDir).catch(() => undefined); if (journal?.runs.some(run => ['pending', 'resuming'].includes(run.status))) await this.resumeUpdatedRuns(); else { await this.reconcileWorkCallbacks(); void this.pumpAssistantInbox() } }
-    void this.host.retryJarvisSync()
-    this.jarvisSyncTimer = setInterval(() => { void this.host.retryJarvisSync() }, 15_000)
+    if (!this.isolatedRuntime) {
+      void this.host.retryJarvisSync()
+      this.jarvisSyncTimer = setInterval(() => { void this.host.retryJarvisSync() }, 15_000)
+    }
 
     const addr = server.address()
     this.effectivePort = typeof addr === 'object' && addr ? addr.port : this.port
@@ -425,13 +444,13 @@ export class H5Server {
     const pairUrl = `http://${lanIp}:${this.effectivePort}/?code=${pairing.code}`
 
     await writeFile(join(this.dataDir, 'service.json'), JSON.stringify({ protocol: 1, instanceId: this.serverInstanceId, pid: process.pid, port: this.effectivePort, host: this.hostAddress, dataDir: this.dataDir, managed: process.env.PULSE_UPDATE_CHILD === '1', supervisorPid: process.env.PULSE_UPDATE_OWNER ? Number(process.env.PULSE_UPDATE_OWNER) : undefined, runtimeDirectory: process.env.PULSE_RUNTIME_DIR }), { mode: 0o600 })
-    process.on('message', this.updateMessages)
-    if (process.send && process.env.PULSE_UPDATE_CHILD === '1') {
+    if (!this.isolatedRuntime) process.on('message', this.updateMessages)
+    if (!this.isolatedRuntime && process.send && process.env.PULSE_UPDATE_CHILD === '1') {
       const reader = new ReaderClient(this.dataDir)
       try { const health = await reader.query('/_health'); if (health.status !== 200) throw new Error('UPDATE_READER_UNHEALTHY'); await this.host.conversationData.call('revision') } finally { reader.close() }
       process.send({ type: 'update-health', port: this.effectivePort, dataDir: this.dataDir, pid: process.pid, version: this.updates.options.backendVersion })
     }
-    this.updates.start(() => this.tryApplyUpdate())
+    if (!this.isolatedRuntime) this.updates.start(() => this.tryApplyUpdate())
     return { port: this.effectivePort, lanIp, pairUrl }
     } catch (error) { await this.releaseService(); throw error }
   }
@@ -450,7 +469,7 @@ export class H5Server {
     this.chatSubscriptions.clear()
     for (const entry of this.bundleImports.values()) { clearTimeout(entry.timer); await rm(entry.bundle.directory, { recursive: true, force: true }) }
     this.bundleImports.clear()
-    await Promise.all([...this.activeRuns.values()].map(handle => (this.updateSuspendedRuns.has(handle.id) ? handle.shutdown?.({ preserveRuns: true }) ?? Promise.resolve() : handle.shutdown ? handle.shutdown() : withWorkActor({ kind: 'system' }, () => handle.cancel('SERVER_STOPPED'))).catch(() => undefined)))
+    await Promise.all([...this.activeRuns.values()].map(handle => withWorkActor({ kind: 'system' }, () => (this.updateSuspendedRuns.has(handle.id) ? handle.shutdown?.({ preserveRuns: true }) ?? Promise.resolve() : handle.shutdown ? handle.shutdown() : withWorkActor({ kind: 'system' }, () => handle.cancel('SERVER_STOPPED')))).catch(() => undefined)))
     // A sendMessage call can still be starting and not yet appear in activeRuns.
     // The pump joins that launch and shuts it down without dispatching its queue.
     if (!this.restartingForUpdate) await this.assistantPump?.catch(() => undefined)
@@ -486,6 +505,9 @@ export class H5Server {
       this.server = undefined
     }
     await this.releaseService()
+    const simulatedCleanup = await Promise.allSettled([this.terminalDiagnostics.close(), this.sceneSandbox.close()])
+    const simulatedFailures = simulatedCleanup.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
+    if (simulatedFailures.length) throw new AggregateError(simulatedFailures, 'SIMULATED_DEVICE_CLEANUP_UNCONFIRMED')
   }
 
   private attachRun(handle: RunHandle, consume = true): void {
@@ -512,22 +534,33 @@ export class H5Server {
     // case too; absence from the parent lookup is not evidence of completion.
     await Promise.allSettled([...this.pendingWorkStarts].filter(([, id]) => !conversationId || id === conversationId).map(([promise]) => promise))
   }
-  private async startConversationRun(conversationId: string, text: string, options?: { requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; budgetRenewal?: import('../model-budget.js').BudgetRenewalAuthorization }): Promise<RunHandle> {
+  private async startConversationRun(conversationId: string, text: string, options?: { qualityReviewEnabled?: boolean; requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; budgetRenewal?: import('../model-budget.js').BudgetRenewalAuthorization }, mode: 'message' | 'execute' = 'message'): Promise<RunHandle> {
     await checkWorkControl(this.host.conversationData, conversationId, 'send')
     await this.host.listSkills()
     const key = options?.requestId ? `${conversationId}:${options.requestId}` : undefined
-    const digest = createHash('sha256').update(JSON.stringify({ text, options })).digest('hex')
+    const digest = createHash('sha256').update(JSON.stringify({ text, options, mode })).digest('hex')
     const prior = key ? this.workStarts.get(key) : undefined
     if (prior) { if (prior.digest !== digest) throw new Error('REQUEST_ID_REUSED'); return prior.promise }
-    const promise = (async () => {
-      await this.prepareWorkConversation(conversationId)
-      await this.host.prepareAutomation()
-      const handle = this.workWorker
-        ? await startH5WorkWorker({ ...this.workWorker, runtimeOptions: this.host.getWorkWorkerOptions() }, { conversationId, text, ...options })
-        : await this.host.sendMessage(conversationId, { text, ...options })
+    const execute = async (input: UserMessageInput) => {
+      if (mode === 'message') {
+        const { summary } = await this.host.getConversation(conversationId)
+        if ([...this.activeRuns.values()].some(handle => handle.conversationId === conversationId)) throw new Error('CONVERSATION_BUSY')
+        if (summary.activeRunId) await this.host.reconcileInactiveRun(conversationId, summary.activeRunId)
+      }
+      const handle = await this.host.scheduleTask(conversationId, input, async (admitted, permit) => {
+        if (this.stopping || this.maintenance) throw Object.assign(new Error('HOST_TASK_ADMISSION_CLOSED'), { admissionNotStarted: true })
+        await this.prepareWorkConversation(conversationId)
+        await this.host.prepareAutomation()
+        return this.workWorker
+          ? startAdmittedH5WorkWorker(this.host, { ...this.workWorker, runtimeOptions: this.host.getWorkWorkerOptions(permit) }, { conversationId, ...admitted })
+          : this.host.launchAdmittedTask(conversationId, admitted, permit)
+      })
+      if (this.stopping) { await handle.shutdown?.(); throw Object.assign(new Error('HOST_TASK_ADMISSION_CLOSED'), { admissionNotStarted: true }) }
       this.attachRun(handle)
       return handle
-    })()
+    }
+    const input = { text, ...options }
+    const promise = mode === 'message' ? this.host.sendWorkTurn(conversationId, input, execute) : execute(input)
     this.pendingWorkStarts.set(promise, conversationId)
     if (key) this.workStarts.set(key, { digest, promise })
     try { return await promise } finally { this.pendingWorkStarts.delete(promise); if (key) this.workStarts.delete(key) }
@@ -539,8 +572,11 @@ export class H5Server {
     if (!projectId) return
     const project = await this.projects.get(projectId)
     if (!project || !project.available) throw new Error('PROJECT_NOT_AVAILABLE')
-    const prepared = await this.workspaces.prepare(conversationId, project.id, project.cwd)
-    await this.host.setConversationExecutionWorkspace(conversationId, prepared.cwd, project.cwd)
+    // Project edits select defaults for new conversations, not a new writable
+    // root for an existing conversation. Only additional read grants refresh.
+    const sourceCwd = conversation.summary.cwd
+    const prepared = await this.workspaces.prepare(conversationId, project.id, sourceCwd)
+    await this.host.setConversationExecutionWorkspace(conversationId, prepared.cwd, sourceCwd, (project.folders ?? [project.cwd]).filter(path => !prepared.isolated || path !== sourceCwd))
     if (conversation.summary.origin === 'assistant') await this.assistantInbox.linkWork(conversationId, project.id, conversation.summary.title)
   }
 
@@ -561,6 +597,7 @@ export class H5Server {
         try {
           await this.host.appendAssistantUserMessage(conversationId, {
             id: `msg-${message.messageId}`,
+            ...(message.inputMode ? { inputMode: message.inputMode } : {}),
             runId: message.runId,
             text: message.text,
             createdAt: message.createdAt,
@@ -641,6 +678,12 @@ export class H5Server {
   private async processWorkCallback(callback: WorkCallback): Promise<void> {
     const id = this.assistantInbox.conversationId, runId = callback.assistantRunId!
     try {
+      if (routineApprovalCallback(callback) && !this.activeRuns.has(runId)) {
+        const chat = await this.host.getConversation(id)
+        // Never abandon a persisted active turn: it may contain actual user input.
+        // Queued progress (including legacy backlog) needs no new model turn.
+        if (chat.summary.activeRunId !== runId) { await this.assistantInbox.updateCallback(callback.id, { state: 'completed' }); return }
+      }
       if (callback.interaction && ['approval', 'question'].includes(callback.kind)) {
         const work = await this.host.getConversation(callback.conversationId)
         const handle = this.activeRuns.get(callback.runId)
@@ -690,7 +733,7 @@ export class H5Server {
     const conversation = await this.host.createConversation({ title, cwd: project.cwd, projectId: project.id, origin: 'assistant' })
     await this.assistantInbox.linkWork(conversation.id, project.id, title)
     await this.host.conversationData.call('initializeWorkControl', conversation.id, this.assistantInbox.conversationId)
-    queueMicrotask(() => { void asChatWorkAgent(this.host.conversationData, conversation.id, () => this.startConversationRun(conversation.id, task)).catch(async error => {
+    queueMicrotask(() => { void asChatWorkAgent(this.host.conversationData, conversation.id, () => this.startConversationRun(conversation.id, task, undefined, 'execute')).catch(async error => {
       const detail = error instanceof Error ? error.message : 'WORK_START_FAILED'
       process.stderr.write(`[pulse] work start failed: ${detail.slice(0, 180)}\n`)
       await this.queueWorkCallback({ conversationId: conversation.id, runId: `start-${conversation.id}`, projectId: project.id, title, kind: 'failed', summary: `无法启动工作会话：${detail.slice(0, 160)}` }).catch(() => undefined)
@@ -737,22 +780,25 @@ export class H5Server {
 
   private async resumeConversationRun(conversationId: string, authorization?: RunRecoveryAuthorization): Promise<RunHandle> {
     await checkWorkControl(this.host.conversationData, conversationId, 'resume')
-    const binding = await this.host.getTransferBinding(conversationId)
-    if (binding) {
-      const conversation = await this.host.getConversation(conversationId)
-      if (binding.runId === conversation.summary.activeRunId) {
-        const reasons = await this.host.preflightTransferredRecovery(conversationId, binding.targetCwd)
-        if (reasons.length) throw new BundleError(reasons.join(';'), 409)
-        const project = conversation.summary.projectId ? await this.projects.get(conversation.summary.projectId) : undefined
-        if (!project?.available || project.cwd !== binding.targetCwd) throw new BundleError('PROJECT_NOT_AVAILABLE', 409)
-        const prepared = await this.workspaces.prepare(conversationId, project.id, project.cwd)
-        await this.host.bindTransferredWorkspace(conversationId, prepared.cwd)
+    const handle = await this.host.scheduleTask(conversationId, { text: '' }, async (input, permit) => {
+      if (this.stopping || this.maintenance && currentWorkActor().kind !== 'system') throw Object.assign(new Error('HOST_TASK_ADMISSION_CLOSED'), { admissionNotStarted: true })
+      const binding = await this.host.getTransferBinding(conversationId)
+      if (binding) {
+        const conversation = await this.host.getConversation(conversationId)
+        if (binding.runId === conversation.summary.activeRunId) {
+          const reasons = await this.host.preflightTransferredRecovery(conversationId, binding.targetCwd)
+          if (reasons.length) throw new BundleError(reasons.join(';'), 409)
+          const project = conversation.summary.projectId ? await this.projects.get(conversation.summary.projectId) : undefined
+          if (!project?.available || project.cwd !== binding.targetCwd) throw new BundleError('PROJECT_NOT_AVAILABLE', 409)
+          const prepared = await this.workspaces.prepare(conversationId, project.id, project.cwd)
+          await this.host.bindTransferredWorkspace(conversationId, prepared.cwd)
+        }
       }
-    }
-    await this.host.prepareAutomation()
-    const handle = this.workWorker
-      ? await startH5WorkWorker({ ...this.workWorker, runtimeOptions: this.host.getWorkWorkerOptions() }, { conversationId, text: '', resume: true, ...(authorization ? { recoveryAuthorization: authorization } : {}) })
-      : await this.host.resumeRun(conversationId, authorization)
+      await this.host.prepareAutomation()
+      return this.workWorker
+        ? startAdmittedH5WorkWorker(this.host, { ...this.workWorker, runtimeOptions: this.host.getWorkWorkerOptions(permit) }, { conversationId, text: '', resume: true, ...(authorization ? { recoveryAuthorization: authorization } : {}) })
+        : this.host.launchAdmittedTask(conversationId, input, permit, true, authorization)
+    }, true)
     this.attachRun(handle)
     await this.cliNotices.takeover(handle.id)
     return handle
@@ -1147,6 +1193,40 @@ export class H5Server {
     finally { this.maintenance = false; if (!this.stopping) { await this.reconcileWorkCallbacks(); void this.pumpAssistantInbox() } }
   }
 
+  async isolatedHealth(): Promise<{ mode: 'maintenance' | 'active'; idle: boolean; leaseId?: string | undefined; port: number; serverPid: number; serverInstanceId: string; serverVersion: string; ok: true }> {
+    if (!this.isolatedRuntime || !this.server?.listening) throw new Error('ISOLATED_H5_NOT_RUNNING')
+    const reader = new ReaderClient(this.dataDir)
+    try { if ((await reader.query('/_health')).status !== 200) throw new Error('ISOLATED_READER_UNHEALTHY'); await this.host.conversationData.call('revision') } finally { reader.close() }
+    return { mode: this.maintenance ? 'maintenance' : 'active', idle: (await this.isolatedBlockers()).length === 0, leaseId: this.isolatedLease, port: this.effectivePort, serverPid: process.pid, serverInstanceId: this.serverInstanceId, serverVersion: (require('../../package.json') as { version: string }).version, ok: true }
+  }
+
+  private async isolatedBlockers(): Promise<string[]> {
+    const reasons = this.updateBlockers()
+    if (this.manualApprovalEffects.size || this.approvalReviewControllers.size || this.batchReplyLocks.size) reasons.push('APPROVAL_ACTIVE')
+    const schedules = await readFile(join(this.dataDir, 'scheduled-tasks.json'), 'utf8').then(JSON.parse).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error })
+    if (scheduledWorkActive(schedules?.tasks ?? [])) reasons.push('SCHEDULED_TASK_ACTIVE')
+    return reasons
+  }
+
+  async isolatedQuiesce(): Promise<Record<string, unknown>> {
+    if (!this.isolatedRuntime || this.stopping) throw new Error('ISOLATED_H5_NOT_RUNNING')
+    const wasMaintenance = this.maintenance
+    this.maintenance = true // Close admission synchronously before any asynchronous check.
+    try {
+      const reasons = await this.isolatedBlockers()
+      if (reasons.length) { if (!wasMaintenance) this.maintenance = false; return { mode: this.maintenance ? 'maintenance' : 'active', busy: true, reasons } }
+      this.isolatedLease ??= randomUUID()
+      return await this.isolatedHealth()
+    } catch (error) { if (!wasMaintenance) this.maintenance = false; throw error }
+  }
+
+  isolatedResume(leaseId: string): { mode: 'active' } {
+    if (!this.isolatedRuntime || !this.maintenance || !leaseId || leaseId !== this.isolatedLease) throw new Error('ISOLATED_LEASE_INVALID')
+    this.isolatedLease = undefined
+    this.maintenance = false
+    return { mode: 'active' }
+  }
+
   private updateBlockers(): string[] {
     const reasons: string[] = []
     if (this.activeRuns.size || this.pendingWorkStarts.size || this.assistantPendingRuns.size || this.assistantPump || this.assistantInbox.hasQueued()) reasons.push('TASKS_OR_MESSAGES_ACTIVE')
@@ -1158,7 +1238,16 @@ export class H5Server {
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = new URL(req.url ?? '/', 'http://localhost').pathname
-    const exempt = path.startsWith('/api/updates') || path === '/api/session' || path === '/api/session/local'
+    if (this.isolatedRuntime) {
+      const method = req.method ?? 'GET'
+      const sessionRead = path === '/api/session' && ['GET', 'HEAD'].includes(method)
+      const localSession = path === '/api/session/local' && method === 'POST'
+      const staticRead = !path.startsWith('/api/') && !path.startsWith('/preview/') && ['GET', 'HEAD'].includes(method)
+      if (!sessionRead && !localSession && !staticRead) {
+        res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'ISOLATED_RUNTIME_READ_ONLY' })); return
+      }
+    }
+    const exempt = !this.isolatedRuntime && (path.startsWith('/api/updates') || path === '/api/session' || path === '/api/session/local')
     if (this.maintenance && path.startsWith('/api/') && !exempt) {
       res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '2' }).end(JSON.stringify({ error: 'SERVICE_UPDATING' })); return
     }
@@ -1318,6 +1407,24 @@ export class H5Server {
       catch (error) { const code = error instanceof Error ? error.message : 'WORK_CONTROL_REQUIRED'; res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: code, control: (await this.host.getConversation(id)).summary.control })); return }
     }
 
+    const admissionRecovery = pathname.match(/^\/api\/task-admission\/([^/]+)\/recover$/)
+    if (pathname === '/api/task-admission' || admissionRecovery) {
+      if (!localAdmin || method !== 'GET' && !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: localAdmin ? 'SAME_ORIGIN_REQUIRED' : 'LOCAL_ADMIN_REQUIRED' })); return }
+      try {
+        if (pathname === '/api/task-admission' && method === 'GET') { res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(this.host.taskAdmissionSnapshot(url.searchParams.get('channel') === 'intent' ? 'intent' : 'task'))); return }
+        const body = await this.parseJsonBody(req)
+        if (pathname === '/api/task-admission' && method === 'PATCH') {
+          const result = this.host.configureTaskAdmission(body as { maxRunning?: number; maxQueued?: number })
+          res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(this.host.taskAdmissionSnapshot())); return
+        }
+        if (admissionRecovery && method === 'POST') {
+          const result = this.host.recoverTaskAdmission(admissionRecovery[1]!, Number(body.expectedUpdatedAt), body.confirmedStopped === true, body.channel === 'intent' ? 'intent' : 'task')
+          res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ jobId: result.jobId, status: result.status })); return
+        }
+      } catch (cause) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: (cause as { code?: string }).code ?? (cause instanceof Error ? cause.message : 'HOST_TASK_ADMISSION_FAILED') })); return }
+      res.writeHead(405).end(); return
+    }
+
     if (pathname === '/api/updates' && method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.updates.status(localAdmin))); return
     }
@@ -1402,7 +1509,7 @@ export class H5Server {
     }
     if (pathname === '/api/session' && method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify({ ok: true, protocols, capabilities: { updates: true, versionedFrontend: true, reader: true }, maintenance: this.maintenance, serverVersion: (require('../../package.json') as { version: string }).version, serverPid: process.pid, serverInstanceId: this.serverInstanceId, runtimeId: process.env.PULSE_RUNTIME_ID, queueScope: createHash('sha256').update(resolve(this.dataDir)).digest('hex').slice(0, 32), deviceId: authedDevice?.id, localAdmin, canBrowseHostPaths, canRegisterProject, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
+      res.end(JSON.stringify({ ok: true, protocols, capabilities: { updates: !this.isolatedRuntime, versionedFrontend: true, reader: true, selfHostExternalValidation: 1, selfHostInternalDataBoundary: H5WorkspaceManager.selfHostInternalDataBoundary, ...(this.isolatedRuntime ? { isolatedH5Runtime: 1 } : {}) }, maintenance: this.maintenance, serverVersion: (require('../../package.json') as { version: string }).version, serverPid: process.pid, serverInstanceId: this.serverInstanceId, runtimeId: process.env.PULSE_RUNTIME_ID, queueScope: createHash('sha256').update(resolve(this.dataDir)).digest('hex').slice(0, 32), deviceId: authedDevice?.id, localAdmin, canBrowseHostPaths, canRegisterProject, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
       return
     }
 
@@ -1496,7 +1603,7 @@ export class H5Server {
         await withWorkActor({ kind: 'approval', revision: callback.controlRevision }, () => handle.replyBatch(pending.groupId, answers))
         await this.assistantInbox.updateCallback(callback.id, { answered: true, decision })
         await this.pushInteractionSnapshot(handle.id, (this.runSnapshots.get(handle.id)?.seq ?? 0) + 1)
-        if (pending.kind === 'approval') await this.queueWorkCallback({ conversationId, runId: callback.runId, title: callback.title, ...(callback.projectId ? { projectId: callback.projectId } : {}), kind: 'approval_resolved', summary: answers.every(item => (item.value as Record<string, JsonValue>).approved === true) ? '用户已明确同意这次操作。' : '用户已拒绝这次操作，不得绕过或自动改写后重试。', interaction: { groupId: `answered:${pending.groupId}`, kind: 'approval', items: [] } })
+        if (pending.kind === 'approval') await this.queueWorkCallback({ conversationId, runId: callback.runId, title: callback.title, ...(callback.projectId ? { projectId: callback.projectId } : {}), kind: 'approval_resolved', approvalSource: 'user', summary: answers.every(item => (item.value as Record<string, JsonValue>).approved === true) ? '用户已明确同意这次操作。' : '用户已拒绝这次操作，不得绕过或自动改写后重试。', interaction: { groupId: `answered:${pending.groupId}`, kind: 'approval', items: [] } })
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }))
       } catch (error) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof Error ? error.message : 'CHAT_REPLY_FAILED' })) }
       finally { release(); if (this.batchReplyLocks.get(key) === lock) this.batchReplyLocks.delete(key) }
@@ -1522,15 +1629,15 @@ export class H5Server {
         const conversationId = this.assistantInbox.conversationId
         const previous = (await this.host.getConversationMessages(conversationId)).find(message => message.id === `msg-${requestId}`)
         if (previous?.runId) {
-          if (JSON.stringify(previous.assistantContext ?? null) !== JSON.stringify(assistantContext ?? null) || previous.text !== text || JSON.stringify(previous.richContent ?? null) !== JSON.stringify(richContent ?? null) || JSON.stringify(previous.attachments ?? []) !== JSON.stringify(attachments) || JSON.stringify(previous.skills ?? []) !== JSON.stringify(skills ?? []) || JSON.stringify(previous.mentionedFiles ?? []) !== JSON.stringify(mentionedFiles ?? [])) throw new Error('REQUEST_ID_REUSED')
+          if (JSON.stringify(previous.assistantContext ?? null) !== JSON.stringify(assistantContext ?? null) || previous.text !== text || previous.qualityReviewEnabled !== body.qualityReviewEnabled || JSON.stringify(previous.richContent ?? null) !== JSON.stringify(richContent ?? null) || JSON.stringify(previous.attachments ?? []) !== JSON.stringify(attachments) || JSON.stringify(previous.skills ?? []) !== JSON.stringify(skills ?? []) || JSON.stringify(previous.mentionedFiles ?? []) !== JSON.stringify(mentionedFiles ?? [])) throw new Error('REQUEST_ID_REUSED')
           const receipt = this.assistantInbox.list().find(item => item.messageId === requestId)
           if (!(body.retry === true && receipt && ['failed', 'interrupted'].includes(receipt.state))) { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ conversationId, messageId: requestId, runId: receipt?.runId ?? previous.runId, state: receipt?.state ?? (this.activeRuns.has(previous.runId) ? 'replying' : 'completed'), duplicate: true })); return }
         }
         const conversation = await this.host.getConversation(conversationId)
         const active = conversation.summary.activeRunId ? this.activeRuns.get(conversation.summary.activeRunId) : undefined
         if (active && body.delivery === 'immediate') {
-          await active.submitHumanInput(text, undefined, { requestId, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}) })
-          await this.assistantInbox.acceptInput({ requestId, text, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}) }, active.id)
+          await active.submitHumanInput(text, undefined, { requestId, ...(body.inputMode === 'voice' ? { inputMode: 'voice' as const } : {}), ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}) })
+          await this.assistantInbox.acceptInput({ requestId, text, ...(body.inputMode === 'voice' ? { inputMode: 'voice' as const } : {}), ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}) }, active.id)
           res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ conversationId, messageId: requestId, runId: active.id, state: this.assistantInbox.list().find(item => item.messageId === requestId)?.state ?? 'replying' })); return
         }
         const existing = this.assistantInbox.list().find(item => item.messageId === requestId)
@@ -1538,9 +1645,9 @@ export class H5Server {
         if (!existing && body.delivery === 'immediate') {
           const starting = this.assistantInbox.list().find(item => item.state === 'replying')
           if (starting && !this.activeRuns.has(starting.runId)) {
-            const input = { requestId, text, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}) }
+            const input = { requestId, text, ...(body.inputMode === 'voice' ? { inputMode: 'voice' as const } : {}), ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}) }
             await this.assistantInbox.acceptInput(input, starting.runId, true)
-            await this.host.appendAssistantUserMessage(conversationId, { id: `msg-${requestId}`, runId: starting.runId, text, createdAt: new Date().toISOString(), ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}) })
+            await this.host.appendAssistantUserMessage(conversationId, { id: `msg-${requestId}`, runId: starting.runId, ...(body.inputMode === 'voice' ? { inputMode: 'voice' as const } : {}), text, createdAt: new Date().toISOString(), ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}) })
             res.writeHead(202, { 'Content-Type': 'application/json' }).end(JSON.stringify({ conversationId, messageId: requestId, runId: starting.runId, state: 'replying' })); return
           }
         }
@@ -1550,6 +1657,7 @@ export class H5Server {
         ? await this.assistantInbox.retry(requestId, text, attachments.length ? attachments : undefined, skills, mentionedFiles, richContent, assistantContext)
         : await this.assistantInbox.enqueue({
             chatPreReply: body.chatPreReply !== false,
+            ...(body.inputMode === 'voice' ? { inputMode: 'voice' as const } : {}),
             requestId,
             text,
             ...(attachments.length ? { attachments } : {}),
@@ -1663,6 +1771,16 @@ export class H5Server {
 
     if (pathname === '/api/provider-presets' && method === 'GET') {
       if (!localAdmin) { res.writeHead(403).end(); return }
+      const providerId = url.searchParams.get('providerId')
+      if (providerId) {
+        if (!this.configuration) { res.writeHead(501).end(); return }
+        const providers = (normalizeModelConfig(this.parseConfig(await this.configText())).providers ?? {}) as Record<string, import('../model-config.js').ProviderDefinition>
+        const provider = Object.hasOwn(providers, providerId) ? providers[providerId] : undefined
+        if (!provider) { res.writeHead(404).end(); return }
+        const guided = provider.presetId && provider.connectionVariant
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ presets: guided ? providerPresets : [savedProviderPreset(provider)], selection: { presetId: guided ? provider.presetId : 'saved', connectionVariant: guided ? provider.connectionVariant : 'current' } }))
+        return
+      }
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ presets: providerPresets }))
       return
     }
@@ -1687,10 +1805,10 @@ export class H5Server {
             const current: Record<string, any> = normalizeModelConfig(this.parseConfig(raw))
             const connection = await onboarding.connection(input, current)
             if (!Array.isArray(body.models) || body.models.length === 0 || body.models.length > 10000) throw new Error('PROVIDER_MODELS_REQUIRED')
-            const models = body.models.map(normalizeDiscoveredModel)
-            if (models.some(item => !item || ['__proto__', 'prototype', 'constructor'].includes(item.modelCode))) throw new Error('PROVIDER_MODEL_INVALID')
             const providerId = input.providerId ?? `${input.presetId}-${randomUUID().slice(0, 8)}`
             const previous = current.providers?.[providerId]
+            const models = body.models.map(raw => normalizeDiscoveredModel(raw) ?? retainedStoredModel(raw, previous?.models))
+            if (models.some(item => !item || ['__proto__', 'prototype', 'constructor'].includes(item.modelCode))) throw new Error('PROVIDER_MODEL_INVALID')
             const provider = { ...previous, ...connection.provider, models: mergeDiscoveredModels(previous?.models ?? {}, models as NonNullable<typeof models[number]>[], input.modelCode ? onboarding.verification(connection.provider, connection.apiKey, input.modelCode) : undefined) }
             for (const key of ['maxContextTokens', 'maxOutputTokens'] as const) if (Object.prototype.hasOwnProperty.call(body, key)) {
               if (body[key] === null) delete provider[key]
@@ -1706,7 +1824,7 @@ export class H5Server {
             }
             if (body.setDefault === true) {
               const selected = Object.entries(provider.models as Record<string, ModelDefinition>).find(([, value]) => value.modelCode === input.modelCode)
-              if (!selected || selected[1].tools === 'unsupported' || selected[1].purposes && !selected[1].purposes.includes('chat')) throw new Error('PROVIDER_AGENT_MODEL_REQUIRED')
+              if (!selected || selected[1].tools === 'unsupported' || selected[1].purposes && !selected[1].purposes.includes('chat') || !normalizeDiscoveredModel(selected[1])) throw new Error('PROVIDER_AGENT_MODEL_REQUIRED')
               current.activeModel = `${providerId}/${selected[0]}`
             }
             const credentials = new ProviderCredentialStore(this.configuration!.path)
@@ -1757,8 +1875,13 @@ export class H5Server {
       const modelRecord = model && typeof model === 'object' && !Array.isArray(model) ? model as Record<string, unknown> : undefined
       const profile = providerId && parsed.providers && typeof parsed.providers === 'object' ? (parsed.providers as Record<string, unknown>)[providerId] : undefined
       const profileRecord = profile && typeof profile === 'object' && !Array.isArray(profile) ? profile as Record<string, unknown> : undefined
+      // The global prompt is stored with the user config, so it ships with the same settings payload.
+      const globalPrompt = await readGlobalPrompt().then(
+        state => ({ prompt: state.prompt, configured: state.configured, path: state.path, version: state.version }),
+        () => ({ prompt: '', configured: false, path: globalPromptPath(), version: globalPromptVersion('') }),
+      )
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify({ path: this.configuration.path, version: configVersion(raw), config: maskConfigSecrets(parsed), features: { routeReasoningEffort: true }, host: this.hostSurface(), sources: this.configSources(), launchNetwork: { override: this.host.launchNetworkOverride() ?? null }, environment: Object.fromEntries([...envNames].map(name => [name, Boolean(process.env[name])])), active: { model: this.host.getModel(), provider: this.host.getProvider(), assistant: { id: modelId, model: typeof modelRecord?.modelCode === 'string' ? modelRecord.modelCode : this.host.getModel(), name: typeof modelRecord?.displayName === 'string' ? modelRecord.displayName : modelId, provider: typeof profileRecord?.name === 'string' ? profileRecord.name : typeof profileRecord?.provider === 'string' ? profileRecord.provider : providerId } }, backupAvailable: await access(`${this.configuration.path}.bak`).then(() => true, () => false) }))
+      res.end(JSON.stringify({ path: this.configuration.path, version: configVersion(raw), globalPrompt, config: maskConfigSecrets(parsed), features: { routeReasoningEffort: true }, host: this.hostSurface(), sources: this.configSources(), launchNetwork: { override: this.host.launchNetworkOverride() ?? null }, environment: Object.fromEntries([...envNames].map(name => [name, Boolean(process.env[name])])), active: { model: this.host.getModel(), provider: this.host.getProvider(), assistant: { id: modelId, model: typeof modelRecord?.modelCode === 'string' ? modelRecord.modelCode : this.host.getModel(), name: typeof modelRecord?.displayName === 'string' ? modelRecord.displayName : modelId, provider: typeof profileRecord?.name === 'string' ? profileRecord.name : typeof profileRecord?.provider === 'string' ? profileRecord.provider : providerId } }, backupAvailable: await access(`${this.configuration.path}.bak`).then(() => true, () => false) }))
       return
     }
 
@@ -1846,6 +1969,13 @@ export class H5Server {
       if (!localAdmin || !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: localAdmin ? 'SAME_ORIGIN_REQUIRED' : 'LOCAL_ADMIN_REQUIRED' })); return }
       const body = await this.parseJsonBody(req)
       if (!this.configuration || typeof body.version !== 'string' || !body.config || typeof body.config !== 'object' || Array.isArray(body.config)) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'CONFIG_SAVE_INVALID' })); return }
+      const globalPromptInput = body.globalPrompt
+      // Reject a bad prompt before any write so a failed save cannot half-apply settings.
+      if (globalPromptInput !== undefined && typeof globalPromptInput !== 'string') { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'GLOBAL_PROMPT_INVALID' })); return }
+      if (typeof globalPromptInput === 'string' && globalPromptInput.length > MAX_GLOBAL_PROMPT_CHARS) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'GLOBAL_PROMPT_TOO_LONG' })); return }
+      const globalPromptBase = body.globalPromptVersion
+      if (typeof globalPromptInput === 'string' && (typeof globalPromptBase !== 'string' || !/^[a-f0-9]{64}$/.test(globalPromptBase))) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'GLOBAL_PROMPT_VERSION_REQUIRED' })); return }
+      let savedGlobalPrompt: Awaited<ReturnType<typeof writeGlobalPrompt>> | undefined
       try {
         const result = await this.withConfigWriteLock(() => this.host.builtinPluginJobs.lock(async () => {
           const raw = await this.configText()
@@ -1877,8 +2007,20 @@ export class H5Server {
               }
             }
             if (configVersion(await this.configText()) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
-            await this.replaceConfig(prepared.text)
+            // The prompt is a separate file, so there is no cross-file transaction. Land it first with
+            // compare-and-set (a conflict aborts before anything is written), then the config. If the
+            // config write fails, undo only our own prompt write, again by compare-and-set.
+            let promptWrite: { previous: string; saved: Awaited<ReturnType<typeof writeGlobalPrompt>> } | undefined
+            if (typeof globalPromptInput === 'string') {
+              const previous = await readGlobalPrompt().catch(() => { throw Object.assign(new Error('GLOBAL_PROMPT_WRITE_FAILED'), { code: 'GLOBAL_PROMPT_WRITE_FAILED' }) })
+              promptWrite = { previous: previous.prompt, saved: await writeGlobalPrompt(globalPromptInput, undefined, globalPromptBase as string) }
+            }
+            try { await this.replaceConfig(prepared.text) } catch (cause) {
+              if (promptWrite) await writeGlobalPrompt(promptWrite.previous, undefined, promptWrite.saved.version).catch(() => { throw Object.assign(new Error('CONFIG_SAVE_PARTIAL_GLOBAL_PROMPT'), { code: 'CONFIG_SAVE_PARTIAL_GLOBAL_PROMPT', cause }) })
+              throw cause
+            }
             persisted = true
+            savedGlobalPrompt = promptWrite?.saved
             const cancellationWarnings = await this.host.builtinPluginJobs.cancel(cancelJobs)
             // Unchanged config fields must not erase a launch-time safety override.
             const runtimeOptions = candidate.approvalMode === this.parseConfig(raw).approvalMode
@@ -1888,10 +2030,10 @@ export class H5Server {
             return { path: this.configuration!.path, version: configVersion(prepared.text), applied: applied.applied, restartRequired: applied.restartRequired, cancellationWarnings, config: maskConfigSecrets(JSON.parse(prepared.text) as Record<string, unknown>), host: this.hostSurface() }
           } finally { if (!persisted) { if (createdCredential) await credentials.remove(createdCredential); for (const ref of createdCredentials) await credentials.remove(ref) } }
         }))
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ok: true, ...result }))
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ok: true, ...result, ...(savedGlobalPrompt ? { globalPrompt: { prompt: savedGlobalPrompt.prompt, configured: savedGlobalPrompt.configured, path: savedGlobalPrompt.path, version: savedGlobalPrompt.version } } : {}) }))
       } catch (error) {
         const message = error instanceof Error ? error.message.slice(0, 240) : 'CONFIG_INVALID'
-        res.writeHead(['CONFIG_VERSION_CONFLICT', 'PLUGIN_ACTIVE_JOBS'].includes(message) ? 409 : 400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message }))
+        res.writeHead(['CONFIG_VERSION_CONFLICT', 'PLUGIN_ACTIVE_JOBS', 'GLOBAL_PROMPT_CONFLICT'].includes(message) ? 409 : ['GLOBAL_PROMPT_WRITE_FAILED', 'CONFIG_SAVE_PARTIAL_GLOBAL_PROMPT'].includes(message) ? 500 : 400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message }))
       }
       return
     }
@@ -1916,7 +2058,7 @@ export class H5Server {
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ok: true, ...result }))
       } catch (error) {
         const message = error instanceof Error ? error.message.slice(0, 240) : 'CONFIG_RESTORE_FAILED'
-        res.writeHead(['CONFIG_VERSION_CONFLICT', 'PLUGIN_ACTIVE_JOBS'].includes(message) ? 409 : 400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message }))
+        res.writeHead(['CONFIG_VERSION_CONFLICT', 'PLUGIN_ACTIVE_JOBS', 'GLOBAL_PROMPT_CONFLICT'].includes(message) ? 409 : ['GLOBAL_PROMPT_WRITE_FAILED', 'CONFIG_SAVE_PARTIAL_GLOBAL_PROMPT'].includes(message) ? 500 : 400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message }))
       }
       return
     }
@@ -2199,6 +2341,85 @@ export class H5Server {
       return
     }
 
+    if (pathname === '/api/device-use/scene-sandbox') {
+      if (!localAdmin || method !== 'GET' && !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: localAdmin ? 'SAME_ORIGIN_REQUIRED' : 'LOCAL_ADMIN_REQUIRED' })); return }
+      try {
+        const result = method === 'GET' ? this.sceneSandbox.snapshot() : method === 'POST' ? await this.sceneSandbox.act(await this.parseJsonBody(req, 4096), authedDevice!.id) : undefined
+        if (!result) { res.writeHead(405).end(); return }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
+      } catch (error) {
+        const message = error instanceof Error && /^DEVICE_[A-Z_]+$/.test(error.message) ? error.message : 'DEVICE_SCENE_SANDBOX_FAILED'
+        res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: message }))
+      }
+      return
+    }
+
+    if (pathname === '/api/device-use/terminal-diagnostics') {
+      if (!localAdmin || method !== 'GET' && !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: localAdmin ? 'SAME_ORIGIN_REQUIRED' : 'LOCAL_ADMIN_REQUIRED' })); return }
+      try {
+        const result = method === 'GET' ? this.terminalDiagnostics.snapshot() : method === 'POST' ? await this.terminalDiagnostics.act(await this.parseJsonBody(req, 1024)) : undefined
+        if (!result) { res.writeHead(405).end(); return }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
+      } catch (error) {
+        const message = error instanceof Error && /^DEVICE_TERMINAL_DIAGNOSTICS_[A-Z_]+$/.test(error.message) ? error.message : 'DEVICE_TERMINAL_DIAGNOSTICS_FAILED'
+        res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: message }))
+      }
+      return
+    }
+
+    if (pathname.startsWith('/api/device-use/')) {
+      if (!localAdmin || method !== 'GET' && !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: localAdmin ? 'SAME_ORIGIN_REQUIRED' : 'LOCAL_ADMIN_REQUIRED' })); return }
+      try {
+        const service = this.host.deviceUse
+        const body = method === 'GET' ? {} : await this.parseJsonBody(req, 32768)
+        let result: unknown
+        if (pathname === '/api/device-use/status' && method === 'GET') result = await service.status()
+        else if (pathname === '/api/device-use/config' && method === 'POST') result = await service.configure(body)
+        else if (pathname === '/api/device-use/home-assistant' && method === 'POST') result = await service.connectHomeAssistant(body)
+        else if (pathname === '/api/device-use/discover' && method === 'POST') result = await service.discover()
+        else if (pathname === '/api/device-use/enroll' && method === 'POST') result = await service.enroll(body)
+        else if (pathname === '/api/device-use/grant' && method === 'POST') result = await service.grant(body)
+        else if (pathname === '/api/device-use/revoke' && method === 'POST') result = await service.revoke(body)
+        else if (pathname === '/api/device-use/reconcile' && method === 'POST') result = await service.reconcile(body)
+        else if (pathname === '/api/device-use/manual-resolution/preview' && method === 'POST') result = await service.previewManualResolution(body, createHash('sha256').update(token!).digest('hex'))
+        else if (pathname === '/api/device-use/manual-resolution/confirm' && method === 'POST') result = await service.confirmManualResolution(body, createHash('sha256').update(token!).digest('hex'))
+        else { res.writeHead(404).end(); return }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
+      } catch (error) {
+        // Schema failures and raw network payloads may contain credentials; never echo them.
+        const message = error instanceof Error && /^DEVICE_[A-Z_]+$/.test(error.message) ? error.message : 'DEVICE_HOST_REQUEST_FAILED'
+        res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: message }))
+      }
+      return
+    }
+
+    if (pathname.startsWith('/api/voice/')) {
+      if (!localAdmin || method !== 'GET' && !requireSameOrigin()) { res.writeHead(403).end(); return }
+      try {
+        const voice = this.voiceService ??= new VoiceService(this.dataDir)
+        const body = method === 'GET' ? {} : await this.parseJsonBody(req)
+        let result: unknown
+        if (pathname === '/api/voice/config' && method === 'GET') result = await voice.config()
+        else if (pathname === '/api/voice/config' && method === 'POST') result = await voice.save(body)
+        else if (pathname === '/api/voice/local' && method === 'POST' && (body.kind === 'asr' || body.kind === 'tts')) result = await voice.useLocal(body.kind)
+        else if (pathname === '/api/voice/test' && method === 'POST' && (body.kind === 'asr' || body.kind === 'tts')) result = await voice.test(body.kind)
+        else if (pathname === '/api/voice/transcribe' && method === 'POST' && typeof body.audio === 'string') result = await voice.transcribe(body.audio)
+        else if (pathname === '/api/voice/speech' && method === 'POST' && typeof body.text === 'string') result = await voice.speech(body.text)
+        else { res.writeHead(400).end(); return }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
+      } catch (error) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof Error && /^VOICE_/.test(error.message) ? error.message : 'VOICE_CONFIGURATION_OR_SERVICE_FAILED' })) }
+      return
+    }
+
+    if (pathname === '/api/notifications/read' && method === 'POST') {
+      if (!requireSameOrigin()) { res.writeHead(403).end(); return }
+      const body = await this.parseJsonBody(req)
+      const targets = body.targets
+      if (!Array.isArray(targets) || targets.length > 1000 || targets.some(item => !item || typeof item.id !== 'string' || item.id.length > 300 || typeof item.revision !== 'string' || item.revision.length > 100)) { res.writeHead(400).end(); return }
+      await this.taskNotices.markRead(targets)
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }))
+      return
+    }
     if (pathname === '/api/notifications' && method === 'GET') {
       await this.syncCliNotifications()
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.taskNotices.list()))
@@ -2221,11 +2442,20 @@ export class H5Server {
         res.end(JSON.stringify({ error: 'CWD_NOT_ALLOWED' }))
         return
       }
+      if (body.selfHostExternalValidation === true && (!localAdmin || !requireSameOrigin())) { res.writeHead(403).end(); return }
       const title = typeof body.title === 'string' ? body.title.slice(0, 80) : '新对话'
       const projectId = typeof body.projectId === 'string' ? body.projectId : undefined
       const project = projectId ? await this.projects.get(projectId) : undefined
       if (projectId && !project) { res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'PROJECT_NOT_FOUND' })); return }
-      const created = await this.host.createConversation({ title, ...(project ? { cwd: project.cwd, projectId: project.id } : { projectId: null }) })
+      const created = await this.host.createConversation({ title, ...(body.selfHostExternalValidation === true ? { selfHostFileHistoryRequired: true } : {}), ...(project ? { cwd: project.cwd, projectId: project.id } : { projectId: null }) })
+      if (body.selfHostExternalValidation === true) {
+        if (!project) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'SELF_HOST_PROJECT_REQUIRED' })); return }
+        try {
+          const prepared = await this.workspaces.prepare(created.summary.id, project.id, project.cwd, { isolated: true, externalValidation: true })
+          await this.host.bindSelfHostFileHistory(created.summary.id, prepared.cwd, project.cwd)
+        }
+        catch (error) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof Error ? error.message : 'SELF_HOST_ISOLATION_REQUIRED' })); return }
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(created.summary))
       return
@@ -2325,7 +2555,8 @@ export class H5Server {
       if (!conversationId || hasTitle && !title || hasTitle && title.length > 80 || policy !== undefined && policy !== 'manual' && policy !== 'delegate' || body.pinned !== undefined && !hasPinned || body.archived !== undefined && !hasArchive || hasProject && body.projectId !== null && typeof body.projectId !== 'string' || !hasTitle && policy === undefined && !hasPinned && !hasArchive && !hasProject) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: policy !== undefined ? 'APPROVAL_POLICY_INVALID' : 'CONVERSATION_UPDATE_INVALID' })); return }
       const before = await this.host.getConversation(conversationId)
       const changingWorkspace = hasProject && (body.projectId ?? undefined) !== before.summary.projectId
-      if ((hasArchive && body.archived === true || changingWorkspace) && before.summary.activeRunId) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'CONVERSATION_BUSY' })); return }
+      const locallyRunning = [...this.activeRuns.values()].some(run => run.conversationId === conversationId)
+      if (hasArchive && body.archived === true && locallyRunning || changingWorkspace && before.summary.activeRunId) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'CONVERSATION_BUSY' })); return }
       if (hasTitle) await this.host.updateConversationTitle(conversationId, title)
       if (policy === 'manual' || policy === 'delegate') await this.host.updateConversationApprovalPolicy(conversationId, policy)
       if (hasPinned || hasArchive || hasProject) {
@@ -2347,7 +2578,7 @@ export class H5Server {
       if (!conversationId) { res.writeHead(404).end(); return }
       if (conversationId === this.assistantInbox.conversationId) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'ASSISTANT_CONVERSATION_MANAGED' })); return }
       const conversation = await this.host.getConversation(conversationId)
-      if (conversation.summary.activeRunId) {
+      if ([...this.activeRuns.values()].some(run => run.conversationId === conversation.id)) {
         res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'CONVERSATION_BUSY' })); return
       }
       await this.host.deleteConversation(conversationId)
@@ -2391,7 +2622,7 @@ export class H5Server {
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: view.continuationRunId, duplicate: true })); return
       }
       try {
-        const handle = await this.startConversationRun(conversationId!, '继续完成原任务', { requestId: `budget-${view.continuationRunId}`, budgetRenewal: { sourceRunId: runId!, expectedUsed: view.used, expectedLimit: view.limit, confirmed: true } })
+        const handle = await this.startConversationRun(conversationId!, '继续完成原任务', { requestId: `budget-${view.continuationRunId}`, budgetRenewal: { sourceRunId: runId!, expectedUsed: view.used, expectedLimit: view.limit, confirmed: true } }, 'execute')
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: handle.id }))
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
@@ -2498,13 +2729,20 @@ export class H5Server {
       if (convId) {
         const body = await this.parseJsonBody(req)
         const text = typeof body.text === 'string' ? body.text : ''
+        if (body.qualityReviewEnabled !== undefined && typeof body.qualityReviewEnabled !== 'boolean') { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'INVALID_QUALITY_REVIEW_SETTING' })); return }
         const richContent = parseRichContent(body.richContent)
         const requestId = typeof body.requestId === 'string' ? body.requestId : undefined
         if (requestId !== undefined && !/^[A-Za-z0-9._:-]{8,128}$/.test(requestId)) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'REQUEST_ID_INVALID' })); return }
         if (requestId) {
-          const previous = (await this.host.getConversationMessages(convId)).find(message => message.id === `msg-${requestId}`)
-          if (previous && (previous.text !== text || JSON.stringify(previous.richContent ?? null) !== JSON.stringify(richContent ?? null) || JSON.stringify((previous.attachments ?? []).map(item => item.id)) !== JSON.stringify(Array.isArray(body.attachments) ? body.attachments.map(item => item?.id) : []) || JSON.stringify(previous.skills ?? []) !== JSON.stringify(body.skills ?? []) || JSON.stringify(previous.mentionedFiles ?? []) !== JSON.stringify(body.mentionedFiles ?? []))) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'REQUEST_ID_REUSED' })); return }
-          if (previous?.runId) { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: previous.runId })); return }
+          const messages = await this.host.getConversationMessages(convId)
+          const previous = messages.find(message => message.id === `msg-${requestId}`)
+          if (previous && (previous.text !== text || previous.qualityReviewEnabled !== body.qualityReviewEnabled || JSON.stringify(previous.richContent ?? null) !== JSON.stringify(richContent ?? null) || JSON.stringify((previous.attachments ?? []).map(item => item.id)) !== JSON.stringify(Array.isArray(body.attachments) ? body.attachments.map(item => item?.id) : []) || JSON.stringify(previous.skills ?? []) !== JSON.stringify(body.skills ?? []) || JSON.stringify(previous.mentionedFiles ?? []) !== JSON.stringify(body.mentionedFiles ?? []))) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'REQUEST_ID_REUSED' })); return }
+          if (previous?.runId) {
+            const replyOnly = messages.some(message => message.id === `msg-answer-${previous.id}`)
+            if (replyOnly || await this.host.findConversationByRunId(previous.runId)) {
+              res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: previous.runId, ...(replyOnly ? { replyOnly: true } : {}) })); return
+            }
+          }
         }
         const attachments = await this.saveAttachments(convId, Array.isArray(body.attachments) ? body.attachments : [])
         const skills = Array.isArray(body.skills) ? body.skills.filter((s): s is string => typeof s === 'string') : undefined
@@ -2515,37 +2753,34 @@ export class H5Server {
           return
         }
 
-        if (body.delivery === 'immediate' || body.delivery === 'whenIdle') {
+        let handle: RunHandle
+        try {
           const conversation = await this.host.getConversation(convId)
           const active = conversation.summary.activeRunId ? this.activeRuns.get(conversation.summary.activeRunId) : undefined
-          if (active && body.delivery === 'immediate') {
-            await active.submitHumanInput(text, undefined, { ...(requestId ? { requestId } : {}), ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}) })
+          if (active && body.delivery !== 'whenIdle') {
+            await active.submitHumanInput(text, undefined, { ...(requestId ? { requestId } : {}), ...(typeof body.qualityReviewEnabled === 'boolean' ? { qualityReviewEnabled: body.qualityReviewEnabled } : {}), ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}) })
             res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: active.id })); return
           }
           if ([...this.activeRuns.values()].some(handle => handle.conversationId === convId)) throw new Error('CONVERSATION_BUSY')
-          // A new explicit message can start a fresh run after a stopped one.
-          // Reconciliation retains evidence and refuses unresolved side effects.
-          if (conversation.summary.activeRunId) {
-            try { await this.host.reconcileInactiveRun(convId, conversation.summary.activeRunId) }
-            catch (error) {
-              const message = error instanceof Error ? error.message : String(error)
-              if (message === 'CONVERSATION_BUSY' || message === 'RUN_AWAITING_APPROVAL' || message.startsWith('RECOVERY_')) {
-                res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message })); return
-              }
-              throw error
-            }
+          handle = await this.startConversationRun(convId, text, {
+            ...(typeof body.qualityReviewEnabled === 'boolean' ? { qualityReviewEnabled: body.qualityReviewEnabled } : {}),
+            ...(requestId ? { requestId } : {}),
+            ...(attachments.length ? { attachments } : {}),
+            ...(skills ? { skills } : {}),
+            ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}),
+          })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          if (message === 'HOST_TASK_QUEUE_FULL' || message === 'HOST_INTENT_BUSY') { res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '2' }).end(JSON.stringify({ error: message })); return }
+          if (message === 'CONVERSATION_BUSY' || message === 'REQUEST_ID_REUSED' || message === 'RUN_AWAITING_APPROVAL' || message.startsWith('RECOVERY_')) {
+            res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message })); return
           }
+          throw error
         }
-        const handle = await this.startConversationRun(convId, text, {
-          ...(requestId ? { requestId } : {}),
-          ...(attachments.length ? { attachments } : {}),
-          ...(skills ? { skills } : {}),
-          ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}),
-        })
         const runId = handle.id
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ runId }))
+        res.end(JSON.stringify({ runId, ...(handle.replyOnly ? { replyOnly: true } : {}) }))
         return
       }
     }
@@ -2830,7 +3065,20 @@ export class H5Server {
       if (this.retiredHandles.has(handle)) return
       outcome = await handle.outcome()
     } catch (error) {
-      if (!this.updateSuspendedRuns.has(runId)) process.stderr.write(`[pulse] run stream failed: ${String(error).slice(0, 180)}\n`)
+      if (!this.updateSuspendedRuns.has(runId) && !this.retiredHandles.has(handle)) {
+        process.stderr.write(`[pulse] run stream failed: ${String(error).slice(0, 180)}\n`)
+        // Transport/cleanup failure does not prove that work had no effects.
+        // Preserve an interrupted state, never a synthetic retryable failure.
+        this.pushEvent(runId, { type: 'error', runId, conversationId: handle.conversationId, seq: (this.runSnapshots.get(runId)?.seq ?? 0) + 1, data: { message: '工作连接或收尾异常，完成状态未能确认；请检查运行记录，未自动重试。' } })
+        const snapshot = this.runSnapshots.get(runId)
+        if (snapshot) {
+          const interrupted: WebRunSnapshot = { ...snapshot, state: 'interrupted', interactions: [] }
+          delete interrupted.complete
+          delete interrupted.waiting
+          this.runSnapshots.set(runId, interrupted)
+          await this.host.conversationData.call('saveState', `run:${runId}`, interrupted).catch(() => undefined)
+        }
+      }
     } finally {
       try {
       if (this.updateSuspendedRuns.has(runId) || this.retiredHandles.has(handle)) return
@@ -2908,15 +3156,16 @@ export class H5Server {
     // projection its own monotonic cursor so clients do not discard the clear.
     const watermark = Math.max(this.runSnapshots.get(runId)?.seq ?? 0, buffer.at(-1)?.seq ?? 0)
     if (event.seq <= watermark) event = { ...event, seq: watermark + 0.001 }
-    buffer.push(prepareRunEvent(event, (buffer[0] as unknown as WebRunEvent | undefined)?.runStartedAt) as unknown as AssistantEvent)
+    const startedAt = this.runSnapshots.get(runId)?.admission?.startedAt ?? (buffer.find(item => (item as unknown as WebRunEvent).runStartedAt !== undefined) as unknown as WebRunEvent | undefined)?.runStartedAt
+    buffer.push(prepareRunEvent(event, startedAt) as unknown as AssistantEvent)
     const previous = this.runSnapshots.get(runId) ?? { runId, state: 'running' as const, seq: 0, activities: [] }
     const next: WebRunSnapshot = { ...previous, seq: Math.max(previous.seq, event.seq ?? 0) }
-    if (event.type === 'status') next.status = event
+    if (event.type === 'status') { next.status = event; if (event.data.admission) next.admission = event.data.admission; if (event.data.health && !next.complete) next.health = event.data.health }
     if (event.type === 'tool') next.activities = [...next.activities.filter(item => item.data.activityId !== event.data.activityId), event].slice(-30)
     if (event.type === 'waiting') next.waiting = event
     if (event.type === 'interactions') { if (event.data.reviewNote) next.reviewNote = event.data.reviewNote; else delete next.reviewNote; next.interactions = event.data.interactions; if (!next.interactions.length) delete next.waiting }
     if (event.type === 'lanes') next.laneState = event.data
-    if (event.type === 'complete') { next.complete = event; next.state = event.data.status; delete next.waiting; next.interactions = [] }
+    if (event.type === 'complete') { if (next.health) next.health = completeRunHealth(next.health, event.data.taskOutcome?.status); next.complete = event; next.state = event.data.status; delete next.waiting; next.interactions = [] }
     this.runSnapshots.set(runId, next)
     const noticeConversationId = event.conversationId ?? this.runConversations.get(runId)
     if (noticeConversationId) void this.taskNotices.record({ ...event, conversationId: noticeConversationId }, noticeConversationId === this.assistantInbox.conversationId ? 'chat' : 'work').catch(() => console.error('Task notification could not be saved.'))
@@ -2947,7 +3196,12 @@ export class H5Server {
     const visible = items.map(group => delegated && group.kind === 'approval'
       ? { ...group, items: group.items.filter(item => manual?.has(item.effectId)) }
       : group).filter(group => group.items.length > 0)
-    return visible.map(publicInteraction)
+    const previous = (this.runSnapshots.get(runId) ?? await this.host.conversationData.call<WebRunSnapshot | undefined>('readState', `run:${runId}`))?.interactions ?? []
+    return visible.map(group => {
+      const interaction = publicInteraction(group)
+      const old = previous.find(item => item.groupId === group.groupId && interactionFingerprint(item) === interactionFingerprint(interaction))
+      return { ...interaction, requestedAt: old?.requestedAt ?? Date.now() }
+    })
   }
 
   private async pushInteractionSnapshot(runId: string, seq: number): Promise<void> {
@@ -3011,7 +3265,7 @@ export class H5Server {
         const result = await withWorkActor({ kind: 'policy' }, () => handle.reviewApproval(next.effectId, controller.signal)).catch(() => ({ status: 'manual' as const, reason: 'review_failed' }))
         if (controller.signal.aborted) return
         const link = this.assistantInbox.workLink(handle.conversationId)
-        if (link && result.status === 'approved') await this.queueWorkCallback({ conversationId: handle.conversationId, runId, title: link.title, projectId: link.projectId, kind: 'approval_resolved', summary: '现有自动审核策略已批准本次操作，无需用户再次确认。', interaction: publicInteraction({ groupId: `approved:${next.effectId}`, kind: 'approval', items: [] }) })
+        if (link && result.status === 'approved') await this.queueWorkCallback({ conversationId: handle.conversationId, runId, title: link.title, projectId: link.projectId, kind: 'approval_resolved', approvalSource: 'automatic', summary: '现有自动审核策略已批准本次操作，无需用户再次确认。', interaction: publicInteraction({ groupId: `approved:${next.effectId}`, kind: 'approval', items: [] }) })
         if (result.status === 'manual') {
           const manual = this.manualApprovalEffects.get(runId) ?? new Set<string>()
           manual.add(next.effectId)
@@ -3058,13 +3312,16 @@ export class H5Server {
   }
 
   private async snapshotRun(runId: string, events: AssistantEvent[], active: boolean): Promise<WebRunSnapshot> {
+    const ledger = this.host.taskAdmissionForRun?.(runId)
+    const trackedAdmission = this.activeRuns.get(runId)?.admission?.() ?? (ledger?.status === 'quarantined' ? { phase: 'quarantined' as const, queuedAt: ledger.createdAt } : undefined)
     if (!active) {
       const cli = await this.cliNotices.snapshot(runId)
       if (cli) return { ...cli.snapshot, interactions: cli.snapshot.interactions?.map(publicInteraction) ?? [] }
     }
     await this.projectionWrites.get(runId)?.catch(() => undefined)
     const projected = this.runSnapshots.get(runId) ?? await this.host.conversationData.call<WebRunSnapshot | undefined>('readState', `run:${runId}`)
-    if (projected) return this.withVisibleInteractions({ ...projected, ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}), ...(active ? { state: 'running' as const } : projected.state === 'running' ? { state: 'interrupted' as const } : {}) }, active)
+    if (projected && ledger?.status === 'interrupted') { delete projected.admission; if (projected.status?.data.admission) { const { admission: _old, ...data } = projected.status.data; projected.status = { ...projected.status, data } } }
+    if (projected) return this.withVisibleInteractions({ ...projected, ...(trackedAdmission ? { admission: trackedAdmission } : {}), ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}), ...(active ? { state: 'running' as const } : projected.state === 'running' ? { state: 'interrupted' as const } : {}) }, active)
     let status: WebRunSnapshot['status']
     let complete: WebRunSnapshot['complete']
     let waiting: WebRunSnapshot['waiting']
@@ -3083,7 +3340,7 @@ export class H5Server {
       else if (event.type === 'complete') { complete = event; waiting = undefined; interactions = [] }
     }
     const state = active ? 'running' : complete?.data.status ?? 'interrupted'
-    return this.withVisibleInteractions({ runId, state, seq, ...(status ? { status } : {}), activities: [...activities.values()].slice(-30), ...(waiting ? { waiting } : {}), ...(interactions ? { interactions } : {}), ...(laneState ? { laneState } : {}), ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}), ...(complete ? { complete } : {}) }, active)
+    return this.withVisibleInteractions({ runId, state, seq, ...(trackedAdmission ? { admission: trackedAdmission } : {}), ...(status ? { status } : {}), activities: [...activities.values()].slice(-30), ...(waiting ? { waiting } : {}), ...(interactions ? { interactions } : {}), ...(laneState ? { laneState } : {}), ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}), ...(complete ? { complete } : {}) }, active)
   }
 
   private flushClient(client: SseClient, buffer: AssistantEvent[], clients: Set<SseClient>): void {
@@ -3275,13 +3532,24 @@ function enrichLanesFromSnapshot(runId: string, lanes: WebRunLanes, fact: Record
 
 function publicH5Event(event: AssistantEvent): WebRunEvent | undefined {
   const base = { ...(event.conversationId ? { conversationId: event.conversationId } : {}), runId: event.runId, seq: event.seq }
-  if (event.type === 'observation' && event.data && typeof event.data === 'object' && !Array.isArray(event.data) && event.data.kind === 'input_response') return { ...base, type: 'input_response', data: { messageId: String(event.data.messageId), text: String(event.data.text) } }
+  if (event.type === 'observation' && event.data && typeof event.data === 'object' && !Array.isArray(event.data) && event.data.kind === 'input_response') {
+    const { messageId, text, replyToId, steeringState, createdAt } = event.data
+    return { ...base, type: 'input_response', data: { messageId: String(messageId), text: String(text), ...(typeof replyToId === 'string' ? { replyToId } : {}), ...(typeof createdAt === 'string' ? { createdAt } : {}), ...(steeringState === 'pending' || steeringState === 'applied' || steeringState === 'not_applied' ? { steeringState } : {}) } }
+  }
+  if (event.type === 'status' && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
+    const data = event.data as Record<string, JsonValue>
+    const candidate = data.admission && typeof data.admission === 'object' && !Array.isArray(data.admission) ? data.admission as Record<string, JsonValue> : undefined
+    const phase = candidate && ['queued', 'starting', 'running', 'cancelling', 'quarantined'].includes(String(candidate.phase)) ? candidate.phase as import('../protocol.js').WebRunAdmission['phase'] : undefined
+    const admission = phase ? { phase, ...(typeof candidate?.position === 'number' && Number.isSafeInteger(candidate.position) && candidate.position > 0 ? { position: candidate.position } : {}), ...(typeof candidate?.queuedAt === 'number' && Number.isFinite(candidate.queuedAt) ? { queuedAt: candidate.queuedAt } : {}), ...(typeof candidate?.startedAt === 'number' && Number.isFinite(candidate.startedAt) ? { startedAt: candidate.startedAt } : {}) } : undefined
+    return { ...base, type: 'status', data: { kind: data.kind === 'context' ? 'context' : 'working', ...(typeof data.label === 'string' ? { label: data.label.slice(0, 160) } : {}), ...(admission ? { admission } : {}) } }
+  }
   if (event.type === 'text' && typeof event.data === 'string') return { ...base, type: 'text', activityId: `${event.runId}:answer`, data: event.data }
   if (event.type === 'notice' && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
     const kind = (event.data as Record<string, JsonValue>).kind
     if (kind === 'front_ack' || kind === 'task_progress') {
       const label = kind === 'task_progress' && typeof (event.data as Record<string, JsonValue>).text === 'string' ? String((event.data as Record<string, JsonValue>).text).slice(0, 140) : undefined
-      return { ...base, type: 'status', data: { kind: 'working', ...(label ? { label } : {}) } }
+      const health = kind === 'task_progress' ? (event.data as Record<string, JsonValue>).health as unknown as import('../run-presentation.js').RunHealth | undefined : undefined
+      return { ...base, type: 'status', data: { kind: 'working', ...(label ? { label: health?.execution === 'recovering' ? '正在诊断并尝试其他处理方式' : label } : {}), ...(health ? { health } : {}) } }
     }
     if (kind === 'context_compacted') return { ...base, type: 'status', data: { kind: 'context', label: '正在整理上下文' } }
     return undefined

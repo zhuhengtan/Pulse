@@ -5,7 +5,7 @@ import type { ComposerPayload } from './RichComposer.js'
 export type FollowupBehavior = 'queue' | 'immediate'
 export const followupStorageKey = 'pulse-web-followup-behavior'
 export function readFollowupBehavior(): FollowupBehavior {
-  try { return localStorage.getItem(followupStorageKey) === 'immediate' ? 'immediate' : 'queue' } catch { return 'queue' }
+  try { return localStorage.getItem(followupStorageKey) === 'queue' ? 'queue' : 'immediate' } catch { return 'immediate' }
 }
 export function saveFollowupBehavior(value: FollowupBehavior): void {
   localStorage.setItem(followupStorageKey, value)
@@ -80,8 +80,8 @@ export interface QueueAdapter {
   inspect(queue: ConversationQueue): Promise<QueueRunState>
   /** Clear a confirmed terminal busy marker only after the next message is allowed to send. */
   reconcile?(queue: ConversationQueue, runId: string): Promise<boolean>
-  send(queue: ConversationQueue, entry: QueueEntry): Promise<{ runId: string }>
-  accepted?(queue: ConversationQueue, entry: QueueEntry, runId: string): void
+  send(queue: ConversationQueue, entry: QueueEntry): Promise<{ runId: string; replyOnly?: true }>
+  accepted?(queue: ConversationQueue, entry: QueueEntry, runId: string, replyOnly?: true): void
 }
 export function queueAdapter(transport: PulseWebTransport, accepted?: QueueAdapter['accepted']): QueueAdapter {
   return {
@@ -246,10 +246,15 @@ export class MessageQueueController {
       const attempt = sending.entries.find(item => item.requestId === entry.requestId)!
       const receipt = await this.adapter.send(sending, attempt)
       await this.store.update(claim.key, queue => {
+        if (receipt.replyOnly) {
+          const { error: _error, ...rest } = queue!
+          return { ...rest, entries: rest.entries.filter(item => item.requestId !== entry.requestId) }
+        }
         const { error: _error, confirmedRunId: _confirmed, ...rest } = queue!
         return { ...rest, awaitingRunId: receipt.runId, entries: rest.entries.filter(item => item.requestId !== entry.requestId) }
       })
-      this.adapter.accepted?.(sending, attempt, receipt.runId)
+      if (receipt.replyOnly) this.adapter.accepted?.(sending, attempt, receipt.runId, true)
+      else this.adapter.accepted?.(sending, attempt, receipt.runId)
     } catch (error) {
       if (error instanceof ApiError && error.status === 409 && error.detail === 'CONVERSATION_BUSY') {
         await this.change(claim.conversationId, queue => ({ ...queue, entries: queue.entries.map(item => ({ ...item, sending: false })) }))

@@ -27,13 +27,14 @@ describe('fourth-round real trajectory regressions (offline)', () => {
     expect(requests[1].inputs.originalInstruction).toBe('x'.repeat(1990))
   })
 
-  it.each(['schema', 'invented-citation'])('retains an implemented file without replay or replanning when verifier fails (%s)', async mode => {
+  it.each(['schema', 'invented-citation'])('retains an implemented file when only verification allocation remains and the verifier fails (%s)', async mode => {
     let plans = 0, writes = 0, work = 0, reviews = 0, agentId = ''
-    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['fs.write'], approvalMode: 'auto', maxTurns: 64 })
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['fs.write'], approvalMode: 'auto', maxTurns: 64, modelBudgetView: () => ({ limit: 64, used: 8, workAllowed: reviews === 0, verificationAllowed: true, finalAllowed: true }) })
     const runtime = new PulseRuntime({ effectExecutor: async effect => {
       if (effect.kind === 'tool') { writes++; return { value: { path: 'greet.mjs', hash: 'a'.repeat(64), bytes: 24 } } }
       if (effect.key.startsWith('plan')) { plans++; return { value: { tasks: [{ id: 's', goal: 'Write greet.mjs', check: 'File contains greeting', criterionIds: ['c'], dependsOn: [] }] } } }
       if (effect.key.startsWith('verify-stage')) { reviews++; return { value: mode === 'schema' ? { status: 'fake transcript'.repeat(1000) } : { status: 'needs_work', evidenceRefs: ['result-151'], correctionKind: 'edit', note: 'Invented syntax failure' } } }
+      if (effect.key.startsWith('verify-task')) return { value: { criteria: [{ criterionId: 'c', status: 'unverifiable', evidenceRefs: [], rationale: 'The stage verifier remains unavailable.' }] } }
       work++
       return { value: work === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.write', input: { path: 'greet.mjs', content: 'export const greet = 1' } }] } : { text: 'Saved the greeting module.', finishReason: 'stop' } }
     } })
@@ -132,10 +133,10 @@ describe('fourth-round real trajectory regressions (offline)', () => {
     expect(planConfirmationOptions({ options: ['暂不执行', '执行'] })).toEqual({ defer: '暂不执行', execute: '执行' })
   })
 
-  it.each(['NO_PROGRESS', 'INVESTIGATION_LIMIT_REACHED', 'Verifier unusable (OUTPUT_SCHEMA_VIOLATION)', 'Verifier cited unavailable evidence'])('does not replan a stopped checkpoint: %s', note => {
+  it.each(['NO_PROGRESS', 'INVESTIGATION_LIMIT_REACHED', 'Verifier unusable (OUTPUT_SCHEMA_VIOLATION)', 'Verifier cited unavailable evidence'])('permits another method from a retained checkpoint: %s', note => {
     const state = initialController(64)
     state.tasks = [{ id: 's', goal: 'write file', check: 'file saved', criterionIds: ['c'], dependsOn: [], status: 'blocked', attempts: 1, evidenceRefs: ['real-ref'], note }]
-    expect(unmetGoalCanChangeApproach(state)).toBe(false)
+    expect(unmetGoalCanChangeApproach(state)).toBe(true)
     expect(state.tasks[0]?.evidenceRefs).toEqual(['real-ref'])
   })
 })

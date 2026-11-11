@@ -68,12 +68,15 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.os == 'Windows'
         with:
           targets: ${{ matrix.target }}
+      - uses: pnpm/action-setup@v4
+        with: { version: 12.4.2 }
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: node scripts/automation/build-desktop.mjs
         env:
           PULSE_DESKTOP_ARCH: ${{ matrix.arch }}
-          PULSE_DESKTOP_TARGET: ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.os }}-${{ matrix.arch }}
@@ -152,7 +155,7 @@ jobs:
           pattern: desktop-*
           path: packages/server/native
           merge-multiple: true
-      - run: chmod +x packages/server/native/*/pulse-desktop-helper packages/server/native/darwin-*/Pulse\ Desktop\ Helper.app/Contents/MacOS/PulseDesktopHelper
+      - run: chmod +x packages/server/native/*/agent-desktop packages/server/native/darwin-*/agent-desktop-macos-helper
       - uses: actions/download-artifact@v4
         with:
           name: windows-sandbox

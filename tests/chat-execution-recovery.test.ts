@@ -4,7 +4,6 @@ import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createLocalHost } from '../packages/server/src/index.js'
 import { prepareWorkspaceDependencies } from '../packages/server/src/h5/dependencies.js'
-import { isTaskContinuation } from '../packages/server/src/task.js'
 import { PulseRuntime, type LaneProgram } from '@hunterzhu/pulse-runtime'
 
 const roots: string[] = []
@@ -66,21 +65,14 @@ it('hands a local reviewer DENY to the user and resumes the approved assistant o
   } finally { await host.close() }
 })
 
-it('keeps original task criteria when the follow-up reports a missing plan', async () => {
+it('keeps original task criteria when the model routes a request to continue', async () => {
   const root = await directory(); const host = createLocalHost({ cwd: root, dataDir: join(root, 'data'), mockResponse: 'Pending' })
   try {
     const conversation = await host.createConversation()
     const first = await host.sendMessage(conversation.id, { text: '1. 修复审批\n2. 验证完整链路' }); await first.outcome()
-    const next = await host.sendMessage(conversation.id, { text: '没有计划文件啊' }); await next.outcome()
+    const next = await host.sendMessage(conversation.id, { text: 'Le plan manque. Reprends la tâche et ajoute-le.', workOperation: 'continue' }); await next.outcome()
     const record = JSON.parse(await readFile(join(root, 'data', 'conversations', conversation.id, 'runs', next.id, 'task-record.json'), 'utf8'))
     expect(record.objective).toBe('1. 修复审批\n2. 验证完整链路'); expect(record.continuedFromRunId).toBe(first.id)
-    const path = join(root, 'data', 'conversations', conversation.id, 'runs', next.id, 'task-record.json')
-    await writeFile(path, JSON.stringify({ ...record, objective: '没有计划文件啊', continuedFromRunId: undefined }))
-    const recovered = await host.sendMessage(conversation.id, { text: '继续' }); await recovered.outcome()
-    const restored = JSON.parse(await readFile(join(root, 'data', 'conversations', conversation.id, 'runs', recovered.id, 'task-record.json'), 'utf8'))
-    expect(restored.objective).toBe('1. 修复审批\n2. 验证完整链路')
-    expect(isTaskContinuation('新任务：写一份没有计划文件的说明')).toBe(false)
-    expect(isTaskContinuation('解释一下新的数据库方案')).toBe(false)
   } finally { await host.close() }
 })
 

@@ -33,7 +33,7 @@ it('requires a real rewrite despite dependency/import restrictions while retaini
 it.each(['legacy-baseline','metadata-only','post-fix-failure']as const)('does not run an unsolicited baseline in inventory or waive final tests: %s',async mode=>{
  const version=mode==='legacy-baseline'?'49':'50',testCalls:boolean[]=[],writes:string[]=[]
  let runtime:PulseRuntime,agentId='',metaTurns=0,fixTurns=0,fixed=false
- const current=()=>{const a=runtime.state.agents.get(agentId)!;return a.globalVersions.get(a.latestGlobalVersion)as any}
+ const current=(laneId?:string)=>{const a=runtime.state.agents.get(agentId)!;const global=a.globalVersions.get(a.latestGlobalVersion)as any;const chain=laneId?(runtime.state.lanes.get(laneId)?.context.state as any)?.taskControllerChain:undefined;return chain?{...global,taskController:chain}:global}
  const program=buildTaskControllerProgram({version,system:'test',toolNames:['fs.read','fs.write','shell.exec'],readOnlyToolNames:['fs.read'],approvalMode:'auto',maxTurns:32})
  runtime=new PulseRuntime({effectExecutor:async effect=>{
   const input=effect.input as any
@@ -46,7 +46,7 @@ it.each(['legacy-baseline','metadata-only','post-fix-failure']as const)('does no
   const refs=[...runtime.state.results.values()].filter(r=>r.producer?.kind==='effect'&&runtime.state.effects.get(r.producer.id)?.kind==='tool').map(r=>r.id)
   if(effect.key.startsWith('verify-stage'))return{value:{status:'passed',evidenceRefs:refs,note:'Stage contribution checked'}}
   if(effect.key.startsWith('verify-task'))return{value:{criteria:[{criterionId:'criterion-1',status:'passed',evidenceRefs:refs,rationale:'Optimistic model cannot waive actual test failure'}]}}
-  const task=current().taskController.tasks.find((t:any)=>t.id===current().taskController.activeId)
+  const state=current(effect.ownerLaneId).taskController;const task=state.tasks.find((t:any)=>t.id===state.activeId)
   let tool:any
   if(task.id==='metadata'){
    if(++metaTurns===1)tool={name:'shell.exec',input:{command:'node',args:['--test','test/price.test.mjs']}}
@@ -59,12 +59,12 @@ it.each(['legacy-baseline','metadata-only','post-fix-failure']as const)('does no
  }})
  agentId=runtime.createAgent({goal:'Fix src/price.mjs and pass the existing tests',program,initialGlobal:{taskRecord:{schemaVersion:1,runId:'metadata-boundary',objective:'Fix src/price.mjs and pass the existing tests',acceptanceCriteria:[{id:'criterion-1',description:'Fixed source and existing tests pass'}],status:'in_progress',replanCount:0,attempts:[],evidenceRefs:[],excludedRefs:[]}}}).agentId
  await runtime.start(agentId).outcome()
- expect(current().taskOutcome.status==='accepted').toBe(mode==='metadata-only')
- expect(testCalls).toEqual(mode==='legacy-baseline'?[false]:[true])
- expect(writes).toEqual(mode==='legacy-baseline'?[]:['src/price.mjs'])
+ expect(current().taskOutcome.status==='accepted').toBe(mode!=='post-fix-failure')
+ expect(testCalls.length).toBeGreaterThanOrEqual(1); expect(testCalls.every(fixed=>fixed)).toBe(true)
+ expect(writes).toEqual(['src/price.mjs'])
 })
 
-it.each(['38', '39'] as const)('restricts inventory mutations only for v39, preserving v%s restoration', async version => {
+it.each(['38', '39'] as const)('restricts inventory mutations under the current policy for obsolete label %s', async version => {
   let runtime: PulseRuntime, agentId = '', workCalls = 0
   const mutations: string[] = []
   const global = () => { const agent = runtime.state.agents.get(agentId)!; return agent.globalVersions.get(agent.latestGlobalVersion) as any }
@@ -88,5 +88,5 @@ it.each(['38', '39'] as const)('restricts inventory mutations only for v39, pres
   agentId = runtime.createAgent({ goal: 'Inspect existing workspace files', program, initialGlobal: { taskRecord: { schemaVersion: 1, runId: 'test', objective: 'Inspect existing workspace files', acceptanceCriteria: [{ id: 'criterion-1', description: 'Inspect current entries' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } } }).agentId
   expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
   expect(global().taskOutcome.status).toBe('accepted')
-  expect(mutations).toEqual(version === '39' ? [] : ['fs.write', 'shell.exec'])
+  expect(mutations).toEqual([])
 })

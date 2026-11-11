@@ -12,7 +12,7 @@ export async function approvalReuseIdentity(input: {
   reviewer: unknown; manifest: ToolManifest | undefined
 }): Promise<string | undefined> {
   const { runtime, effect, manifest } = input
-  if (!runtime || input.mode !== 'auto' || input.manuallyApproved || runtime.state.lanes.get(effect.ownerLaneId)?.resume.programVersion !== '57' || !['write', 'external'].includes(manifest?.sideEffectPolicy ?? '') || /^(?:image|video|audio)\.|^shell\.(?:start|cancel)$/.test(input.name)) return undefined
+  if (!runtime || input.mode !== 'auto' || input.manuallyApproved || !['57', '58'].includes(String(runtime.state.lanes.get(effect.ownerLaneId)?.resume.programVersion)) || !['write', 'external'].includes(manifest?.sideEffectPolicy ?? '') || /^(?:image|video|audio)\.|^shell\.(?:start|cancel)$/.test(input.name)) return undefined
   if (manifest?.sideEffectPolicy === 'external' && input.name !== 'shell.exec') return undefined
   if (input.name === 'shell.exec' && !await isNecessaryVerification(input.workspace, input.args, input.intent)) return undefined
   // An unknown workspace or dependency set cannot establish an unchanged authority.

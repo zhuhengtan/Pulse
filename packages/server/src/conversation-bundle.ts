@@ -282,7 +282,9 @@ export async function stageConversationBundle(input: AsyncIterable<Buffer | stri
     await extractZip(archive, content)
     if ((await stat(join(content, 'bundle.json'))).size > MAX_METADATA) fail('BUNDLE_INVALID_MANIFEST')
     const metadata = metadataSchema.parse(JSON.parse(await readFile(join(content, 'bundle.json'), 'utf8')))
-    const manifest = transferManifestSchema.parse(JSON.parse(await readFile(join(content, 'conversation/manifest.json'), 'utf8')))
+    const rawManifest = JSON.parse(await readFile(join(content, 'conversation/manifest.json'), 'utf8'))
+    if (rawManifest.selfHostFileHistoryRequired || rawManifest.selfHostFileHistory || rawManifest.selfHostFileHistoryClosed) fail('SELF_HOST_HISTORY_NOT_PORTABLE')
+    const manifest = transferManifestSchema.parse(rawManifest)
     if (manifest.id !== metadata.conversationId || manifest.cwd !== metadata.source.cwd || (manifest.executionCwd ?? manifest.cwd) !== metadata.source.executionCwd) fail('BUNDLE_INVALID_MANIFEST')
     const paths = await safeTree(content), listed = new Set<string>(['bundle.json'])
     let total = 0

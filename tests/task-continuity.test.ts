@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createLocalHost } from '@hunterzhu/pulse-server'
-import { continueTaskRecord, isInterruptedTaskContinuation, isTaskContinuation, taskRecordFromGlobal } from '../packages/server/src/task.js'
+import { continueTaskRecord, taskRecordFromGlobal } from '../packages/server/src/task.js'
 
 describe('durable task continuity', () => {
   it.each(['explicit', 'interrupted'] as const)('keeps one call allowance across new-controller continuation and cold host restart: %s', async mode => {
@@ -15,7 +15,7 @@ describe('durable task continuity', () => {
       const first = await host.sendMessage(conversation.id, { text: 'Create and verify a report.' }); await first.outcome()
       const firstCalls = (await first.usage()).modelCalls
       await host.close(); host = createLocalHost(options)
-      const next = await host.sendMessage(conversation.id, mode === 'explicit' ? { text: '继续', continueTask: true } : { text: '刚才运行在中途被中断了。请先检查工作区里哪些阶段产物已经生成，切勿破坏已完成的文件，继续把剩余未完成的任务全部完成。' }); await next.outcome()
+      const next = await host.sendMessage(conversation.id, mode === 'explicit' ? { text: '继续', continueTask: true } : { text: 'Der letzte Lauf wurde unterbrochen. Bitte erledige nur, was noch offen ist.', workOperation: 'continue' }); await next.outcome()
       const nextCalls = (await next.usage()).modelCalls
       expect(firstCalls + nextCalls).toBeLessThanOrEqual(4)
       const budget = JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', next.id, 'model-budget.json'), 'utf8'))
@@ -36,7 +36,7 @@ describe('durable task continuity', () => {
       await initial.outcome()
       await host.close()
       host = createLocalHost(options)
-      const next = await host.sendMessage(conversation.id, { text: '继续，这轮只完成 A' })
+      const next = await host.sendMessage(conversation.id, { text: 'Continúa con A solamente por ahora.', workOperation: 'continue' })
       await next.outcome()
       expect((await next.taskOutcome())?.status).not.toBe('accepted')
       const record = JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', next.id, 'task-record.json'), 'utf8'))
@@ -59,11 +59,6 @@ describe('durable task continuity', () => {
     expect(next.attempts).toEqual([])
     expect(next.replanCount).toBe(0)
     expect(next.objective).toBe('A')
-    expect(isTaskContinuation('继续之前的优化')).toBe(true)
-    expect(isTaskContinuation('为什么没有继续？')).toBe(false)
-    expect(isInterruptedTaskContinuation('新任务：上次程序中断，新增继续任务功能')).toBe(false)
-    expect(isInterruptedTaskContinuation('刚才任务中断了，不要继续剩余工作')).toBe(false)
-    expect(isInterruptedTaskContinuation('The previous task was interrupted. Resume the remaining work.')).toBe(true)
   })
 
   it('continues correctable items even when a different criterion is blocked', async () => {

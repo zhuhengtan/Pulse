@@ -21,7 +21,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const streaming = params.onObservation !== undefined
     const maxTokens = params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096
     const lowered = lowerProjectionToCanonical({ ...params, model: params.model ?? this.config.defaultModel, maxOutputTokens: maxTokens, toolChoice: this.config.toolChoice, stream: streaming })
-    const effort = params.reasoningEffort ?? this.config.reasoningEffort
+    const effort = params.ignoreConfiguredReasoning ? params.reasoningEffort : params.reasoningEffort ?? this.config.reasoningEffort
     const strict = params.strictReasoning === true && effort !== undefined
     const model = lowered.canonical.model ?? ''
     const capability = resolveModelCapability(model, 'anthropic', this.config.capabilityProfile, this.config.baseURL)

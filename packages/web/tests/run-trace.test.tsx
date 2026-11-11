@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { emptyTrace, PersistedRunTrace, reduceTrace, RunTraceView, traceDuration } from '../src/RunTrace.js'
+import { emptyTrace, PersistedRunTrace, reduceTrace, RunTraceView, traceDuration, type TraceState } from '../src/RunTrace.js'
 import { PulseApp } from './RouterApp.js'
 import { PulseDesignSystem } from '../src/PulseDesignSystem.js'
 import type { PulseWebTransport, WebRunEvent } from '../src/transport.js'
@@ -10,6 +10,13 @@ beforeAll(() => {
   Object.defineProperty(window, 'matchMedia', { value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }), configurable: true })
   Element.prototype.scrollTo = vi.fn()
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+})
+
+it('keeps accepted health after recovery completion and a late status replay', () => {
+  const recovering: WebRunEvent = { type: 'status', runId: 'recovery', seq: 1, data: { kind: 'working', health: { execution: 'recovering', acceptance: 'pending', environment: 'recovering', recoveryAttempts: 1, reason: 'PROVIDER_NETWORK_ERROR', nextAction: 'alternate-provider' } } }
+  const finished = reduceTrace(reduceTrace(emptyTrace, recovering), { type: 'complete', runId: 'recovery', seq: 2, data: { status: 'succeeded', taskOutcome: { status: 'accepted' } } })
+  expect(finished.health).toEqual({ execution: 'finished', acceptance: 'accepted', environment: 'unknown', recoveryAttempts: 1 })
+  expect(reduceTrace(finished, { ...recovering, seq: 3 }).health).toEqual(finished.health)
 })
 
 it.each([
@@ -310,6 +317,23 @@ it('folds public progress prose and tool summaries after completion, retaining i
   expect(view.queryByText('4 tests passed')).toBeNull()
   fireEvent.click(view.getByRole('button', { name: /执行 pnpm test/ }))
   expect(view.getByText('4 tests passed')).toBeTruthy()
+})
+
+it.each([true, false])('interleaves public output and tools with thoughts without duplicating notes (compact=%s)', compact => {
+ const trace: TraceState = { order:['main'],lanes:{main:{id:'main',label:'主任务',status:'running',steps:[
+  {id:'first',kind:'llm',modelId:'fixture',task:'reason',reasoning:'第一步思考',note:'第一步输出'},
+  {id:'read',kind:'tool',tool:'fs.read',status:'succeeded',args:{path:'first.ts'}},
+  {id:'empty',kind:'llm',modelId:'fixture',task:'verify'},
+  {id:'next',kind:'llm',modelId:'fixture',task:'reason',reasoning:'下一步思考',note:'下一步输出'},
+  {id:'search',kind:'tool',tool:'fs.search',status:'succeeded',args:{query:'next'}},
+ ]}}}
+ const view=render(<RunTraceView trace={trace} running compact={compact}/>)
+ fireEvent.click(screen.getByRole('button',{name:/执行过程/}))
+ const timeline=view.container.querySelector('.trace-lane-body > .run-progress')!
+ expect(Array.from(timeline.children).map(element=>element.classList.contains('trace-llm')?'thought':element.classList.contains('progress-note')?'note':'tools')).toEqual(['thought','note','tools','thought','thought','note','tools'])
+ expect(screen.getAllByText('第一步输出')).toHaveLength(1)
+ expect(screen.getAllByText('下一步输出')).toHaveLength(1)
+ expect(screen.getByRole('button',{name:/思考 · 验证/})).toHaveProperty('disabled',true)
 })
 
 it('folds process details while keeping the terminal failure visible', () => {

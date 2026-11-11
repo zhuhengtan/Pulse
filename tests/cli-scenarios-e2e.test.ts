@@ -2,7 +2,7 @@ import { readConversationFixture } from './conversation-fixtures.js'
 import { describe, expect, it, afterEach } from 'vitest'
 import { spawn } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -22,6 +22,16 @@ interface RunResult {
   signal: NodeJS.Signals | null
   stdout: string
   stderr: string
+}
+
+async function persistedRunInputs(dataDir: string): Promise<string> {
+  const conversations = await readdir(join(dataDir, 'conversations')).catch(() => [] as string[])
+  const texts: string[] = []
+  for (const conversation of conversations) {
+    const runs = await readdir(join(dataDir, 'conversations', conversation, 'runs')).catch(() => [] as string[])
+    for (const run of runs) texts.push(await readFile(join(dataDir, 'conversations', conversation, 'runs', run, 'input.json'), 'utf8').catch(() => ''))
+  }
+  return texts.join('\n')
 }
 
 function runCli(
@@ -225,7 +235,9 @@ describe('AI CLI scenarios end-to-end tests', () => {
       '--mock-tool-calls',
       JSON.stringify([{ name: 'fs.write', input: { path: 'readonly.txt', content: 'readonly-content' } }]),
     ])
-    expect(readonlyRes.code).toBe(0)
+    expect(readonlyRes.code).toBe(1)
+    expect(readonlyRes.stdout).toContain('[复核暂不可用，已保留工作结果]')
+    expect(readonlyRes.stderr).toContain('Read-only mode cannot execute fs.write.')
     await expect(readFile(readonlyFile, 'utf8')).rejects.toThrow()
   // Three separate cold CLI processes; this verifies policy, not a 10-second SLA.
   }, process.platform === 'win32' ? 180_000 : 30_000)
@@ -368,24 +380,59 @@ describe('AI CLI scenarios end-to-end tests', () => {
     expect(pipedOnlyRes.stdout).toContain('Task executed completely from stdin pipe!')
     expect(pipedOnlyRes.stdout).toContain('[任务验收通过]')
 
-    // 2. Positional task combined with stdin content
+    // 2. A pure single-line explanation is accepted without file evidence
+    const explainRes = await runCli([
+      'run',
+      'Explain this snippet',
+      '--data-dir',
+      dataDir,
+      '--cwd',
+      directory,
+      '--mock-response',
+      'This snippet declares two constants.',
+    ], { cwd: directory, input: '' })
+    expect(explainRes.code).toBe(0)
+    expect(explainRes.stdout).toContain('[任务验收通过]')
+
+    // 3. Positional task plus stdin: both parts reach the persisted run input. The text becomes two
+    // acceptance criteria and the default mock assesses only one, so acceptance is correctly not granted.
     const combinedRes = await runCli([
       'run',
-      'Refactor function',
+      'Explain the piped snippet',
+      '--data-dir',
+      dataDir,
+      '--cwd',
+      directory,
+      '--mock-response',
+      'This snippet declares two constants.',
+    ], {
+      cwd: directory,
+      input: 'const a = 1; const b = 2;\n',
+    })
+    expect(combinedRes.code).toBe(1)
+    expect(combinedRes.stdout).toContain('This snippet declares two constants.')
+    expect(combinedRes.stdout).not.toContain('[任务验收通过]')
+    const persisted = await persistedRunInputs(dataDir)
+    expect(persisted).toContain('Explain the piped snippet')
+    expect(persisted).toContain('const a = 1; const b = 2;')
+
+    // 4. Claiming a write without a file receipt cannot pass acceptance
+    const claimedRes = await runCli([
+      'run',
+      'Write the snippet to out.txt',
       '--data-dir',
       dataDir,
       '--cwd',
       directory,
       '--mock-response',
       'Refactored with extra piped context!',
-    ], {
-      cwd: directory,
-      input: 'const a = 1; const b = 2;\n',
-    })
-    expect(combinedRes.code).toBe(0)
-    expect(combinedRes.stdout).toContain('Refactored with extra piped context!')
-    expect(combinedRes.stdout).toContain('[任务验收通过]')
-  })
+    ], { cwd: directory, input: '' })
+    expect(claimedRes.code).toBe(1)
+    expect(claimedRes.stdout).toContain('Refactored with extra piped context!')
+    expect(claimedRes.stdout).toContain('[复核暂不可用，已保留工作结果]')
+    expect(claimedRes.stdout).not.toContain('[任务验收通过]')
+    await expect(readFile(join(directory, 'out.txt'), 'utf8')).rejects.toThrow()
+  }, 30_000)
 
   it('Scenario 8: Staged multi-chunk file operations provide durable writing', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-stage-'))
@@ -586,6 +633,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
       '--format',
       'jsonl',
       '--auto-approve',
+      '--max-model-calls', '16',
       '--mock-parallel-plan',
       JSON.stringify(parallelPlan),
       '--mock-stage-assessment',
@@ -606,7 +654,8 @@ describe('AI CLI scenarios end-to-end tests', () => {
     const progressNotices = lines.filter((l) => l.type === 'notice' && l.data?.kind === 'task_progress')
     expect(progressNotices.length).toBeGreaterThan(0)
     const lastProgress = progressNotices[progressNotices.length - 1]
-    const tasks = lastProgress.data.tasks
+    const initialBlocked = [...progressNotices].reverse().find((notice: any) => notice.data.tasks.some((task: any) => task.id === 'stage-1' && task.status === 'blocked'))
+    const tasks = initialBlocked.data.tasks
     const stage1 = tasks.find((t: any) => t.id === 'stage-1')
     const stage2 = tasks.find((t: any) => t.id === 'stage-2')
     expect(stage1.status).toBe('blocked')

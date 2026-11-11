@@ -58,7 +58,7 @@ it.each(['recovered', 'malformed', 'ungrounded', 'long-reasoning', 'exhausted', 
     const savedReviews = await Promise.all((await readdir(reviewDir)).map(async f => JSON.parse(await readFile(join(reviewDir, f), 'utf8'))))
     expect(offered, JSON.stringify({ reviews, turns, outcome, savedReviews })).toBe(passed ? 1 : 0)
     expect(reviews).toBe(['recovered', 'malformed', 'ungrounded', 'exhausted'].includes(mode) ? 2 : 1)
-    expect(reviewBudgets).toEqual(Array(reviews).fill(16384))
+    expect(reviewBudgets).toEqual(Array.from({ length: reviews }, (_, i) => i === 0 ? 8192 : 16384))
     for (const body of retryPrompts) { expect(body).toContain('Independently review the ENTIRE supplied saved document again'); expect(body).not.toContain('minimal fs.apply_patch') }
     expect(await readFile(join(cwd, 'docs/plans/greeting.md'), 'utf8')).toBe(plan)
     expect(await readFile(join(cwd, 'greeting.txt'), 'utf8').catch(() => null)).toBeNull()
@@ -82,16 +82,16 @@ it.each(['recovered', 'malformed', 'ungrounded', 'long-reasoning', 'exhausted', 
 it('uses the independently configured reviewer while preserving work model settings and total accounting', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-independent-plan-review-'))
   let work = 0, reviews = 0, safety = 0
+  const reviewSettings: unknown[] = []
   const reply = (message: object) => Response.json({ choices: [{ message, finish_reason: 'tool_calls' in message ? 'tool_calls' : 'stop' }] })
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
     const body = String(init.body), request = JSON.parse(body)
     if (planReviewRequest(body)) {
-      reviews++; expect(request.model).toBe('independent-fixture'); expect(request.reasoning_effort).toBe('none')
-      expect(request.max_tokens ?? request.max_completion_tokens).toBe(16384)
+      reviews++; reviewSettings.push({ model: request.model, effort: request.reasoning_effort, output: request.max_tokens ?? request.max_completion_tokens })
       return reply(consistentPlanReview(body)!)
     }
     if (request.model === 'independent-fixture') { safety++; return reply({ content: 'APPROVE' }) }
-    expect(request.model).toBe('work-fixture'); expect(request.reasoning_effort).toBe('high')
+    expect(request.model).toBe('work-fixture'); expect(request.reasoning_effort).toBe(body.includes('Assess whether the candidate') ? 'low' : 'high')
     work++
     if (work > 2) return reply({ content: 'Plan retained; implementation awaits approval.' })
     return reply({ content: '', tool_calls: [{ id: `work-${work}`, function: { name: work === 1 ? 'plan_write' : 'ask_choice', arguments: JSON.stringify(work === 1 ? { path: 'docs/plans/feature.md', content: '# Plan\nImplement greeting.txt and test its behavior after explicit user execution approval.\n' } : { prompt: '执行已保存方案？', options: [{ label: '暂不执行', value: 'hold' }, { label: '执行', value: 'execute' }] }) } }] })
@@ -101,6 +101,7 @@ it('uses the independently configured reviewer while preserving work model setti
     const c = await host.createConversation(), run = await host.sendMessage(c.id, { text: '先写方案，确认后再实现 greeting.txt。' })
     for await (const e of run.events) if (e.type === 'waiting') await run.reply(String(e.data!.effectId), { value: 'hold' })
     expect(await run.outcome()).toMatchObject({ status: 'succeeded' })
+    expect(reviewSettings).toEqual([{ model: 'independent-fixture', effort: 'low', output: 8192 }])
     expect(reviews).toBe(1)
     const budget = JSON.parse(await readFile(join(cwd, 'data/conversations', c.id, 'runs', run.id, 'model-budget.json'), 'utf8'))
     expect(budget.used).toBe(work + reviews + safety)

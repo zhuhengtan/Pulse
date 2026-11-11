@@ -88,7 +88,7 @@ export function useRun({
       let streamedAttemptId: string | undefined;
       let lastProgressText = '';
       const addProgress = (key: string, text: string) => {
-        if (!text || text === lastProgressText) return;
+        if (run.replyOnly || !text || text === lastProgressText) return;
         lastProgressText = text;
         addAssistantMessage({
           // One live activity cell is updated in place, like Codex/Claude's
@@ -116,7 +116,8 @@ export function useRun({
           if (text) {
             if (data.kind === 'task_progress') {
               const tasks = Array.isArray(data.tasks) ? data.tasks : [];
-              const visibleText = tasks.length === 0 ? '正在理解需求并规划执行步骤…' : text;
+              const health = data.health && typeof data.health === 'object' ? data.health as Record<string, unknown> : undefined;
+              const visibleText = health?.execution === 'recovering' ? '正在诊断并尝试其他处理方式…' : tasks.length === 0 ? '正在理解需求并规划执行步骤…' : text;
               setCurrentStep(visibleText);
               const active = tasks.find((task) => task && typeof task === 'object' && ['running', 'verifying'].includes(String((task as Record<string, unknown>).status))) as Record<string, unknown> | undefined;
               const stageKey = active ? `${String(active.id)}:${String(active.status)}:${String(active.goal)}` : visibleText.replace(/\s*[·|]\s*(阶段调用|stage calls)\s*\d+.*$/i, '');
@@ -130,6 +131,13 @@ export function useRun({
               text,
               createdAt: new Date().toISOString(),
             });
+          }
+          continue;
+        }
+        if (event.type === 'observation' && event.data && typeof event.data === 'object' && !Array.isArray(event.data) && event.data.kind === 'input_response') {
+          const { messageId, text, createdAt } = event.data;
+          if (typeof messageId === 'string' && typeof text === 'string' && text) {
+            addAssistantMessage({ id: messageId, role: 'assistant', text, createdAt: typeof createdAt === 'string' ? createdAt : new Date().toISOString(), runId: run.id });
           }
           continue;
         }
@@ -373,10 +381,10 @@ export function useRun({
       }
       setIsRunning(true);
       setError(null);
-      setCurrentStep('正在理解你的需求并安排执行步骤…');
+      setCurrentStep('正在理解这条消息…');
 
       try {
-        const run = await host.sendMessage(activeConversationId, { text });
+        const run = await host.sendWorkTurn(activeConversationId, { text });
         await consumeRun(run);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));

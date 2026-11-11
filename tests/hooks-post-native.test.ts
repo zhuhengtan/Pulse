@@ -16,6 +16,35 @@ it('keeps post failure observational and does not repeat the underlying side eff
     await f.service.stop();
     expect(await readFile(join(f.journal, (await readdir(f.journal))[0]!), 'utf8')).toContain('diagnostic');
 }, nativeTimeout(1, 10000));
+it('runs a post hook snapshot nested inside its readonly workspace', async () => {
+    const f = await fixture('{}', ['PostToolUse']);
+    const secret = join(f.base, 'parent-secret.txt');
+    await writeFile(secret, 'outside workspace');
+    await writeFile(join(f.base, 'source/hook.cjs'), `
+        const fs = require('node:fs');
+        let data = '';
+        process.stdin.on('data', chunk => data += chunk);
+        process.stdin.on('end', () => {
+            const denied = (action) => { try { action(); return false } catch { return true } };
+            if (JSON.parse(data).hook_event_name !== 'PostToolUse'
+                || fs.readFileSync('a.txt', 'utf8') !== 'hello'
+                || !denied(() => fs.writeFileSync('a.txt', 'changed'))
+                || !denied(() => fs.writeFileSync(__dirname + '/forbidden.txt', 'changed'))
+                || !denied(() => fs.readFileSync(${JSON.stringify(secret)}))) process.exit(3);
+            process.stdout.write('{}');
+        });
+    `);
+    const snapshot = await loadHookDefinitions(f.file, join(f.root, 'nested', 'installed'));
+    const service = openService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, snapshot, { ...snapshot, enabled: true });
+    const execute = vi.fn(async () => ({ status: 'succeeded' as const, value: 'once', sideEffectState: 'applied' as const }));
+    expect(await service.around(effect(), signal(), undefined, execute)).toMatchObject({ status: 'succeeded', sideEffectState: 'applied' });
+    await service.stop();
+    expect(execute).toHaveBeenCalledTimes(1);
+    const receipts = await Promise.all((await readdir(f.journal)).map(p => readFile(join(f.journal, p), 'utf8').then(JSON.parse)));
+    expect(receipts).toEqual([expect.objectContaining({ event: 'PostToolUse', status: 'continue' })]);
+    expect(await readFile(join(f.root, 'a.txt'), 'utf8')).toBe('hello');
+    expect(await readFile(secret, 'utf8')).toBe('outside workspace');
+}, nativeTimeout(1, 30000));
 it('slow post observers cannot delay applied tool settlement and dispose drains owned scripts', async () => {
     const f=await fixture('{}',['PostToolUse']);
     await writeFile(join(f.base,'source/hook.cjs'),'process.stdin.resume();setTimeout(()=>process.stdout.write("{}"),5000)');

@@ -21,20 +21,20 @@ it('same-build and legacy preflight do not grant a build migration', () => {
  const same = describeRunRecovery('c','r','b',{build:'b',policy:'p'},'p')
  expect(same.status).toBe('ready'); expect(recoveryDecision(same,{})).toBeUndefined()
  expect(describeRunRecovery('c','r','b').status).toBe('ready')
- expect(() => recoveryDecision(same,{recovery:{confirmed:true}})).toThrow('STALE')
+ expect(recoveryDecision(same,{recovery:{confirmed:true}})).toBeUndefined()
 })
-it('requires explicit confirmation of this exact run and both full build identities', () => {
- const p = preflight(); expect(p.status).toBe('confirmation-required'); expect(p.toolCheck).toBe('on-resume')
- for (const body of [{},{recovery:{...p,confirmed:false}},{recovery:{...p,confirmed:'true'}}]) expect(() => recoveryDecision(p,body)).toThrow('MIGRATION_REQUIRED')
- expect(recoveryDecision(p,{recovery:{runId:p.runId,from:p.from,to:p.to,confirmed:true}})).toEqual({runId:p.runId,from:p.from,to:p.to})
- for (const key of ['runId','from','to']) expect(() => recoveryDecision(p,{recovery:{runId:p.runId,from:p.from,to:p.to,confirmed:true,[key]:'changed'}})).toThrow('STALE')
+it('diagnoses a build update without a confirmation or authorization grant', () => {
+ const p = preflight(); expect(p.status).toBe('ready'); expect(p.toolCheck).toBe('on-resume')
+ expect(p.from).toBe('a'.repeat(64)); expect(p.to).toBe('b'.repeat(64))
+ expect(recoveryDecision(p,{})).toBeUndefined()
+ expect(recoveryDecision(p,{recovery:{confirmed:true}})).toBeUndefined()
 })
 it('policy and missing/occupied snapshots remain blockers even with build confirmation', () => {
  for (const blocker of ['RECOVERY_SNAPSHOT_MISSING','RUN_NOT_INTERRUPTED','RECOVERY_FORMAT_CONFLICT']) {
   const p = describeRunRecovery('c','r','to',undefined,undefined,[blocker]); expect(p.status).toBe('blocked'); expect(() => recoveryDecision(p,{recovery:{confirmed:true}})).toThrow(blocker)
  }
  const p=describeRunRecovery('c','r','to',{build:'from',policy:'old'},'new')
- expect(p.blockers).toEqual(['RECOVERY_POLICY_INCOMPATIBLE']); expect(() => recoveryDecision(p,{recovery:{confirmed:true}})).toThrow('POLICY')
+ expect(p.blockers).toEqual([]); expect(p.status).toBe('ready'); expect(recoveryDecision(p,{})).toBeUndefined()
 })
 it('publishes real progress read by a new manager and a separate Node process without a download', async () => {
  const root=await temporary(), dataDir=join(root,'data'), id=randomUUID(), state={...initialState(),phase:'downloading' as const,downloadId:id}

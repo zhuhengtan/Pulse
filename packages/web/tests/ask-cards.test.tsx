@@ -5,6 +5,20 @@ import { InteractionPanel, type PendingInteraction } from '../src/InteractionPan
 beforeAll(() => { vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} }); window.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList })
 afterEach(() => { cleanup(); localStorage.clear() })
 const question = (type = 'choice'): PendingInteraction => ({ kind: 'interaction', interactionKind: 'ask', runId: 'run-1', groupId: 'group-1', items: [{ effectId: 'q1', input: { type, prompt: '请审阅已保存的计划 docs/plans/feature.md，是否执行？', options: [{ label: '暂不执行', value: 'defer' }, { label: '执行', value: 'execute' }], min: 1 } }] })
+it.each([['继续', 'continue'], ['暂不继续', 'stop']])('requires an explicit capacity decision in delegated mode (%s)', async (label, value) => {
+  const submit = vi.fn(async () => true)
+  const interaction = question()
+  interaction.items[0]!.input = { kind: 'ask', type: 'choice', prompt: '已达到本轮上下文容量，是否继续？', context: '任务已暂停，已完成的操作和文件会保留。', options: [{ label: '继续', value: 'continue' }, { label: '暂不继续', value: 'stop' }] }
+  const view = render(<InteractionPanel interaction={interaction} reviewNote="" delegated submit={submit}/>)
+  expect(view.getByText('已达到本轮上下文容量，是否继续？')).toBeTruthy()
+  expect(view.getByRole('button', { name: '提交回答' }).hasAttribute('disabled')).toBe(true)
+  expect(submit).not.toHaveBeenCalled()
+  fireEvent.click(view.getByRole('button', { name: label }))
+  expect(submit).not.toHaveBeenCalled()
+  fireEvent.click(view.getByRole('button', { name: '提交回答' }))
+  await waitFor(() => expect(submit).toHaveBeenCalledWith([{ effectId: 'q1', value: { value } }]))
+  expect(submit).toHaveBeenCalledTimes(1)
+})
 it.each(['choice', 'multi'])('shows the %s custom answer below the choices without a disclosure', type => {
   const view = render(<InteractionPanel interaction={question(type)} reviewNote="" delegated={false} submit={async () => true}/>)
   expect(view.getByRole('textbox', { name: '自行回答' })).toBeTruthy()

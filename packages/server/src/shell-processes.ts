@@ -5,13 +5,14 @@ import { join } from 'node:path'
 import type { ToolContext } from '@hunterzhu/pulse-tool-sdk'
 import { replaceStateFile } from './atomic-file.js'
 
-export interface ShellCommand { command: string; args?: string[] | undefined; cwd?: string | undefined; timeoutMs?: number | undefined; pty?: boolean | undefined }
+export interface ShellCommand { command: string; args?: string[] | undefined; cwd?: string | undefined; timeoutMs?: number | undefined; pty?: boolean | undefined; lifetime?: 'command' | 'service' | undefined }
 export interface ProcessReceipt {
   processId: string
   agentId: string
   laneId: string
   status: 'running' | 'exited' | 'unknown'
   command: ShellCommand
+  startedAt?: number
   result?: Record<string, unknown>
   error?: string
   stdinReady?: boolean
@@ -38,17 +39,17 @@ const failure = (code: string) => Object.assign(new Error(code), { code, retryab
 
 /** Only the persisted continuous program blocks acceptance on a live or unknown shell. */
 export function shellAcceptanceGate(programVersion: string | undefined): boolean {
-  return programVersion === '57'
+  return programVersion === '57' || programVersion === '58'
 }
 
-export async function blockAcceptanceIfShellBusy(programVersion: string | undefined, runDirectory: string | undefined): Promise<void> {
+export async function blockAcceptanceIfShellBusy(programVersion: string | undefined, runDirectory: string | undefined, readyServices: ReadonlySet<string> = new Set()): Promise<void> {
   if (!shellAcceptanceGate(programVersion)) {
     if (!runDirectory) return
     const input = JSON.parse(await readFile(join(runDirectory, 'input.json'), 'utf8').catch(error => { if (error.code === 'ENOENT') return '{}'; throw error })) as { shellSurfaceVersion?: unknown }
     if (input.shellSurfaceVersion !== 1) return
   }
   if (!runDirectory) throw failure('SHELL_PROCESS_STATE_UNKNOWN')
-  await shellProcesses(runDirectory).assertIdle()
+  await shellProcesses(runDirectory).assertIdle(readyServices)
 }
 
 /** Keep cursors and status visible even when the original command receipt is large. */
@@ -62,6 +63,8 @@ export function summarizeShellProcess(value: unknown): Record<string, unknown> {
   }
   return {
     processId: record.processId, status: record.status,
+    ...(typeof record.startedAt === 'number' ? { startedAt: record.startedAt } : {}),
+    ...(record.command?.timeoutMs === undefined ? {} : { timeoutMs: record.command.timeoutMs }),
     ...(typeof record.agentId === 'string' ? { agentId: record.agentId } : {}),
     ...(typeof record.laneId === 'string' ? { laneId: record.laneId } : {}),
     ...(typeof record.stdinReady === 'boolean' ? { stdinReady: record.stdinReady, inputUncertain: record.inputUncertain === true } : {}),
@@ -105,7 +108,7 @@ export class ShellProcesses {
     // A PID from another process lifetime is not authority to poll, kill or restart it.
     return record.status === 'running' && !this.live.has(id) ? { ...record, status: 'unknown' } : record
   }
-  async assertIdle(): Promise<void> {
+  async assertIdle(readyServices: ReadonlySet<string> = new Set()): Promise<void> {
     for (const file of await readdir(this.directory).catch(error => { if (error.code === 'ENOENT') return []; throw error })) {
       if (/^stdin-[a-f0-9]{64}\.json$/.test(file)) {
         const receipt = JSON.parse(await readFile(join(this.directory, file), 'utf8')) as ShellInputReceipt
@@ -114,6 +117,7 @@ export class ShellProcesses {
       }
       if (!/^[a-f0-9]{64}\.json$/.test(file)) continue
       const id = file.slice(0, -5), record = this.live.get(id)?.record ?? await this.saved(id)
+      if (record.status === 'running' && this.live.has(id) && readyServices.has(id) && record.command.lifetime === 'service') continue
       if (record.status === 'running' || record.status === 'unknown') throw failure(this.live.has(id) ? 'SHELL_PROCESS_ACTIVE' : 'SHELL_PROCESS_STATE_UNKNOWN')
     }
   }
@@ -134,7 +138,7 @@ export class ShellProcesses {
       return old
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     await this.assertIdle()
-    const record: ProcessReceipt = { processId, agentId: context.agentId, laneId: context.laneId, status: 'running', command }
+    const record: ProcessReceipt = { processId, agentId: context.agentId, laneId: context.laneId, status: 'running', command, startedAt: Date.now() }
     // Commit intent before invoking the runner; uncertain intent is never replayed.
     await this.persist(record)
     const controller = new AbortController()

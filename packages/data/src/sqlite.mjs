@@ -2,28 +2,56 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
 const contentHash = (text) => createHash('sha256').update(text).digest('hex');
-import { mkdirSync, chmodSync } from 'node:fs';
+import { mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 export const schemaVersion = 1;
 export class ConversationDatabase {
     constructor(dataDir, readOnly = false) {
+        const file = join(dataDir, 'pulse.sqlite');
+        const validate = db => {
+            const version = Number(db.prepare('PRAGMA user_version').get().user_version);
+            const empty = version === 0 && !db.prepare('SELECT 1 FROM sqlite_master LIMIT 1').get();
+            if (version !== schemaVersion && (readOnly || !empty))
+                throw new Error('DATA_SCHEMA_INCOMPATIBLE');
+        };
+        // A writable open can recover a hot journal or checkpoint retained WAL
+        // even when our own code never writes. Probe existing files read-only.
+        // If recovery is required, fail closed and leave it to a compatible tool.
+        if (!readOnly && existsSync(file)) {
+            const probe = new DatabaseSync(file, { readOnly: true });
+            try { validate(probe); }
+            finally { probe.close(); }
+        }
         if (!readOnly)
             mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-        this.db = new DatabaseSync(join(dataDir, 'pulse.sqlite'), { readOnly });
-        this.db.exec('PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;');
-        if (!readOnly) {
-            this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-        CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY, updated TEXT NOT NULL, body TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS conversation_updated ON conversations(updated DESC,id);
-        CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,id TEXT NOT NULL,body TEXT NOT NULL,text TEXT NOT NULL, UNIQUE(conversation,id));
-        CREATE INDEX IF NOT EXISTS message_page ON messages(conversation,seq DESC);
-        CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,body TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS changes(seq INTEGER PRIMARY KEY AUTOINCREMENT,conversation TEXT,kind TEXT NOT NULL,item TEXT);
-        PRAGMA user_version=1;`);
-            chmodSync(join(dataDir, 'pulse.sqlite'), 0o600);
+        this.db = new DatabaseSync(file, { readOnly });
+        try {
+            this.db.exec('PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;');
+            if (readOnly) {
+                validate(this.db);
+            } else {
+                // Recheck under the writer lock; the preflight is not a lease
+                // on the schema and another process may have changed it.
+                this.db.exec('BEGIN IMMEDIATE');
+                validate(this.db);
+                this.db.exec(`
+            CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY, updated TEXT NOT NULL, body TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS conversation_updated ON conversations(updated DESC,id);
+            CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,id TEXT NOT NULL,body TEXT NOT NULL,text TEXT NOT NULL, UNIQUE(conversation,id));
+            CREATE INDEX IF NOT EXISTS message_page ON messages(conversation,seq DESC);
+            CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS changes(seq INTEGER PRIMARY KEY AUTOINCREMENT,conversation TEXT,kind TEXT NOT NULL,item TEXT);
+            PRAGMA user_version=${schemaVersion};
+            COMMIT;
+            PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;`);
+                chmodSync(file, 0o600);
+            }
         }
-        if (Number(this.db.prepare('PRAGMA user_version').get().user_version) !== schemaVersion)
-            throw new Error('DATA_SCHEMA_INCOMPATIBLE');
+        catch (error) {
+            // close() also rolls back an incomplete initialization transaction.
+            this.db.close();
+            throw error;
+        }
     }
     assistantView(before) {
         const inbox = this.readState('assistant-inbox');
@@ -41,7 +69,9 @@ export class ConversationDatabase {
                 let current;
                 try { current = this.get(action.conversationId) } catch {}
                 const pending = this.readState(`run:${action.runId}`)?.interactions?.find(group => group.groupId === action.interaction.groupId);
-                result = { ...result, workAction: { ...action, state: callback?.answered ? 'answered' : current?.control?.revision !== action.controlRevision || !pending ? 'obsolete' : 'pending' } };
+                let answers;
+                try { const decision = JSON.parse(callback?.decision ?? 'null'); if (Array.isArray(decision)) answers = decision; } catch {}
+                result = { ...result, workAction: { ...action, ...(answers ? { answers } : {}), state: callback?.answered ? 'answered' : current?.control?.revision !== action.controlRevision || !pending ? 'obsolete' : 'pending' } };
             }
             return result;
         };
@@ -54,8 +84,11 @@ export class ConversationDatabase {
             if (work.id !== conversation.id && work.origin !== 'assistant' || work.archivedAt || !work.activeRunId)
                 continue;
             const state = this.readState(`run:${work.activeRunId}`), pending = state?.interactions ?? [];
-            for (const interaction of pending)
-                workInteractions.push({ ...interaction, runId: work.activeRunId, conversationId: work.id, title: work.title, ...(work.projectId ? { projectId: work.projectId } : {}), approvalPolicy: work.approvalPolicy ?? 'manual' });
+            for (const interaction of pending) {
+                const callback = (inbox.callbacks ?? []).find(item => item.conversationId === work.id && item.runId === work.activeRunId && item.interaction?.groupId === interaction.groupId && !item.answered && item.controlRevision === work.control?.revision && item.fingerprint);
+                const action = callback ? { callbackId: callback.id, conversationId: work.id, runId: work.activeRunId, fingerprint: callback.fingerprint, controlRevision: callback.controlRevision, interaction, state: 'pending' } : undefined;
+                workInteractions.push({ ...interaction, ...(action ? { action } : {}), runId: work.activeRunId, conversationId: work.id, title: work.title, ...(work.projectId ? { projectId: work.projectId } : {}), approvalPolicy: work.approvalPolicy ?? 'manual' });
+            }
             if (work.id === conversation.id)
                 continue;
 

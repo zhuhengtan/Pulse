@@ -24,7 +24,7 @@ it.runIf(process.env.PULSE_LOCAL_DEV_LIVE === '1')('automatically connects the r
   // Simulate a saved backend whose actual port differs from the requested default.
   env.PULSE_WEB_DEV_PORT = String(await freePort())
   const backend = spawn(process.execPath, [join(repo, 'packages/cli/dist/bin.js'), 'h5', 'daemon', '--port', String(backendPort), '--data-dir', data], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
-  let launcher: ChildProcess | undefined, output = '', backendOutput = ''
+  let launcher: ChildProcess | undefined, restartedLauncher: ChildProcess | undefined, output = '', backendOutput = ''
   const pids = new Set<number>()
   backend.stdout?.on('data', value => { backendOutput += value }); backend.stderr?.on('data', value => { backendOutput += value })
   const descriptor = () => readFile(descriptorPath, 'utf8').then(JSON.parse)
@@ -56,10 +56,16 @@ it.runIf(process.env.PULSE_LOCAL_DEV_LIVE === '1')('automatically connects the r
     expect(repeated.stdout).toContain('复用已有前端')
     expect(repeated.stdout).toContain(selected)
     expect((await descriptor()).pid).toBe(backend.pid)
-    const restarted = await exec('bash', [join(repo, 'restart-dev.sh'), '--web-only', '--no-build'], { cwd: root, env, timeout: 60000 })
+    let restartedOutput = ''
+    restartedLauncher = spawn('bash', [join(repo, 'restart-dev.sh'), '--web-only', '--no-build'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
+    restartedLauncher.stdout?.on('data', value => { restartedOutput += value }); restartedLauncher.stderr?.on('data', value => { restartedOutput += value })
+    await expect.poll(() => {
+      if (restartedLauncher!.exitCode !== null) throw new Error(restartedOutput)
+      return restartedOutput.includes('网页开发预览：')
+    }, { timeout: 60000 }).toBe(true)
     const after = await descriptor(); pids.add(after.pid)
     expect(after.pid).not.toBe(backend.pid); expect(after.port).toBe(backendPort)
-    expect(restarted.stdout).toContain('复用已有前端')
+    expect(restartedOutput).toContain('开发前端已正常退出')
     expect(await readFile(join(data, 'preserved-marker.txt'), 'utf8')).toBe('same development data')
     const conversations = await fetch(origin + '/api/conversations', { headers }).then(r => r.json())
     expect(conversations).toEqual(expect.arrayContaining([expect.objectContaining({ id: conversation.id })]))
@@ -67,6 +73,7 @@ it.runIf(process.env.PULSE_LOCAL_DEV_LIVE === '1')('automatically connects the r
   } catch (error) { console.error(output, backendOutput); throw error }
   finally {
     if (launcher?.exitCode === null) launcher.kill('SIGTERM')
+    if (restartedLauncher?.exitCode === null) restartedLauncher.kill('SIGTERM')
     const current = await descriptor().catch(() => undefined); if (current?.pid) pids.add(current.pid)
     for (const pid of pids) { try { process.kill(pid, 'SIGTERM') } catch {} }
     await new Promise(resolve => setTimeout(resolve, 1500))

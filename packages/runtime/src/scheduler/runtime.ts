@@ -1729,7 +1729,10 @@ export class PulseRuntime {
             } else {
               const rule = ruleHumanArbitration(record.value, agent.id, record.id)
               if (rule !== undefined) this.applyHumanArbitrationDecision(rule)
-              else if (!this.requestHumanArbitration(agent, record) && this.humanInputProgram !== undefined) this.applyHumanArbitrationDecision({ schemaVersion: 1, decisionId: `default:${record.id}`, inputId: record.id, agentId: agent.id, action: 'spawn', modelId: 'runtime-default' })
+              else if (!this.requestHumanArbitration(agent, record)) {
+                const modelRequired = !!record.value && typeof record.value === 'object' && !Array.isArray(record.value) && record.value.modelFirst === true
+                if (modelRequired || this.humanInputProgram !== undefined) this.applyHumanArbitrationDecision({ schemaVersion: 1, decisionId: `default:${record.id}`, inputId: record.id, agentId: agent.id, action: modelRequired ? 'defer' : 'spawn', modelId: 'runtime-default' })
+              }
             }
           }
         }

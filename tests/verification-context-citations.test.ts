@@ -3,7 +3,7 @@ import { PulseRuntime } from '@hunterzhu/pulse-runtime'
 import { buildTaskControllerProgram } from '../packages/server/src/task-controller/program.js'
 
 it.each([
-  { version: '41', requiredTest: false, correct: true, accepted: false, reviews: 1 },
+  { version: '41', requiredTest: false, correct: true, accepted: true, reviews: 2 },
   { version: '42', requiredTest: false, correct: true, accepted: true, reviews: 2 },
   { version: '42', requiredTest: false, correct: false, accepted: false, reviews: 2 },
   { version: '42', requiredTest: true, correct: true, accepted: false, reviews: 1 },
@@ -11,7 +11,7 @@ it.each([
   let runtime: PulseRuntime, agentId = '', work = 0, reviews = 0
   const executed: string[] = []
   const global = () => { const a = runtime.state.agents.get(agentId)!; return a.globalVersions.get(a.latestGlobalVersion) as any }
-  const program = buildTaskControllerProgram({ version: scenario.version, system: 'test', toolNames: ['web.fetch', 'shell.exec', 'fs.list'], readOnlyToolNames: ['web.fetch', 'fs.list'], approvalMode: 'auto', maxTurns: 24 })
+  const program = buildTaskControllerProgram({ version: scenario.version, system: 'test', toolNames: ['web.fetch', 'shell.exec', 'fs.list'], readOnlyToolNames: ['web.fetch', 'fs.list'], approvalMode: 'auto', maxTurns: 24, modelBudgetView: () => ({ limit: 24, used: 8, workAllowed: reviews === 0, verificationAllowed: true, finalAllowed: true }) })
   runtime = new PulseRuntime({ effectExecutor: async effect => {
     const input: any = effect.input
     if (effect.kind === 'tool') {

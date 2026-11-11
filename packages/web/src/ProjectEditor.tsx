@@ -47,7 +47,7 @@ export function ProjectEditor({ project, transport, canEditFolders, onSaved, onC
           </div>)}
           <PulseButton type="button" className="project-source-add" disabled={busy || !canEditFolders || folders.length >= 16} onClick={() => setPicker('add')}><Icon name="folder-add"/>添加文件夹</PulseButton>
         </div>
-        <p className="project-primary-hint">主文件夹作为新会话的默认工作目录；已有会话保留当前执行目录。</p>
+        <p className="project-primary-hint">主文件夹作为新会话的默认工作目录；已有会话保留当前执行目录。其他文件夹默认只读。目录修改从下一轮新任务生效，运行中及恢复中的任务保留原权限。</p>
         {error && <p role="alert" className="project-editor-error">{error}</p>}
         <button type="submit" hidden aria-hidden="true" tabIndex={-1}/>
       </form>

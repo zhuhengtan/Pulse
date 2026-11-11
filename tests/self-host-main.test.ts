@@ -218,6 +218,106 @@ describe('scripts/self-host.mjs main 离线回归', () => {
   })
 })
 
+it('多轮修复：真实失败命令、退出码和日志反馈给同一会话，修复后保留失败历史', async () => {
+  const f = fixture('repair-feedback')
+  const repaired = path.join(f.cwd, 'repaired.txt')
+  const invocationLog = path.join(f.root, 'invocations.jsonl')
+  const check = write(path.join(f.root, 'checks', 'needs-repair.mjs'), [
+    "import { existsSync } from 'node:fs'",
+    `if (existsSync(${JSON.stringify(repaired)})) process.exit(0)`,
+    "console.log('FIXTURE_STDOUT: missing implementation')",
+    "console.error('FIXTURE_STDERR: repair required')",
+    'process.exit(23)',
+  ].join('\n'))
+  const entry = write(path.join(f.root, 'engine', 'repair-engine.mjs'), [
+    "import { appendFileSync, writeFileSync } from 'node:fs'",
+    'const args = process.argv.slice(2)',
+    "const resumed = args[0] === 'resume'",
+    'const prompt = args[resumed ? 2 : 1]',
+    `appendFileSync(${JSON.stringify(invocationLog)}, JSON.stringify({ mode: args[0], conversationId: resumed ? args[1] : null, prompt }) + '\\n')`,
+    `const required = ${JSON.stringify(['轮次: 1', `失败检查 ${NODE} ${check}`, '退出码: 23', 'FIXTURE_STDOUT: missing implementation', 'FIXTURE_STDERR: repair required'])}`,
+    `if (resumed && required.every(text => prompt.includes(text))) writeFileSync(${JSON.stringify(repaired)}, 'fixed\\n')`,
+    "console.log(JSON.stringify({ type: 'result', status: 'succeeded', conversationId: 'repair-conv', taskOutcome: { status: 'accepted' } }))",
+  ].join('\n'))
+  f.writeChecks([[NODE, check]])
+  const code = await main([
+    '--task-file', f.taskFile,
+    '--checks-file', f.checksFile,
+    '--cwd', f.cwd,
+    '--data-dir', f.dataDir,
+    '--output', f.outDir,
+    '--cli-entry', entry,
+    '--max-attempts', '2',
+  ], { log: () => {} })
+  const calls = readFileSync(invocationLog, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  expect(calls.map(call => call.mode)).toEqual(['run', 'resume'])
+  expect(calls[1].conversationId).toBe('repair-conv')
+  expect(calls[1].prompt).toContain(`失败检查 ${NODE} ${check}`)
+  expect(calls[1].prompt).toContain('退出码: 23')
+  expect(calls[1].prompt).toContain('FIXTURE_STDOUT: missing implementation')
+  expect(calls[1].prompt).toContain('FIXTURE_STDERR: repair required')
+  expect(code).toBe(0)
+  const report = readJson(path.join(f.outDir, 'report.json'))
+  expect(report.status).toBe('success')
+  expect(report.attempts).toHaveLength(2)
+  expect(report.baseline.checks[0].code).toBe(23)
+  expect(report.attempts[0].checks[0].code).toBe(23)
+  expect(report.attempts[1].checks[0].code).toBe(0)
+  expect(readFileSync(repaired, 'utf8')).toBe('fixed\n')
+})
+
+it.each(['auth', 'poll'])('H5 总预算在 %s 耗尽：报告 timeout，保留已知任务身份且不重复启动 CLI', async (stage) => {
+  const f = fixture(`h5-timeout-${stage}`)
+  const engine = fakeEngine(f.root, 'accepted')
+  const check = write(path.join(f.root, 'checks', 'ok.mjs'), 'process.exit(0)\n')
+  f.writeChecks([[NODE, check]])
+  const calls: string[] = []
+  const http = {
+    request: async (target: string) => {
+      calls.push(target)
+      if (target === '/api/session/local') {
+        if (stage === 'auth') await new Promise(resolve => setTimeout(resolve, 80))
+        return { ok: true }
+      }
+      if (target === '/api/session') return { capabilities: { selfHostExternalValidation: 1, selfHostInternalDataBoundary: 1 } }
+      if (target === '/api/projects') return [{ id: 'proj-timeout', cwd: f.cwd }]
+      if (target === '/api/conversations') return { id: 'conv-timeout' }
+      if (target === '/api/conversations/conv-timeout') return { ok: true }
+      if (target === '/api/conversations/conv-timeout/messages') return { runId: 'run-timeout' }
+      if (target === '/api/runs/run-timeout/state') {
+        await new Promise(resolve => setTimeout(resolve, 80))
+        throw Object.assign(new Error('fixture request timeout'), { name: 'AbortError' })
+      }
+      throw new Error(`Unexpected request: ${target}`)
+    },
+  }
+  const code = await main([
+    '--task-file', f.taskFile,
+    '--checks-file', f.checksFile,
+    '--cwd', f.cwd,
+    '--data-dir', f.dataDir,
+    '--output', f.outDir,
+    '--cli-entry', engine.entry,
+    '--transport', 'h5',
+    '--timeout-ms', '50',
+  ], { http, importModule: async () => ({ H5WorkspaceManager: class { static selfHostBeforeApply = 1; static selfHostInternalDataBoundary = 1; async get() {} async close() {} async finishVerified() {} } }), log: () => {} })
+  const report = readJson(path.join(f.outDir, 'report.json'))
+  expect(report.status).toBe('timeout')
+  expect(code).toBe(5)
+  expect(report.ok).toBe(false)
+  expect(existsSync(engine.ready)).toBe(false)
+  if (stage === 'auth') {
+    expect(calls).toEqual(['/api/session/local'])
+    expect(report.conversationId).toBe(null)
+  } else {
+    expect(report.conversationId).toBe('conv-timeout')
+    expect(report.runId).toBe('run-timeout')
+    expect(report.taskUrl).toContain('/work/conv-timeout')
+    expect(calls.filter(target => target === '/api/conversations')).toHaveLength(1)
+    expect(calls.filter(target => target.endsWith('/messages'))).toHaveLength(1)
+  }
+})
+
 // 覆盖清单（对应 scripts/self-host.mjs 四处缺陷的回归）：
 // 1. 重复 helper 去重与单一 CLI guard：导入本模块不运行 main，真实 --help 有输出。
 // 2. 严格 accepted：failed / incomplete 即固定检查全绿，也不得返回 0/success。
@@ -240,6 +340,7 @@ it('H5 离线：认证先于查项目，且只置顶本次新建 conversation', 
       const method = init.method ?? 'GET'
       calls.push({ path: pathname, method, body: init.body ?? null, timeout: init.timeout })
       if (pathname === '/api/session/local' && method === 'POST') return { ok: true, localAdmin: true }
+      if (pathname === '/api/session') return { capabilities: { selfHostExternalValidation: 1, selfHostInternalDataBoundary: 1 } }
       if (pathname === '/api/projects' && method === 'GET') return [{ id: 'proj-1', name: 'fixture', cwd, pinned: false }]
       if (pathname === '/api/conversations' && method === 'POST') return { id: 'conv-1' }
       if (pathname === '/api/conversations/conv-1' && method === 'PATCH') return { ok: true }
@@ -252,8 +353,9 @@ it('H5 离线：认证先于查项目，且只置顶本次新建 conversation', 
   const result = await invoker({ prompt: 'fixture', cwd, timeoutMs: 60_000, log: () => {} })
   const order = calls.map((call) => `${call.method} ${call.path}`)
   expect(order[0]).toBe('POST /api/session/local')
-  expect(order[1]).toBe('GET /api/projects')
-  expect(order.indexOf('POST /api/conversations')).toBe(2)
+  expect(order[1]).toBe('GET /api/session')
+  expect(order[2]).toBe('GET /api/projects')
+  expect(order.indexOf('POST /api/conversations')).toBe(3)
   const pinAt = order.indexOf('PATCH /api/conversations/conv-1')
   expect(pinAt).toBeGreaterThan(order.indexOf('POST /api/conversations'))
   expect(calls[pinAt].body).toEqual({ pinned: true })
@@ -309,6 +411,7 @@ it('H5 离线：running 且有 approval interaction 时报告 needs_attention �
       const method = init.method ?? 'GET'
       calls.push({ path: pathname, method })
       if (pathname === '/api/session/local' && method === 'POST') return { ok: true }
+      if (pathname === '/api/session') return { capabilities: { selfHostExternalValidation: 1, selfHostInternalDataBoundary: 1 } }
       if (pathname === '/api/projects' && method === 'GET') return [{ id: 'proj-1', name: 'fixture', cwd, pinned: false }]
       if (pathname === '/api/conversations' && method === 'POST') return { id: 'conv-1' }
       if (pathname === '/api/conversations/conv-1' && method === 'PATCH') return { ok: true }

@@ -2,6 +2,24 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.13.0] - 2026-11-11
+
+### Added
+
+- Add a resident desktop tray, unread notifications, hold-to-talk dictation, optional local speech recognition and synthesis, and speaker selection.
+- Add global instructions, configurable task quality checks and approval models, and retain answered questions and follow-up messages.
+- Add timezone-aware calendar schedules with explicit missed-run, daylight-saving and restart handling, without automatically replaying operations whose outcome is uncertain.
+- Add optional device tools and a simulated scene interface with scoped device/action grants, durable receipts and state verification; real devices still require separate user setup.
+- Pin additional read-only project folders; verify isolated development capsules, protect file history, and experimentally switch between newly created isolated runtime instances.
+
+### Fixed
+
+- Harden cross-process task admission, worker cleanup and persisted startup ownership to reduce duplicate starts and ambiguous recovery state.
+- Retain original checks, valid evidence, approval boundaries and cumulative budgets during recovery; preserve unfinished obligations through history compaction and capacity continuation.
+- Harden isolated-workspace merge locks, interruption handling and internal-data protection, reject writable opens of incompatible databases, and handle special filenames and additional-folder boundaries correctly.
+- Fix update-launcher validation and repair, development-component reloads, Windows background consoles and LAN chat access.
+- Improve speech playback cancellation, recovery and reply correlation, and reconcile terminal states across chat, work tasks and notifications.
+
 ## [0.12.0] - 2026-11-04
 
 ### Added

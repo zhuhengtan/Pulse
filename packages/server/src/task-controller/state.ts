@@ -1,15 +1,17 @@
 import { z } from 'zod'
+import { createHash } from 'node:crypto'
+import { namedVitestCheck } from '../vitest-check.js'
+import { failureSchema, recoveryAttemptSchema, failureFromNote, failureRecord, recoveryInstruction, type FailureRecord, type RecoveryAttempt } from './recovery.js'
 import type { JsonValue } from '@hunterzhu/pulse-runtime'
 import { deliverySchema, type StageDelivery } from './delivery.js'
 import { sourceClaimAuditSchema, type SourceClaimAudit } from './source-claim-audit.js'
 import type { AcceptanceResult } from './acceptance.js'
+import type { ReliabilityState } from './reliability.js'
 
 /** An achievable stage correction can be retried while turn budget remains. */
 export const maxStageAttempts = 4
 /** When the original goal is still unmet because a method or tool failed, try another plan while the failure changes. */
-export const maxGoalRecoveries = 32
-/** A reworded plan of the same failure should not restart the task indefinitely. */
-const usefulGoalRecoveries = 3
+export const maxGoalRecoveries = 256
 export const plannedTaskSchema = z.object({
   id: z.string().min(1).max(64),
   kind: z.enum(['edit', 'verify', 'analyze']).optional(),
@@ -24,8 +26,59 @@ export const plannedTaskSchema = z.object({
   check: z.string().min(1).max(500),
 })
 export const planSchema = z.object({ tasks: z.array(plannedTaskSchema).min(1).max(8) })
+export const INVALIDATED_CHECK_CAPACITY = 1024
+export const CHECK_CAPACITY_KEY = 'CHECK_OBLIGATION_CAPACITY'
+const CHECK_KEY_LIMIT = 1000
+/** Short identities keep their exact text; only an over-long one becomes a stable hash. The full argv stays in toolArguments. */
+type CheckDebt = NonNullable<TaskControllerState['invalidatedChecks']>[number]
+/**
+ * One merge rule for every boundary (stale recovery, carrier hand-off, child join): same check keeps every criterion and the
+ * stricter time boundary (a defined afterOrder is stricter than none, the later one wins). Beyond the persisted capacity the
+ * overflow, including any earlier sentinel, collapses into one obligation no real check can satisfy.
+ */
+export function mergeInvalidatedChecks(state: TaskControllerState, incoming: readonly CheckDebt[] | undefined): void {
+  if (!incoming?.length) return
+  const merged = new Map<string, CheckDebt>()
+  for (const raw of [...(state.invalidatedChecks ?? []), ...incoming]) {
+    const item = { ...raw, key: normalizeCheckKey(raw.key, raw.toolArguments) }
+    const previous = merged.get(item.key)
+    const afterOrder = previous && previous.afterOrder !== undefined && item.afterOrder !== undefined ? Math.max(previous.afterOrder, item.afterOrder) : previous?.afterOrder ?? item.afterOrder
+    merged.set(item.key, { key: item.key, toolArguments: previous?.toolArguments ?? item.toolArguments, criterionIds: [...new Set([...(previous?.criterionIds ?? []), ...item.criterionIds])], ...(afterOrder !== undefined ? { afterOrder } : {}) })
+  }
+  const real = [...merged.values()].filter(item => item.key !== CHECK_CAPACITY_KEY), sentinel = merged.get(CHECK_CAPACITY_KEY)
+  const all = sentinel ? [...real, sentinel] : real
+  if (all.length <= INVALIDATED_CHECK_CAPACITY) { state.invalidatedChecks = all; return }
+  const overflow = all.slice(INVALIDATED_CHECK_CAPACITY - 1)
+  state.invalidatedChecks = [...all.slice(0, INVALIDATED_CHECK_CAPACITY - 1), { key: CHECK_CAPACITY_KEY, toolArguments: {}, criterionIds: [...new Set(overflow.flatMap(item => item.criterionIds))].slice(0, 64), ...(overflow.some(item => item.afterOrder === undefined) ? {} : { afterOrder: Math.max(...overflow.map(item => item.afterOrder!)) }) }]
+}
+export function boundedCheckKey(key: string): string {
+  return key.length <= CHECK_KEY_LIMIT ? key : `sha256:${createHash('sha256').update(key).digest('hex')}`
+}
+/** Identity of a check with no named-Vitest meaning: the structured command, argv array and cwd. A display string loses argv boundaries. */
+export function argvCheckKey(command: string, args: readonly string[], cwd: string): string {
+  return boundedCheckKey(JSON.stringify(['argv', command, [...args], cwd]))
+}
+/** The one identity rule: an explicit named Vitest run keeps its named key, every other check uses its structured argv. */
+export function checkKeyFromInvocation(command: string, args: readonly string[], cwd: string): string {
+  const named = namedVitestCheck(command, args, cwd)?.key
+  return named ? boundedCheckKey(named) : argvCheckKey(command, args, cwd)
+}
+/**
+ * Read-time normalization of a persisted debt key. Sentinel, argv and named-Vitest keys keep their identity (only an over-long
+ * raw one is hashed). An older display-string key is rebuilt from the retained structured toolArguments; if the structure is
+ * not recoverable the key is kept, so no new check can discharge it (fail closed).
+ */
+export function normalizeCheckKey(key: string, toolArguments: unknown): string {
+  if (key === CHECK_CAPACITY_KEY || key.startsWith('["argv",') || key.startsWith('["vitest",') || key.startsWith('sha256:')) return boundedCheckKey(key)
+  const recorded = toolArguments && typeof toolArguments === 'object' && !Array.isArray(toolArguments) ? toolArguments as { command?: unknown; args?: unknown; cwd?: unknown } : undefined
+  if (recorded && typeof recorded.command === 'string' && recorded.command.length > 0 && Array.isArray(recorded.args) && recorded.args.every(arg => typeof arg === 'string'))
+    return checkKeyFromInvocation(recorded.command, recorded.args as string[], typeof recorded.cwd === 'string' && recorded.cwd.length > 0 ? recorded.cwd : '.')
+  return boundedCheckKey(key)
+}
 export type PlannedTask = z.infer<typeof plannedTaskSchema>
 export interface ControlledTask extends PlannedTask {
+  failure?: FailureRecord
+  reviewStatus?: 'passed' | 'needs_work' | 'unavailable' | 'skipped'
   status: 'pending' | 'running' | 'verifying' | 'passed' | 'blocked'
   attempts: number
   executionSlices?: number
@@ -46,6 +99,9 @@ export interface ControlledTask extends PlannedTask {
   citationRepairs?: number
   reasoningRecoveries?: number
   freshnessRecoveries?: number
+  /** How many times a missing rerun of an invalidated check was requested from the worker. */
+  checkRerunRequests?: number
+  checkRerunOwed?: number
   reviewFallbackUsed?: boolean
   lastInvestigationBatch?: string
   ownerLaneId?: string
@@ -55,6 +111,12 @@ export interface ControlledTask extends PlannedTask {
 }
 export interface TaskControllerState {
   schemaVersion: 1
+  reliability?: ReliabilityState
+  recoveryMode?: 'work' | 'verify'
+  evidenceIndex?: string[]
+  evidenceKeys?: string[]
+  recoveryAttempts?: RecoveryAttempt[]
+  recoveryNoProgress?: number
   revision: number
   tasks: ControlledTask[]
   priorTasks: ControlledTask[]
@@ -73,7 +135,11 @@ export interface TaskControllerState {
   planFeedbackPending?: boolean
   sourceDelivery?: { round: number; paths: string[]; refs: string[]; offsets: Record<string, number | null>; hashes: Record<string, string>; pages: number }
   sourceClaimAudit?: SourceClaimAudit
+  finalReviewStatus?: 'passed' | 'needs_work' | 'unavailable' | 'skipped'
   finalReviewErrors?: string[]
+  /** Original checks whose evidence became stale. Only a real new check run (or proven superset) discharges each. */
+  invalidatedChecks?: Array<{ key: string; toolArguments: JsonValue; criterionIds: string[]; afterOrder?: number }>
+  finalEvidenceReadbackAttempted?: boolean
   finalReview?: Array<{ criterionId: string; status: 'passed' | 'not_met' | 'unverifiable'; evidenceRefs: string[]; rationale: string }>
   acceptanceResults?: AcceptanceResult[]
   recoveryCriterionIds?: string[]
@@ -88,6 +154,8 @@ export function initialController(maxTurns: number): TaskControllerState {
   return { schemaVersion: 1, revision: 1, tasks: [], priorTasks: [], seenInputIds: [], updates: [], seenModelRefs: [], usedTurns: 0, maxTurns, goalRecoveries: 0 }
 }
 const controlledTaskSchema = plannedTaskSchema.extend({
+  failure: failureSchema.optional(),
+  reviewStatus: z.enum(['passed', 'needs_work', 'unavailable', 'skipped']).optional(),
   status: z.enum(['pending', 'running', 'verifying', 'passed', 'blocked']),
   attempts: z.number().int().min(0).max(maxStageAttempts), evidenceRefs: z.array(z.string()),
   executionSlices: z.number().int().min(0).optional(), nextAction: z.string().optional(), stopReason: z.string().optional(),
@@ -97,7 +165,7 @@ const controlledTaskSchema = plannedTaskSchema.extend({
   retainedArtifactVerification: z.boolean().optional(),
   correctionKind: z.enum(['edit', 'verify', 'report']).optional(),
   investigationRounds: z.number().int().min(0).default(0), directedInvestigations: z.number().int().min(0).default(0), progressReviewed: z.boolean().default(false), lastInvestigationBatch: z.string().optional(),
-  reasoningRecoveries: z.number().int().min(0).max(2).optional(), freshnessRecoveries: z.number().int().min(0).max(2).optional(),
+  reasoningRecoveries: z.number().int().min(0).max(2).optional(), freshnessRecoveries: z.number().int().min(0).max(2).optional(), checkRerunRequests: z.number().int().min(0).max(2).optional(), checkRerunOwed: z.number().int().min(0).max(1024).optional(),
   reviewFallbackUsed: z.boolean().optional(), citationRepairs: z.number().int().min(0).max(1).optional(),
   modelCalls: z.number().int().min(0).default(0),
   ownerLaneId: z.string().optional(), delivery: deliverySchema.optional(),
@@ -106,8 +174,19 @@ const controlledTaskSchema = plannedTaskSchema.extend({
 })
 const controllerSchema = z.object({
   schemaVersion: z.literal(1), revision: z.number().int().positive(),
-  // 累计阶段容量=初始8 + 最多3次有效恢复各8(共32)；单次 planSchema.max(8) 不变
-  tasks: z.array(controlledTaskSchema).max(32), priorTasks: z.array(controlledTaskSchema).max(32),
+  reliability: z.object({
+    excludedRefs: z.array(z.string()),
+    cycles: z.record(z.object({ seen: z.array(z.string()), processed: z.array(z.string()), noProgress: z.number().int().nonnegative(), phase: z.enum(['work', 'correct', 'alternative', 'blocked']) })),
+    freshness: z.record(z.number().int().nonnegative()),
+    invalidations: z.array(z.object({ key: z.string(), code: z.string(), refs: z.array(z.string()), targets: z.array(z.string()), files: z.array(z.object({ path: z.string(), hash: z.string() })) })).default([]),
+    environments: z.record(z.object({ methods: z.array(z.string()), refs: z.array(z.string()), reason: z.string() })),
+    processedChecks: z.array(z.string()).default([]),
+  }).optional(),
+  // Task history is bounded by the cumulative provider budget; each plan still has at most eight stages.
+  tasks: z.array(controlledTaskSchema).max(256), priorTasks: z.array(controlledTaskSchema).max(256),
+  recoveryMode: z.enum(['work', 'verify']).optional(),
+  evidenceIndex: z.array(z.string()).optional(), evidenceKeys: z.array(z.string()).optional(),
+  recoveryAttempts: z.array(recoveryAttemptSchema).max(256).optional(), recoveryNoProgress: z.number().int().nonnegative().optional(),
   seenInputIds: z.array(z.string()), updates: z.array(z.string()), seenModelRefs: z.array(z.string()),
   usedTurns: z.number().int().min(0), maxTurns: z.number().int().min(4).max(256), goalRecoveries: z.number().int().min(0).max(maxGoalRecoveries).default(0), lastRecoveryKey: z.string().max(800).optional(), activeId: z.string().optional(), activeIds: z.array(z.string()).max(8).optional(),
   planErrors: z.array(z.string()).max(2).optional(),
@@ -118,7 +197,10 @@ const controllerSchema = z.object({
   planFeedbackPending: z.boolean().optional(),
   sourceDelivery: z.object({ round: z.number().int().positive(), paths: z.array(z.string()).max(8), refs: z.array(z.string()).max(64), offsets: z.record(z.number().int().nonnegative().nullable()), hashes: z.record(z.string()), pages: z.number().int().nonnegative().max(64) }).optional(),
   sourceClaimAudit: sourceClaimAuditSchema.optional(),
+  finalReviewStatus: z.enum(['passed', 'needs_work', 'unavailable', 'skipped']).optional(),
   finalReviewErrors: z.array(z.string()).max(1).optional(),
+  invalidatedChecks: z.array(z.object({ key: z.string(), toolArguments: z.any(), criterionIds: z.array(z.string()).max(64), afterOrder: z.number().int().min(0).optional() }).transform(item => ({ ...item, key: normalizeCheckKey(item.key, item.toolArguments) })).pipe(z.object({ key: z.string().max(1200), toolArguments: z.any(), criterionIds: z.array(z.string()).max(64), afterOrder: z.number().int().min(0).optional() }))).max(1024).optional(),
+  finalEvidenceReadbackAttempted: z.boolean().optional(),
   finalReview: z.array(z.object({ criterionId: z.string(), status: z.enum(['passed', 'not_met', 'unverifiable']), evidenceRefs: z.array(z.string()), rationale: z.string() })).optional(),
   acceptanceResults: z.array(z.object({ id: z.string(), ref: z.string().optional(), status: z.enum(['passed', 'failed', 'unverifiable']), reason: z.string(), checks: z.array(z.object({ id: z.string(), passed: z.boolean(), detail: z.string().optional() })).optional() })).optional(),
   recoveryCriterionIds: z.array(z.string()).optional(),
@@ -403,8 +485,11 @@ export function mergeRoutineVerificationStages(tasks: PlannedTask[]): PlannedTas
   let result = tasks.map(t => ({ ...t, dependsOn: [...t.dependsOn] }))
   for (const verify of tasks) {
     if (verify.kind !== 'verify' || verify.dependsOn.length !== 1 || /审批|批准|用户确认|approval|approve|ask|human|user/i.test(verify.goal + '\n' + verify.check)) continue
-    // Full test stages retain their own definition/freshness boundary.
-    if (/测试|--test|\b(?:tests?|suite|vitest|jest|pytest)\b/i.test(verify.goal + '\n' + verify.check)) continue
+    // Keep explicit suites and pass gates as separate checks. Routine focused
+    // tests for the same deliverable can use the implementing stage's receipts.
+    const text = verify.goal + '\n' + verify.check
+    if (/测试|--test|\b(?:tests?|suite|vitest|jest|pytest)\b/i.test(text)
+      && (!/定向|相关|\b(?:focused|targeted|relevant)\b/i.test(text) || /--test|\.(?:[cm]?[jt]sx?|py)\b|全量|全部|\b(?:full|entire|all)\b/i.test(text))) continue
     const current = result.find(t => t.id === verify.id)
     const owner = current && result.find(t => t.id === current.dependsOn[0])
     if (!current || !owner || (current as ControlledTask).retainedArtifactVerification || (owner as ControlledTask).retainedArtifactVerification || owner.kind !== 'edit' || !verify.criterionIds.length || !verify.criterionIds.every(id => owner.criterionIds.includes(id))) continue
@@ -439,7 +524,7 @@ export function omitRedundantFinalReviews(tasks: PlannedTask[]): PlannedTask[] {
 /** Implementation, file, and command stages need settled tool evidence. Versions and abbreviations do not. */
 export function stageRequiresToolEvidence(goal: string, check: string): boolean {
   const text = `${goal}\n${check}`
-  return TOOL_RUNNER.test(text) || WORKSPACE_FILE.test(text)
+  return TOOL_RUNNER.test(text) || WORKSPACE_FILE.test(text) || /(?:运行|执行|通过|验证).{0,24}(?:测试|检查|回归)|\b(?:run|execute|pass|verify)\b.{0,40}\b(?:tests?|checks?|regression|suite)\b/i.test(text)
 }
 
 /** Conservative allowlist for shell commands that inspect state without writing it. */
@@ -485,75 +570,72 @@ function inheritedBlockNote(blocker: ControlledTask, tasks: readonly ControlledT
   return (reason && reason.length > 0 ? reason : root.goal).slice(0, 700)
 }
 
-/** Permission, user, and environment limits are not fixed by repeating another plan. A local model such as Ollama is an authorized path. */
-const EXTERNAL_GOAL_BLOCK = /permission|denied|not authorized|unauthorized|not permitted|PATH_OUTSIDE_SANDBOX|EACCES|TCC|隐私授权|deferred|user must|awaiting user|external|sandbox|EPERM|审批被拒|权限|外部|用户必须|延期/i
-const LOCAL_MODEL_PATH = /ollama|本机|本地模型/i
-const HARD_AUTH_BLOCK = /permission|denied|not authorized|unauthorized|not permitted|PATH_OUTSIDE_SANDBOX|EACCES|TCC|隐私授权|EPERM|审批被拒|权限/i
-
-function isExternalGoalBlock(note: string): boolean {
-  if (LOCAL_MODEL_PATH.test(note) && !HARD_AUTH_BLOCK.test(note)) return false
-  return EXTERNAL_GOAL_BLOCK.test(note)
+/** A changed description is not progress; only settled evidence changes count. */
+function recoveryFailures(state: TaskControllerState): FailureRecord[] {
+  const failures = state.tasks.filter(t => t.status !== 'passed' && !isCascadeBlocked(t, state.tasks)).map(t => t.failure ?? failureFromNote(t.note ?? t.goal, t.evidenceRefs))
+  const reviews = (state.finalReview ?? []).filter(r => r.status === 'not_met' || state.tasks.every(task => task.status === 'passed') && r.status === 'unverifiable').map(r => ({ ...failureFromNote(r.rationale, r.evidenceRefs), ...(r.status === 'unverifiable' ? { phase: 'verification' as const } : {}) }))
+  return [...failures, ...reviews, ...(state.finalReviewErrors ?? []).map(error => ({ ...(/^SOURCE_(?:VERIFICATION|CLAIM_AUDIT)_UNAVAILABLE: MODEL_BUDGET_CHECKPOINT\./.test(error) ? failureRecord('MODEL_BUDGET_CHECKPOINT', error) : failureRecord(error.match(NATIVE_FRESHNESS_FAILURE)?.[1] ?? failureFromNote(error).code, error)), phase: 'verification' as const }))]
 }
-
-function correctableFailure(note: string): boolean {
-  if (note.includes('Total model budget exhausted')) return false
-  if (/REASONING_OUTPUT_EXHAUSTED|OUTPUT_TRUNCATED|TASK_CONSTRAINT_VIOLATION|DELIVERY_CHECKPOINT_UNAVAILABLE|EVIDENCE_CHANGED|PROGRESS_REVIEW_UNAVAILABLE|PROVIDER_NETWORK_ERROR|PROVIDER_HTTP_(?:401|403|429|5\d\d)|ENOTFOUND|EAI_AGAIN|MODEL_BUDGET_CHECKPOINT|NO_PROGRESS|INVESTIGATION_LIMIT_REACHED|REPEATED_TOOL_FAILURE|TASK_MODEL_CALL_BUDGET_|Verifier unusable|Verifier cited unavailable evidence/.test(note)) return false
-  if (note.trim() === 'Verifier did not cite valid successful tool evidence.') return false
-  return !isExternalGoalBlock(note)
+const NATIVE_FRESHNESS_FAILURE = /^SOURCE_(?:VERIFICATION|CLAIM_AUDIT)_UNAVAILABLE: (EVIDENCE_CHANGED|VERIFICATION_TARGET_MISMATCH)\b/
+const FRESHNESS_CODES = new Set(['EVIDENCE_CHANGED', 'VERIFICATION_TARGET_MISMATCH'])
+/** The native freshness failure of the trailing recovery chain in which no replan changed any settled evidence. */
+export function unrepairedEvidenceFailure(state: TaskControllerState | undefined): FailureRecord | undefined {
+  if (!state) return undefined
+  const attempts = state.recoveryAttempts ?? []
+  let start = attempts.length
+  while (start > 0 && attempts[start - 1]!.result !== 'progress') start--
+  for (const attempt of attempts.slice(start)) { const found = attempt.failures.find(failure => FRESHNESS_CODES.has(failure.code)); if (found) return found }
+  const current = recoveryFailures(state).find(failure => FRESHNESS_CODES.has(failure.code))
+  return current
 }
-
-function correctableFinalFailures(state: TaskControllerState) {
-  return (state.finalReview ?? []).filter(item => item.status === 'not_met' && item.evidenceRefs.length > 0 && correctableFailure(item.rationale))
+function recoveryProgressKey(state: TaskControllerState): string {
+  return JSON.stringify([...new Set(state.evidenceKeys ?? [])].sort())
 }
-
-function recoveryKey(state: TaskControllerState): string {
-  const roots = state.tasks.filter((task) => task.status !== 'passed').map((task) => {
-    const root = isCascadeBlocked(task, state.tasks) ? rootBlockedDependency(task, state.tasks) ?? task : task
-    return `${root.goal}\n${(root.note ?? '').replace(/\s+/g, ' ').trim()}`
-  })
-  const finalFailures = (state.finalReview ?? []).filter((item) => item.status === 'not_met').map((item) => `${item.criterionId}\n${item.rationale}`)
-  return [...new Set([...roots, ...finalFailures])].sort().join('\n').slice(0, 800)
-}
-
 export function unmetGoalCanChangeApproach(state: TaskControllerState, options?: { enforceTurnBudget?: boolean; recoverFinalReview?: boolean }): boolean {
-  if (state.goalRecoveries >= usefulGoalRecoveries) return false
+  if (state.reliability && (Object.values(state.reliability.cycles).some(cycle => cycle.phase === 'blocked') || Object.values(state.reliability.environments).some(block => block.refs.length >= 2))) return false
+  if (state.budgetStopped || state.actualBudget?.workAllowed === false || state.actualBudget && state.actualBudget.used >= state.actualBudget.limit - 2) return false
   if (options?.enforceTurnBudget !== false && state.usedTurns >= state.maxTurns - 2) return false
-  if (state.tasks.length === 0) return false
-  const key = recoveryKey(state)
-  if (!key || key === state.lastRecoveryKey) return false
-  if (state.tasks.every((task) => task.status === 'passed')) {
-    // A passed stage can still have omitted part of its original requirement.
-    // Uncertain evidence and external refusals do not authorize new execution.
-    return options?.recoverFinalReview === true && correctableFinalFailures(state).length > 0
-  }
-  const open = state.tasks.filter((task) => task.status !== 'passed')
-  return open.some((task) => {
-    const root = isCascadeBlocked(task, state.tasks) ? rootBlockedDependency(task, state.tasks) ?? task : task
-    return correctableFailure(root.note ?? '')
-  })
+  const previous = state.recoveryAttempts?.at(-1)
+  const stagnant = previous && previous.progressKey === recoveryProgressKey(state) ? (state.recoveryNoProgress ?? 0) + 1 : 0
+  if (stagnant >= 8 || state.goalRecoveries >= maxGoalRecoveries) return false
+  const failures = recoveryFailures(state)
+  if (!failures.length || failures.some(f => !f.recoverable)) return false
+  return state.tasks.some(t => t.status !== 'passed') || options?.recoverFinalReview === true
 }
 
 export function recoverUnmetGoal(state: TaskControllerState, options?: { recoverFinalReview?: boolean }): void {
   const failed = state.tasks.filter((task) => task.status !== 'passed' && !isCascadeBlocked(task, state.tasks))
-  const reviews = options?.recoverFinalReview && state.tasks.every(task => task.status === 'passed') ? correctableFinalFailures(state) : (state.finalReview ?? []).filter(item => item.status === 'not_met')
+  const reviews = (state.finalReview ?? []).filter(item => item.status === 'not_met' || state.tasks.every(task => task.status === 'passed') && item.status === 'unverifiable')
   const finalFailures = reviews.map((item) => `${item.criterionId}: ${item.rationale}`)
   const summary = [...failed.map((task) => `${task.id}: ${task.goal} — ${task.note ?? task.status}`), ...finalFailures].join('\n').slice(0, 1_500)
-  state.lastRecoveryKey = recoveryKey(state)
+  const failures = recoveryFailures(state)
+  state.recoveryMode = failures.length > 0 && failures.every(failure => failure.phase === 'verification' || failure.category === 'verification') ? 'verify' : 'work'
+  const progressKey = recoveryProgressKey(state)
+  const previous = state.recoveryAttempts?.at(-1)
+  const changed = !previous || previous.progressKey !== progressKey
+  if (previous) previous.result = changed ? 'progress' : 'no-progress'
+  state.recoveryNoProgress = changed ? 0 : (state.recoveryNoProgress ?? 0) + 1
   state.goalRecoveries += 1
+  if (state.planFeedbackPending) state.planReviewRepairs = 0
+  state.recoveryAttempts = [...(state.recoveryAttempts ?? []), { id: state.goalRecoveries, failures, progressKey, result: 'pending' }]
+  state.lastRecoveryKey = JSON.stringify(failures.map(f => f.code)).slice(0, 800)
   const passed = state.tasks.filter((task) => task.status === 'passed')
   const unmet = state.tasks.filter((task) => task.status !== 'passed')
-  state.priorTasks = [...state.priorTasks, ...unmet].slice(-32)
-  state.updates = [...state.updates, `Goal recovery ${state.goalRecoveries}: the original goal is not met. Keep every file already written. Fix only the failed check below. Do not locate the feature again and do not recreate a module that already exists. Earlier reads are already in the supplied results; do not read those files again.\n${summary}`].slice(-8)
+  state.priorTasks = [...state.priorTasks, ...unmet].slice(-256)
+  state.updates = [...state.updates, recoveryInstruction(failures) + '\n' + summary].slice(-8)
   state.tasks = passed
   state.recoveryCriterionIds = [...new Set([
     ...unmet.flatMap((task) => task.criterionIds),
     ...reviews.map((item) => item.criterionId),
+    ...(state.finalReviewErrors?.length ? state.tasks.flatMap(task => task.criterionIds) : []),
   ])]
   delete state.activeId
   delete state.activeIds
   delete state.finalReview
   delete state.planErrors
   delete state.finalReviewErrors
+  delete state.finalReviewStatus
+  state.verificationRetries = {}
   // New work invalidates the current independent verdict. Original receipts
   // remain in Runtime history; the frozen checks must run again after correction.
   if (options?.recoverFinalReview) delete state.acceptanceResults

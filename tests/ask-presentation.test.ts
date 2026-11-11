@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { readConversationFixture } from './conversation-fixtures.js'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -24,6 +25,10 @@ it.each(['choice', 'multi', 'input'] as const)('accepts and persists a custom %s
     expect(messages).toContainEqual(expect.objectContaining({ role: 'assistant', text: '选择哪种方案？\n\n现有项目需要兼顾维护成本。' }))
     expect(messages).toContainEqual(expect.objectContaining({ role: 'user', text: '我选择分两阶段迁移。\n先完成界面，再改后端。' }))
     expect(messages.filter(message => message.id.startsWith('ask-answer-'))).toHaveLength(1)
+    expect(messages.find(message => message.id.startsWith('ask-answer-'))?.questionAnswer).toMatchObject({
+      effectId: expect.any(String), input: { type, prompt: '选择哪种方案？', context: '现有项目需要兼顾维护成本。' },
+      answer: { text: '我选择分两阶段迁移。\n先完成界面，再改后端。' },
+    })
     await host.close()
     const restored = createLocalHost({ cwd: root, dataDir: join(root, 'data') })
     try { expect(await restored.getWebConversationMessages(conversation.id)).toEqual(messages) } finally { await restored.close() }
@@ -33,6 +38,7 @@ it.each(['choice', 'multi', 'input'] as const)('accepts and persists a custom %s
 it('exposes Ask presentation through HTTP and records a textarea answer idempotently', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pulse-ask-http-'))
   const host = createLocalHost({ cwd: root, dataDir: root, mockToolCalls: [{ name: 'ask.choice', input: { prompt: '选择部署方式？', context: '当前只有一台测试机。', options: [{ label: '本地预览（推荐）', description: '先验证交互流程。', value: 'local' }] } }], mockAfterToolResponse: '收到。' })
+  acceptWorkRequests(host)
   const server = new H5Server(host, { dataDir: root, port: 0, host: '127.0.0.1' })
   try {
     const { port } = await server.start(), base = `http://127.0.0.1:${port}`
@@ -50,7 +56,23 @@ it('exposes Ask presentation through HTTP and records a textarea answer idempote
     for (let i = 0; i < 2; i++) expect((await fetch(`${base}/api/runs/${sent.runId}/replies`, { method: 'POST', headers, body })).status).toBe(200)
     const messages = await fetch(`${base}/api/web/conversations/${conversation.id}/messages`, { headers }).then(response => response.json()) as any[]
     expect(messages.filter(message => message.text === '使用隔离环境验证。')).toHaveLength(1)
+    expect(messages.find(message => message.text === '使用隔离环境验证。').questionAnswer).toEqual({ effectId: group.items[0].effectId, input: expect.objectContaining(group.items[0].input), answer: { text: '使用隔离环境验证。' } })
     const stored = await readConversationFixture(join(root, 'conversations', conversation.id, 'messages.jsonl'), 'utf8')
     expect(stored).toContain('选择部署方式？')
   } finally { await server.stop(); await host.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+it.each(['choice', 'multi'] as const)('retains stable option values and descriptions for a selected %s answer', async type => {
+  const root = await mkdtemp(join(tmpdir(), 'pulse-ask-selected-'))
+  const options = [{ label: '方案甲', value: 'a', description: '保留现有入口。' }, { label: '方案乙', value: 'b', description: '调整交互流程。' }]
+  const host = createLocalHost({ cwd: root, dataDir: root, mockToolCalls: [{ name: `ask.${type}`, input: { prompt: '选择方案', options } }], mockAfterToolResponse: '收到。' })
+  const answer = type === 'choice' ? { value: 'b' } : { values: ['a', 'b'] }
+  try {
+    const conversation = await host.createConversation()
+    const run = await host.sendMessage(conversation.id, { text: '先问我选择哪个方案' })
+    for await (const event of run.events) if (event.type === 'waiting') await run.reply((event.data as any).effectId, answer)
+    expect(await run.outcome()).toMatchObject({ status: 'succeeded' })
+    const messages = await host.getWebConversationMessages(conversation.id)
+    expect(messages.find(message => message.id.startsWith('ask-answer-'))).toMatchObject({ text: type === 'choice' ? '方案乙' : '方案甲、方案乙', questionAnswer: { input: { prompt: '选择方案', type, options }, answer } })
+  } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
 })

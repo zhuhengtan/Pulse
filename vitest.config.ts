@@ -5,6 +5,7 @@ export default defineConfig({
   css: { postcss: { plugins: [] } },
   resolve: {
     alias: {
+      '@hunterzhu/pulse-data': new URL('./packages/data/src/index.ts', import.meta.url).pathname,
       '@hunterzhu/pulse-runtime': new URL('./packages/runtime/src/index.ts', import.meta.url).pathname,
       '@hunterzhu/pulse-tool-sdk': new URL('./packages/tool-sdk/src/index.ts', import.meta.url).pathname,
       '@hunterzhu/pulse-adapters/reasoning-effort': new URL('./packages/adapters/src/providers/reasoning-effort.ts', import.meta.url).pathname, '@hunterzhu/pulse-server/model-settings': new URL('./packages/server/src/model-settings.ts', import.meta.url).pathname,

@@ -4,6 +4,7 @@ export class QuestionWindows {
     entries = new Map();
     constructor({ BrowserWindow, ipcMain, request, answer, openFull, pageUrl, preload, icon, isPageUrl }) {
         Object.assign(this, { BrowserWindow, request, answer, openFull, pageUrl, preload, icon, isPageUrl });
+        ipcMain.handle('pulse:question-read', async (event, fingerprint) => { const entry = this.entry(event); const state = await this.state(entry); if (entry.window.isDestroyed() || entry.window.isVisible?.() === false || state.status !== 'ready' || state.fingerprint !== fingerprint || !entry.item.revision) return; await this.request('/api/notifications/read', { method: 'POST', body: JSON.stringify({ targets: [{ id: entry.item.id, revision: entry.item.revision }] }) }); });
         ipcMain.handle('pulse:question-state', event => this.state(this.entry(event)));
         ipcMain.handle('pulse:question-submit', async (event, answers) => {
             const entry = this.entry(event); if (entry.completed) return true;

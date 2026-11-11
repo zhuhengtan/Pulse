@@ -36,7 +36,7 @@ await withBatchBudget(batch,id,async maxCalls=>capabilityScope(()=>withDevCallBu
  await writeFile(join(out,'seed-commit.json'),JSON.stringify({commit:seedCommit,workspace,note:'Frozen original fixture tree retained in local Git object database before model calls'},null,2))
  const snapshot=async dir=>{for(const e of await readdir(dir,{withFileTypes:true})){const p=join(dir,e.name);if(e.isDirectory())await snapshot(p);else if(/\.(?:ts|tsx|js|mjs|cjs|json|css|html|swift|py|ps1)$/.test(p))files[p]=createHash('sha256').update(await readFile(p)).digest('hex')}}
  for(const p of ['runtime','server','tool-sdk','adapters'])for(const sub of ['src','dist'])await snapshot(`packages/${p}/${sub}`)
- for(const p of ['packages/web/src','packages/desktop/src','native/desktop-helper'])await snapshot(p)
+ for(const p of ['packages/web/src','packages/desktop/src','packages/server/src/automation'])await snapshot(p)
  for(const p of ['evals/tasks.v1.json','scripts/eval/grade.mjs','scripts/eval/autonomy-focused-cases.mjs',...(acceptanceV2?['scripts/eval/autonomy-research-date.mjs','scripts/eval/autonomy-electron-existing.mjs']:[]),...(scenarioPath?[join(scenarioPath,'scenario.json'),join(scenarioPath,'verify.mjs')]:[])])files[p]=createHash('sha256').update(await readFile(p)).digest('hex')
  await writeFile(join(out,'source-freeze.json'),JSON.stringify({files},null,2))
  console.log('READY',conv.id)

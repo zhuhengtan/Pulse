@@ -7,7 +7,7 @@ export class ReaderClient {
   private child: ChildProcess
   private pending = new Map<string, { resolve(value: { status: number; body: unknown }): void; reject(error: Error): void; timer: NodeJS.Timeout }>()
   constructor(directory: string, node = process.execPath, entry = fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../../dist/updates/reader.js' : './reader.js', import.meta.url))) {
-    this.child = spawn(node, [entry, directory], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
+    this.child = spawn(node, [entry, directory], { windowsHide: true, stdio: ['ignore', 'ignore', 'inherit', 'ipc'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
     this.child.on('message', raw => { const value = raw as { id: string; status: number; body: unknown }; const item = this.pending.get(value.id); if (item) { this.pending.delete(value.id); clearTimeout(item.timer); item.resolve(value) } })
     this.child.on('error', error => this.fail(error)); this.child.on('exit', () => this.fail(new Error('READER_DISCONNECTED')))
   }

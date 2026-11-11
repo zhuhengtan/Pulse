@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { execFile } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -17,7 +18,9 @@ it.each([false, true])('finishes project work independently of chat notification
   await writeFile(join(projectRoot, 'base.txt'), 'base\n'); await git('add', '.'); await git('commit', '--quiet', '-m', 'baseline')
   const profile = { provider: 'mock' as const, defaultModel: 'mock' }
   const options = { cwd: projectRoot, dataDir, approvalMode: 'auto' as const, provider: profile, providerProfiles: { mock: profile }, providerModels: { mock: { provider: 'mock', model: 'mock' } }, activeModel: 'mock', assistantModel: 'mock', jarvis: { enabled: false }, mockResponse: '工作已完成并合入。', mockToolCalls: [{ name: 'fs.write', input: { path: 'notes.txt', content: 'hello' } }], mockAfterToolResponse: 'Created notes.txt with hello.', mockTaskAssessments: [{ criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: ['AUTO'], rationale: 'File write completed.' }] }] }
-  let host = createLocalHost(options), server = new H5Server(host, { dataDir, host: '127.0.0.1', port: 0 })
+  let host = createLocalHost(options)
+  acceptWorkRequests(host)
+  let server = new H5Server(host, { dataDir, host: '127.0.0.1', port: 0 })
   try {
     let base = `http://127.0.0.1:${(await server.start()).port}`
     const authorize = async () => {

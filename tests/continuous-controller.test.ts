@@ -132,15 +132,14 @@ it.each(['coding', 'research', 'document', 'file-organization', 'browser-fixture
   expect(result.calls.some(k => k.startsWith('progress-review'))).toBe(false)
 }, 20000)
 
-it('keeps legacy behavior selectable and records the deterministic comparison', async () => {
-  const legacy = await scenario({ rounds: 20, version: '56' }), continuous = await scenario({ rounds: 20 })
-  expect(legacy.reads).toBeLessThan(20)
-  expect(continuous.reads).toBe(20)
-  expect(legacy.calls.some(k => k.startsWith('progress-review')) || legacy.outcome.status !== 'succeeded' || globalState(legacy.runtime).taskOutcome.status !== 'accepted').toBe(true)
-  expect(globalState(continuous.runtime).taskOutcome.status).toBe('accepted')
-  expect(continuous.calls.filter(k => k.startsWith('progress-review')).length).toBe(0)
-  console.info('MOCK_COMPARISON ' + JSON.stringify({ workload: '20 distinct fixture reads then one write', legacy: { reads: legacy.reads, writes: legacy.writes, reviews: legacy.reviews, modelCalls: legacy.used, acceptance: globalState(legacy.runtime).taskOutcome.status }, continuous: { reads: continuous.reads, writes: continuous.writes, reviews: continuous.reviews, modelCalls: continuous.used, acceptance: globalState(continuous.runtime).taskOutcome.status }, realApiCalls: 0 }))
-}, 20000)
+it('uses continuous execution for an obsolete caller label as well as the default', async () => {
+  for (const version of ['56', '57'] as const) {
+    const result = await scenario({ rounds: 20, version })
+    expect(result.reads).toBe(20); expect(result.writes).toBe(1)
+    expect(result.calls.some(key => key.startsWith('progress-review'))).toBe(false)
+    expect(globalState(result.runtime).taskOutcome.status).toBe('accepted')
+  }
+})
 
 it('repairs an invalid summary twice without accepting or executing its proposals', async () => {
   const result = await scenario({ rounds: 30, summariesInvalid: 2 })
@@ -159,15 +158,15 @@ it('gives repeated unchanged tools one 4-round recovery window and stops by eigh
   expect(calls).toBe(9)
 })
 
-it('persists the explicit Host policy with mock configuration and keeps legacy as default', async () => {
+it('persists the current Host policy with isolated mock configuration', async () => {
   const dir = await directory()
-  const host = new LocalHost({ cwd: dir, dataDir: join(dir, 'data'), taskController: true, taskControllerPolicy: 'continuous', approvalMode: 'auto', provider: { provider: 'mock' }, jarvis: { enabled: false } })
+  const host = new LocalHost({ cwd: dir, dataDir: join(dir, 'data'), taskController: true, taskControllerPolicy: 'continuous', approvalMode: 'auto', provider: { provider: 'mock' }, qualityReviewEnabled: false, mockParallelPlan: { tasks: [{ id: 'hello', kind: 'analyze', goal: 'Say hello', check: 'Response provided', criterionIds: ['criterion-1'], dependsOn: [] }] }, jarvis: { enabled: false } })
   await host.init()
   const conversation = await host.createConversation(), run = await host.sendMessage(conversation.id, { text: 'Say hello' })
   await run.outcome()
   const input = JSON.parse(await readFile(join(dir, 'data', 'conversations', conversation.id, 'runs', run.id, 'input.json'), 'utf8'))
-  expect(input).toMatchObject({ controllerVersion: '57', taskControllerPolicy: 'continuous', provider: 'mock' })
+  expect(input).toMatchObject({ controllerVersion: '58', taskControllerPolicy: 'continuous', provider: 'mock' })
   await host.close()
-  expect(buildTaskControllerProgram({ system: '', toolNames: [], approvalMode: 'auto', maxTurns: 10 }).version).toBe('56')
+  expect(buildTaskControllerProgram({ system: '', toolNames: [], approvalMode: 'auto', maxTurns: 10 }).version).toBe('58')
   expect(() => new LocalHost({ taskControllerPolicy: 'invalid' as any })).toThrow('INVALID_TASK_CONTROLLER_POLICY')
 })

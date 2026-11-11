@@ -1,15 +1,17 @@
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+let runId = 'run-worker-fixture'
 process.on('message', (message) => {
   if (message?.schemaVersion === 1 && message.type === 'configure') {
+    runId = message.runtimeOptions?.taskAdmissionPermit?.runId ?? runId
     process.send({ schemaVersion: 1, type: 'configured' })
     return
   }
   if (message?.schemaVersion !== 1 || message.type !== 'start') return
-  process.send({ schemaVersion: 1, type: 'started', requestId: message.requestId, runId: 'run-worker-fixture', conversationId: message.conversationId })
-  process.send({ schemaVersion: 1, type: 'event', event: { schemaVersion: 1, type: 'text', conversationId: message.conversationId, runId: 'run-worker-fixture', seq: 1, data: 'from worker' } })
-  process.send({ schemaVersion: 1, type: 'event', event: { schemaVersion: 1, type: 'complete', conversationId: message.conversationId, runId: 'run-worker-fixture', seq: 2, data: { status: 'succeeded' } } })
+  process.send({ schemaVersion: 1, type: 'started', requestId: message.requestId, runId, conversationId: message.conversationId })
+  process.send({ schemaVersion: 1, type: 'event', event: { schemaVersion: 1, type: 'text', conversationId: message.conversationId, runId, seq: 1, data: 'from worker' } })
+  process.send({ schemaVersion: 1, type: 'event', event: { schemaVersion: 1, type: 'complete', conversationId: message.conversationId, runId, seq: 2, data: { status: 'succeeded' } } })
   const settle = setTimeout(() => {
     process.send({ schemaVersion: 1, type: 'settled', outcome: { status: 'succeeded' }, usage: { schemaVersion: 1, inputTokens: 1, outputTokens: 2, cachedInputTokens: null, reasoningTokens: null, visibleOutputChars: 11, modelCalls: 1, truncationEvents: 0, durationMs: 10, providerCosts: [], completeness: 'complete' } })
     // Model cleanup that still owns files after publishing the outcome.

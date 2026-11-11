@@ -41,14 +41,19 @@ export function restoreRunModelRouting(options: LocalHostOptions, saved: unknown
   const modelEfforts = record(snapshot.modelEfforts), providerEfforts = record(snapshot.providerEfforts)
   const providerModels = Object.fromEntries(Object.entries(options.providerModels ?? {}).map(([id, model]) => [id, restoreEffort(model, Object.hasOwn(modelEfforts, id) ? modelEfforts[id] : undefined)]))
   const providerProfiles = Object.fromEntries(Object.entries(options.providerProfiles ?? {}).map(([id, profile]) => [id, restoreEffort(profile, Object.hasOwn(providerEfforts, id) ? providerEfforts[id] : undefined)]))
-  const activeModel = snapshot.activeModel ?? options.activeModel
+  const savedActive = snapshot.activeModel as string | undefined
+  const activeModel = savedActive && (providerModels[savedActive] || !Object.hasOwn(modelEfforts, savedActive)) ? savedActive : options.activeModel
   const selection = activeModel ? providerModels[activeModel] : undefined
-  if (activeModel && Object.hasOwn(modelEfforts, activeModel) && !selection) throw new Error(`RUN_MODEL_UNAVAILABLE:${activeModel}`)
+  for (const task of ['reason', 'plan', 'merge', 'verify', 'vision'] as const) {
+    const route = taskRouting[task]?.filter(entry => providerModels[typeof entry === 'string' ? entry : entry.model] !== undefined || (typeof entry === 'string' ? entry : entry.model) === activeModel)
+    if (route?.length) taskRouting[task] = route
+    else if (route) { if (options.taskRouting?.[task]) taskRouting[task] = options.taskRouting[task]; else delete taskRouting[task] }
+  }
   const activeProviderCode = selection?.provider ?? options.activeProviderCode ?? options.provider?.provider
   const currentProviderCode = options.activeProviderCode ?? options.provider?.provider
   const sameActiveModel = selection?.provider === currentProviderCode && selection?.model === options.provider?.defaultModel
   const profile = !selection || sameActiveModel ? options.provider : providerProfiles[selection.provider] ?? (selection.provider === currentProviderCode ? options.provider : undefined)
-  if (selection && !profile) throw new Error(`RUN_PROVIDER_UNAVAILABLE:${selection.provider}`)
+  if (selection && !profile) return { ...options, taskRouting: options.taskRouting ?? {} }
   const restoredProvider = profile ? restoreEffort(profile, snapshot.activeProviderEffort) : undefined
   return {
     ...options, providerModels, providerProfiles, taskRouting,

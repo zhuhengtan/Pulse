@@ -1,3 +1,5 @@
+import { relative } from 'node:path'
+import { WorkspaceReadAccess, type WorkspaceAccessSnapshot } from './workspace-access.js'
 import type { SkillSnapshot } from './skill-store.js'
 import type { ToolDefinition } from '@hunterzhu/pulse-tool-sdk'
 import type { JsonValue } from '@hunterzhu/pulse-runtime'
@@ -17,6 +19,7 @@ export interface CapabilityPackManifest {
 
 export interface CapabilityPackContext {
   workspaceRoot: string
+  workspaceAccess?: WorkspaceAccessSnapshot
   config: Readonly<Record<string, JsonValue>>
   signal: AbortSignal
   skillSnapshots?: Map<string, SkillSnapshot>
@@ -143,19 +146,32 @@ export const referenceCapabilityPackCatalog: readonly CapabilityPackManifest[] =
 /** Document operations that still have no adapter. The five office tools are implemented and must be enabled explicitly. */
 export const unimplementedDocumentCapabilities = [] as const
 
-function documentTool(workspaceRoot: string, name: string, code: string) {
-  const tool = createDocumentTools(workspaceRoot).find((item) => item.manifest.name === name)
+function documentTool(workspaceRoot: string, name: string, code: string, snapshot?: WorkspaceAccessSnapshot): ToolDefinition {
+  const tool = createDocumentTools(snapshot?.primaryRoot ?? workspaceRoot).find((item) => item.manifest.name === name)
   if (!tool) throw new Error(code)
-  return tool
+  if (!snapshot) return tool
+  const access = new WorkspaceReadAccess(snapshot, workspaceRoot)
+  if (tool.manifest.sideEffectPolicy !== 'read') return { ...tool, execute: async (input, context) => { await access.select('.'); return tool.execute(input as never, context) } }
+  return {
+    ...tool,
+    manifest: { ...tool.manifest, permissions: { ...tool.manifest.permissions, workspaceRoots: access.roots } },
+    execute: async (raw, context) => {
+      const input = raw as { path: string }
+      const selected = await access.select(input.path)
+      const reader = createDocumentTools(selected.root).find(item => item.manifest.name === name)!
+      const result = await reader.execute({ ...input, path: relative(selected.root, selected.path) } as never, context)
+      return { ...result, path: input.path }
+    },
+  }
 }
 
 /** PDF text extraction and one-page PNG rendering. Enabling the pack does not change the user's enabled list. */
 export function createPdfCapabilityPack(): CapabilityPack {
   return {
     manifest: { id: 'pdf', version: '1', kind: 'integration', title: 'PDF', description: 'Bounded PDF text extraction and local page rendering inside the active workspace.' },
-    async activate({ workspaceRoot }) {
-      const read = documentTool(workspaceRoot, 'document.pdf.read', 'PDF_TOOL_UNAVAILABLE')
-      const render = documentTool(workspaceRoot, 'document.pdf.render', 'PDF_TOOL_UNAVAILABLE')
+    async activate({ workspaceRoot, workspaceAccess }) {
+      const read = documentTool(workspaceRoot, 'document.pdf.read', 'PDF_TOOL_UNAVAILABLE', workspaceAccess)
+      const render = documentTool(workspaceRoot, 'document.pdf.render', 'PDF_TOOL_UNAVAILABLE', workspaceAccess)
       return { tools: [
         { ...read, manifest: { ...read.manifest, name: 'pdf.read' } },
         { ...render, manifest: { ...render.manifest, name: 'pdf.page.render' } },
@@ -168,9 +184,9 @@ export function createPdfCapabilityPack(): CapabilityPack {
 export function createSpreadsheetCapabilityPack(): CapabilityPack {
   return {
     manifest: { id: 'spreadsheet', version: '1', kind: 'integration', title: 'Spreadsheets', description: 'Bounded XLSX preview and xlsx.write inside the active workspace.' },
-    async activate({ workspaceRoot }) {
-      const inspect = documentTool(workspaceRoot, 'document.xlsx.inspect', 'SPREADSHEET_TOOL_UNAVAILABLE')
-      const write = documentTool(workspaceRoot, 'document.xlsx.write', 'SPREADSHEET_TOOL_UNAVAILABLE')
+    async activate({ workspaceRoot, workspaceAccess }) {
+      const inspect = documentTool(workspaceRoot, 'document.xlsx.inspect', 'SPREADSHEET_TOOL_UNAVAILABLE', workspaceAccess)
+      const write = documentTool(workspaceRoot, 'document.xlsx.write', 'SPREADSHEET_TOOL_UNAVAILABLE', workspaceAccess)
       return { tools: [
         { ...inspect, manifest: { ...inspect.manifest, name: 'spreadsheet.inspect' } },
         { ...write, manifest: { ...write.manifest, name: 'spreadsheet.xlsx.write' } },
@@ -183,9 +199,9 @@ export function createSpreadsheetCapabilityPack(): CapabilityPack {
 export function createDocxCapabilityPack(): CapabilityPack {
   return {
     manifest: { id: 'docx', version: '1', kind: 'integration', title: 'DOCX', description: 'Bounded DOCX text extraction and DOCX generation inside the active workspace.' },
-    async activate({ workspaceRoot }) {
-      const read = documentTool(workspaceRoot, 'document.docx.read', 'DOCX_TOOL_UNAVAILABLE')
-      const write = documentTool(workspaceRoot, 'document.docx.write', 'DOCX_TOOL_UNAVAILABLE')
+    async activate({ workspaceRoot, workspaceAccess }) {
+      const read = documentTool(workspaceRoot, 'document.docx.read', 'DOCX_TOOL_UNAVAILABLE', workspaceAccess)
+      const write = documentTool(workspaceRoot, 'document.docx.write', 'DOCX_TOOL_UNAVAILABLE', workspaceAccess)
       return { tools: [
         { ...read, manifest: { ...read.manifest, name: 'docx.read' } },
         { ...write, manifest: { ...write.manifest, name: 'docx.write' } },
@@ -198,9 +214,9 @@ export function createDocxCapabilityPack(): CapabilityPack {
 export function createPptxCapabilityPack(): CapabilityPack {
   return {
     manifest: { id: 'pptx', version: '1', kind: 'integration', title: 'PPTX', description: 'Bounded PPTX reading and PPTX generation inside the active workspace.' },
-    async activate({ workspaceRoot }) {
-      const read = documentTool(workspaceRoot, 'document.pptx.read', 'PPTX_TOOL_UNAVAILABLE')
-      const write = documentTool(workspaceRoot, 'document.pptx.write', 'PPTX_TOOL_UNAVAILABLE')
+    async activate({ workspaceRoot, workspaceAccess }) {
+      const read = documentTool(workspaceRoot, 'document.pptx.read', 'PPTX_TOOL_UNAVAILABLE', workspaceAccess)
+      const write = documentTool(workspaceRoot, 'document.pptx.write', 'PPTX_TOOL_UNAVAILABLE', workspaceAccess)
       return { tools: [
         { ...read, manifest: { ...read.manifest, name: 'pptx.read' } },
         { ...write, manifest: { ...write.manifest, name: 'pptx.write' } },

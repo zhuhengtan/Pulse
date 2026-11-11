@@ -415,6 +415,8 @@ MCP 配置会启动本机进程，必须只填写自己信任的服务；服务�
 
 ```bash
 pulse schedule add --every 1h --name "项目巡检" "检查项目状态并报告需要处理的问题"
+pulse schedule add --daily 09:00 --timezone Asia/Shanghai "Review project status"
+pulse schedule add --weekly mon --time 10:00 --timezone Asia/Shanghai "Review weekly work"
 pulse schedule list
 pulse schedule pause <task-id>
 pulse schedule resume <task-id>
@@ -422,7 +424,7 @@ pulse schedule remove <task-id>
 pulse --read-only schedule daemon
 ```
 
-后台任务存储在 Pulse 数据目录下，支持跨进程 claim 防重、失败记录和进程退出恢复。Worker 要求 `read-only` 或显式 `auto` 审批；需要写入的计划应在用户配置中明确设置 `approvalMode: "auto"`，并保持模型安全审查开启。`pulse schedule run-once` 可执行当前已到期的一轮任务。
+后台任务存储在 Pulse 数据目录下，支持跨进程 claim 防重、失败记录和进程退出恢复。Worker 要求 `read-only` 或显式 `auto` 审批；需要写入的计划应在用户配置中明确设置 `approvalMode: "auto"`，并保持模型安全审查开启。`pulse schedule run-once` 可执行当前已到期的一轮任务。 日历计划还支持指定日期（`--at`），默认跳过错过的时点；[时区、夏令时、离线与重启说明](docs/scheduled-tasks.md)。
 
 交互模式中可以用 `/model gpt5.6-a` 切换模型；启动时也可以用 `--model gpt5.6-a` 或 `PULSE_MODEL=gpt5.6-a` 选择模型。完整配置加载顺序和字段说明见 [`docs/cli-config.md`](./docs/cli-config.md)。
 

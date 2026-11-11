@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,10 +10,15 @@ describe('H5 trace publication and cold restore', () => {
   it('redacts before SSE and disk writes, preserves attempt identity/timing, and sanitizes legacy traces on read', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'pulse-h5-trace-'))
     const host = createLocalHost({ cwd: dir, dataDir: dir, mockResponse: '完成' })
+    acceptWorkRequests(host)
     let server = new H5Server(host, { dataDir: dir, host: '127.0.0.1', port: 0 })
     const sendMessage = host.sendMessage.bind(host)
-    const spy = vi.spyOn(host, 'sendMessage').mockImplementation(async (conversationId, input) => {
-      const handle = await sendMessage(conversationId, input)
+    const spy = vi.spyOn(host, 'sendMessage').mockImplementation(async (...args) => {
+      const [conversationId] = args
+      // Keep the private admission permit as well as any future optional
+      // arguments. Dropping it would re-enter admission instead of decorating
+      // the run whose capacity the real H5 entry point already reserved.
+      const handle = await sendMessage(...args)
       const injected: AssistantEvent['data'][] = [
         { kind: 'tool_start', effectId: 'trace-tool', laneId: 'trace-root', attemptId: 'tool-a1', tool: 'shell.exec', args: { command: 'echo', args: ['--api-key', 'argv-secret'] } },
         { effectId: 'trace-tool', laneId: 'trace-root', attemptId: 'tool-a1', tool: 'shell.exec', status: 'failed', args: { password: 'argument-secret' }, preview: { output: 'token=output-secret' }, result: { stderr: 'password=error-secret', code: 'FAILED' } },
@@ -36,6 +42,8 @@ describe('H5 trace publication and cold restore', () => {
       const sent = await fetch(`${base}/api/conversations/${conversation.id}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ text: '简单回复即可' }) })
       expect(sent.status).toBe(200)
       const { runId } = await sent.json() as { runId: string }
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]?.[2]).toMatchObject({ runId, conversationKey: `${dir}:${conversation.id}` })
       const sse = await fetch(`${base}/api/runs/${runId}/events`, { headers: { Cookie: cookie } }).then(response => response.text())
       for (const secret of ['argv-secret', 'argument-secret', 'output-secret', 'error-secret']) expect(sse).not.toContain(secret)
       const live = await fetch(`${base}/api/runs/${runId}/trace`, { headers: { Cookie: cookie } }).then(response => response.json()) as { events: WebRunEvent[]; seq: number }

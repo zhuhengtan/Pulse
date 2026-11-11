@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AssistantConversationStore } from '../packages/server/src/h5/assistant.js'
-import { assistantChatAllowedToolNames, assistantChatRequiredToolNames, assistantExplicitToolRequests } from '../packages/server/src/index.js'
+import { assistantChatAllowedToolNames } from '../packages/server/src/index.js'
 
 const directories: string[] = []
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
@@ -43,41 +43,12 @@ describe('assistant inbox', () => {
   })
 })
 
-describe('assistant explicit tool routing', () => {
+describe('assistant tool availability', () => {
   const names = ['fs.read', 'jarvis.context', 'work.start', 'work.list', 'work.status']
 
-  it('requires work.start and allows work.list to resolve its project prerequisite', () => {
-    expect(assistantChatRequiredToolNames(names, '请通过 work.start 在 Pulse 项目启动工作会话，读取 packages/cli/package.json；若无法确认项目 ID，请先调用 work.list。'))
-      .toEqual(['work.start', 'work.list'])
-  })
-
-  it('does not force a negated work tool and preserves the direct file-read route', () => {
-    expect(assistantChatRequiredToolNames(names, '请读取 packages/cli/package.json；不要调用 work.start。'))
-      .toEqual(['fs.read'])
-  })
-
-  it('recognizes explicit tool names wrapped in Markdown code ticks', () => {
-    expect(assistantExplicitToolRequests(names, '请调用 `work.status` 查询状态。'))
-      .toEqual(['work.status'])
-  })
-
-  it('recognizes a named work tool followed by its action without an invocation verb', () => {
-    expect(assistantChatRequiredToolNames(names, '请用 work.list 确认 Pulse 项目 ID，然后 work.start 创建只读工作，读取 packages/cli/package.json 的 name 字段。'))
-      .toEqual(['work.start', 'work.list'])
-  })
-
-  it('unlocks follow-up tools after all explicitly required tools have run', () => {
-    const message = '请用 work.list 确认 Pulse 项目 ID，然后 work.start 创建只读工作。'
-    expect(assistantChatAllowedToolNames(names, message, new Set(['work.list'])))
-      .toEqual(['work.start'])
-    expect(assistantChatAllowedToolNames(names, message, new Set(['work.list', 'work.start'])))
+  it('presents the configured tools for the model to choose and prevents repeated delegation', () => {
+    expect(assistantChatAllowedToolNames(names, new Set())).toEqual(names)
+    expect(assistantChatAllowedToolNames(names, new Set(['work.list', 'work.start'])))
       .toEqual(['fs.read', 'jarvis.context', 'work.list', 'work.status'])
-  })
-
-  it('does not treat an explanation or a negated mention as a tool request', () => {
-    expect(assistantExplicitToolRequests(names, '请解释 work.start 是什么，以及 work.list 做什么。'))
-      .toEqual([])
-    expect(assistantExplicitToolRequests(names, '不要调用 work.start，也不要 work.list。'))
-      .toEqual([])
   })
 })

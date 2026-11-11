@@ -29,7 +29,9 @@ const sensitive = /(^|[\\/])(?:\.git|\.ssh|\.pulse|\.codex|\.env(?:\.[^\\/]*)?)(
 
 /** Read-only evidence for local approval, never an authorization or auto-pass. */
 export async function approvalScriptContext(root: string, input: Record<string, JsonValue>): Promise<{ path: string; content: string; truncated: boolean } | undefined> {
-  if (input.command !== 'node' || !Array.isArray(input.args) || input.args.length !== 1 || typeof input.args[0] !== 'string' || input.args[0].startsWith('-') || !/\.[cm]?js$/.test(input.args[0])) return undefined
+  // Arguments after the script are part of the operation under review. They
+  // must not erase its preview; this only supplies evidence, never approval.
+  if (input.command !== 'node' || !Array.isArray(input.args) || input.args.length < 1 || input.args.length > 32 || input.args.some(arg => typeof arg !== 'string') || typeof input.args[0] !== 'string' || input.args[0].startsWith('-') || !/\.[cm]?js$/.test(input.args[0])) return undefined
   try {
     const canonicalRoot = await within(root, '.')
     const cwd = await within(root, typeof input.cwd === 'string' ? input.cwd : '.')

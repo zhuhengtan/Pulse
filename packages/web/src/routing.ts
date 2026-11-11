@@ -1,13 +1,13 @@
 import { useCallback, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 
-export const settingsCategories = ['appearance', 'updates', 'desktop', 'devices', 'messages', 'models', 'routing', 'front', 'approval', 'jarvis', 'tools', 'mcp', 'builtin-plugins', 'network', 'instructions', 'runtime', 'archive', 'advanced'] as const
+export const settingsCategories = ['device-use', 'voice', 'appearance', 'updates', 'desktop', 'devices', 'messages', 'models', 'routing', 'front', 'approval', 'jarvis', 'tools', 'mcp', 'builtin-plugins', 'network', 'instructions', 'runtime', 'archive', 'advanced'] as const
 export const workspaceTabs = ['files', 'git', 'preview', 'terminal', 'automation'] as const
 export type WorkspaceTab = typeof workspaceTabs[number]
 export type QueryPatch = Record<string, string | number | boolean | undefined>
 export type PulseRoute = { page: 'chat' | 'work' | 'settings' | 'archive' | 'pair' | 'missing'; conversationId?: string; newWork: boolean; category?: string; query: URLSearchParams }
 
-const queryKeys = new Set(['referenceConversation', 'project', 'workspace', 'path', 'file', 'offset', 'staged', 'diff', 'terminal', 'automation', 'details', 'artifact', 'artifactRun', 'code', 'previewHidden'])
+const queryKeys = new Set(['notices', 'noticeRevision', 'noticeRun', 'referenceConversation', 'project', 'workspace', 'path', 'file', 'offset', 'staged', 'diff', 'terminal', 'automation', 'details', 'artifact', 'artifactRun', 'code', 'previewHidden'])
 const pathKeys = new Set(['path', 'file', 'diff', 'artifact'])
 export function safeRelativePath(value: string): boolean { return !value.startsWith('/') && !value.includes('\\') && !value.includes('\0') && !value.split('/').includes('..') }
 

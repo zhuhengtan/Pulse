@@ -7,6 +7,7 @@ const { version } = JSON.parse(readFileSync(new URL('./package.json', import.met
 
 export default defineConfig({
   base: './',
+  css: { postcss: { plugins: [] } },
   plugins: [{
     name: 'pulse-development-info',
     transformIndexHtml() { return [{ tag: 'meta', attrs: { name: 'pulse-frontend-version', content: version }, injectTo: 'head' }] },

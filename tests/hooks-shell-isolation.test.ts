@@ -69,7 +69,12 @@ it('keeps an ordinary shell merge and seals only the hook child environment', as
   expect(env.HTTP_PROXY).toBe(proxy)
   expect(env.HOME).toContain('pulse-shell-')
   const policy = initialize.mock.calls.at(-1)![0] as { network: { allowedDomains: string[]; strictAllowlist: boolean }; filesystem: { allowWrite: string[] } }
-  expect(policy.network).toEqual({ allowedDomains: [], deniedDomains: [], strictAllowlist: true })
+  // No domains, no loopback binding; the only socket grant is the invocation-private data IPC directory.
+  const { allowUnixSockets, ...network } = policy.network as typeof policy.network & { allowUnixSockets?: string[]; allowLocalBinding?: boolean }
+  expect(network).toEqual({ allowedDomains: [], deniedDomains: [], strictAllowlist: true })
+  expect(allowUnixSockets).toHaveLength(1)
+  expect(allowUnixSockets![0]).toContain('pulse-shell-ipc-')
+  expect(env.PULSE_DATA_IPC_ROOT).toBe(allowUnixSockets![0])
   expect(policy.filesystem.allowWrite).not.toContain(root)
 })
 

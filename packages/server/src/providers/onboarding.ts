@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { createProviderAdapter } from '@hunterzhu/pulse-adapters'
 import type { JsonValue, LLMRequestProjection, ProviderHistoryMessage } from '@hunterzhu/pulse-runtime'
 import type { ProviderDefinition, ModelDefinition } from '../model-config.js'
-import { resolveProviderVariant } from './catalog.js'
+import { resolveProviderVariant, savedProviderPreset } from './catalog.js'
 import { resolveProviderApiKey } from './credentials.js'
 import type { CapabilityStatus, DiscoveredModel, ProviderConnectionInput, ProviderDiscovery, ProviderProbe } from './types.js'
 
@@ -17,6 +17,24 @@ export function providerErrorCode(error: unknown): string {
   if (/^MODEL_(?:TOKEN_LIMIT_INVALID|CONTEXT_OUTPUT_CONFLICT|CONTEXT_SOURCE_INVALID):/.test(message)) return message
   return /^(?:PROVIDER|CONFIG|MODEL)_[A-Z0-9_]+$/.test(message) ? message : 'PROVIDER_REQUEST_FAILED'
 }
+/** Keep a previously stored model that discovery would reject. A newly submitted non-chat model is not accepted. */
+export function retainedStoredModel(raw: unknown, previous: Record<string, ModelDefinition> | undefined): DiscoveredModel | undefined {
+  const item = object(raw)
+  const code = typeof item.modelCode === 'string' ? item.modelCode : typeof item.id === 'string' ? item.id : undefined
+  if (!code || !previous) return undefined
+  const stored = Object.values(previous).find(model => model.modelCode === code)
+  if (!stored || normalizeDiscoveredModel(stored)) return undefined
+  return {
+    modelCode: stored.modelCode,
+    displayName: stored.displayName || stored.modelCode,
+    imageInput: stored.imageInput ?? 'unknown',
+    tools: stored.tools ?? 'unsupported',
+    structuredOutput: stored.structuredOutput ?? 'unknown',
+    ...(stored.purposes ? { purposes: stored.purposes } : {}),
+    ...(stored.remote === true ? { remote: true } : {}),
+  }
+}
+
 export function normalizeDiscoveredModel(raw: unknown): DiscoveredModel | undefined {
   const item = object(raw), id = item.id ?? item.modelCode
   if (typeof id !== 'string' || !id.trim() || id.length > 250 || /[\x00-\x1f]/.test(id)) return undefined
@@ -64,26 +82,30 @@ export class ProviderOnboarding {
   constructor(private readonly configPath: string) {}
   async connection(input: ProviderConnectionInput, config: Record<string, any>): Promise<{ input: ProviderConnectionInput; provider: ProviderDefinition; apiKey: string; docsURL: string }> {
     if (typeof input.presetId !== 'string' || typeof input.connectionVariant !== 'string') throw new Error('PROVIDER_PRESET_INVALID')
-    const { preset, variant } = resolveProviderVariant(input.presetId, input.connectionVariant)
-    const existing = input.providerId ? config.providers?.[input.providerId] : undefined
+    const existing = input.providerId && Object.hasOwn(config.providers ?? {}, input.providerId) ? config.providers[input.providerId] : undefined
     if (input.providerId && !existing) throw new Error('PROVIDER_NOT_FOUND')
-    if (existing && (existing.presetId !== input.presetId || existing.connectionVariant !== input.connectionVariant)) throw new Error('PROVIDER_CONNECTION_MISMATCH')
+    const saved = input.presetId === 'saved'
+    if (saved && (!existing || input.connectionVariant !== 'current')) throw new Error('PROVIDER_CONNECTION_MISMATCH')
+    const preset = saved ? savedProviderPreset(existing) : resolveProviderVariant(input.presetId, input.connectionVariant).preset
+    const variant = preset.variants.find(item => item.id === input.connectionVariant)!
+    if (!saved && existing && (existing.presetId !== input.presetId || existing.connectionVariant !== input.connectionVariant)) throw new Error('PROVIDER_CONNECTION_MISMATCH')
     const baseURL = preset.id === 'custom' || variant.editableBaseURL ? input.baseURL ?? existing?.baseURL ?? variant.baseURL : variant.baseURL
     let url: URL
     try { url = new URL(baseURL ?? '') } catch { throw new Error('PROVIDER_ENDPOINT_INVALID') }
     const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
-    const privateRemote = preset.id === 'ollama' && variant.id === 'remote' && (/^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(url.hostname) || url.hostname.endsWith('.local') || /^\[f[cd][0-9a-f]/i.test(url.hostname))
+    const privateRemote = (preset.id === 'ollama' && variant.id === 'remote' || saved && variant.provider === 'ollama-remote') && (/^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(url.hostname) || url.hostname.endsWith('.local') || /^\[f[cd][0-9a-f]/i.test(url.hostname))
     if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.protocol === 'http:' && !loopback && !privateRemote || variant.loopbackOnly && !loopback) throw new Error('PROVIDER_ENDPOINT_INVALID')
     if (variant.discovery === 'ollama') {
       url.pathname = url.pathname.replace(/\/+$/, '').replace(/\/(?:api|v1)$/, '') + '/v1'
     }
     const apiKey = variant.auth === 'none' ? '' : (input.apiKey !== undefined ? input.apiKey.trim() : existing ? await resolveProviderApiKey(existing, this.configPath) : undefined) ?? ''
     if ((!apiKey && (variant.auth ?? 'required') === 'required') || apiKey.length > 16384 || /[\r\n\0]/.test(apiKey)) throw new Error('PROVIDER_CREDENTIAL_MISSING')
-    return { input, provider: { provider: variant.provider, presetId: preset.id, connectionVariant: variant.id, name: input.name?.trim().slice(0, 100) || existing?.name || preset.name, baseURL: url.href.replace(/\/$/, '') }, apiKey, docsURL: preset.docsURL }
+    return { input, provider: { ...(saved ? existing : {}), provider: variant.provider, ...(!saved ? { presetId: preset.id, connectionVariant: variant.id } : {}), ...(existing?.apiMode ? { apiMode: existing.apiMode, responsesTransport: existing.responsesTransport } : {}), name: input.name?.trim().slice(0, 100) || existing?.name || preset.name, baseURL: url.href.replace(/\/$/, '') }, apiKey, docsURL: preset.docsURL }
   }
   async discover(input: ProviderConnectionInput, config: Record<string, any>): Promise<ProviderDiscovery> {
     const connection = await this.connection(input, config)
-    const { preset, variant } = resolveProviderVariant(input.presetId, input.connectionVariant)
+    const preset = input.presetId === 'saved' ? savedProviderPreset(config.providers[input.providerId!]) : resolveProviderVariant(input.presetId, input.connectionVariant).preset
+    const variant = preset.variants.find(item => item.id === input.connectionVariant)!
     if (variant.discovery === 'catalog') return { models: structuredClone(variant.catalog ?? []), source: 'catalog', sourceURL: preset.docsURL, catalogVersion: preset.catalogVersion, authenticated: false }
     const models = new Map<string, DiscoveredModel>()
     const seen = new Set<string>()
@@ -103,7 +125,7 @@ export class ProviderOnboarding {
       for (const raw of rows) {
         const record = object(raw)
         const cloudModel = Boolean(record.remote_host || record.remote_model) || /(?:-cloud|:cloud)$/.test(String(record.model ?? record.name))
-        const item = normalizeDiscoveredModel(variant.discovery === 'ollama' ? { ...record, id: record.model ?? record.name, remote: variant.id !== 'local' || cloudModel, ...(variant.id === 'cloud' || cloudModel ? { structuredOutput: 'unsupported' } : {}) } : raw)
+        const item = normalizeDiscoveredModel(variant.discovery === 'ollama' ? { ...record, id: record.model ?? record.name, remote: ['ollama-cloud', 'ollama-remote'].includes(variant.provider) || cloudModel, ...(variant.provider === 'ollama-cloud' || cloudModel ? { structuredOutput: 'unsupported' } : {}) } : raw)
         if (item) models.set(item.modelCode, item)
       }
       if (models.size > 10000) throw new Error('PROVIDER_MODEL_LIST_TOO_LARGE')
@@ -127,7 +149,7 @@ export class ProviderOnboarding {
     } catch (error) { if (error instanceof Error && error.message === 'PROVIDER_MODEL_LIST_TOO_LARGE') throw error; throw new Error('PROVIDER_MODEL_LIST_INVALID') }
     finally { await reader.cancel().catch(() => undefined) }
   }
-  private probeKey(provider: ProviderDefinition, apiKey: string, modelCode: string): string { return createHash('sha256').update(JSON.stringify([provider.provider, provider.baseURL, apiKey, modelCode])).digest('hex') }
+  private probeKey(provider: ProviderDefinition, apiKey: string, modelCode: string): string { return createHash('sha256').update(JSON.stringify([provider.provider, provider.baseURL, provider.apiMode, provider.responsesTransport, apiKey, modelCode])).digest('hex') }
   async probe(input: ProviderConnectionInput, config: Record<string, any>): Promise<ProviderProbe> {
     const { provider, apiKey } = await this.connection(input, config)
     const modelCode = input.modelCode
@@ -135,7 +157,7 @@ export class ProviderOnboarding {
     const result: ProviderProbe = { modelCode, chat: { status: 'skipped' }, tools: { status: 'skipped' }, structuredOutput: { status: 'skipped' } }
     const savedModel = Object.values(object(config.providers?.[input.providerId ?? '']).models ?? {}).find((item: any) => item.modelCode === modelCode) as ModelDefinition | undefined
     if (savedModel?.purposes && !savedModel.purposes.includes('chat')) throw new Error('PROVIDER_MEDIA_MODEL_USE_PLUGIN_TEST')
-    const profile = { provider: provider.provider, baseURL: provider.baseURL!, apiKey, defaultModel: modelCode, maxOutputTokens: 1024, ...(['ollama', 'ollama-cloud', 'ollama-remote'].includes(provider.provider) ? { reasoningEffort: 'none' as const } : {}), ...(input.remote === true || savedModel?.remote === true ? { remote: true } : {}), ...(input.structuredOutput === 'unsupported' || savedModel?.structuredOutput === 'unsupported' ? { capabilityProfile: { structuredOutput: 'unsupported' as const } } : {}) }
+    const profile = { provider: provider.provider, ...(provider.apiMode ? { apiMode: provider.apiMode } : {}), ...(provider.responsesTransport ? { responsesTransport: provider.responsesTransport } : {}), baseURL: provider.baseURL!, apiKey, defaultModel: modelCode, maxOutputTokens: 1024, ...(['ollama', 'ollama-cloud', 'ollama-remote'].includes(provider.provider) ? { reasoningEffort: 'none' as const } : {}), ...(input.remote === true || savedModel?.remote === true ? { remote: true } : {}), ...(input.structuredOutput === 'unsupported' || savedModel?.structuredOutput === 'unsupported' ? { capabilityProfile: { structuredOutput: 'unsupported' as const } } : {}) }
     const makeRequest = (instruction: string, history?: ProviderHistoryMessage[], tools = false): LLMRequestProjection => ({
       contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'provider-probe', instruction, privacy: 'public', privacyRefs: [], ...(history ? { providerHistory: history } : {}) },
       blocks: [{ kind: 'system', content: 'Connection check. Follow the exact instructions. Do not use external services.' }, ...(tools ? [{ kind: 'tools' as const, content: [{ name: 'pulse_echo', description: 'Return its value unchanged.', inputSchema: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'], additionalProperties: false } }] }] : []), ...(history ? [{ kind: 'provider_history' as const, content: [] }] : []), { kind: 'instruction', content: instruction }], prefixHash: 'probe', projectionHash: 'probe', builderVersion: '1', policyVersion: '1', toolSetVersion: 'provider-probe', privacy: 'public', privacyRefs: [],

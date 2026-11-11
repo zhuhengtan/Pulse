@@ -12,7 +12,7 @@ const canonical = path => realpath(path).catch(error => { if (error.code === 'EN
 const request = (url, init = {}) => fetch(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(3000) });
 
 /** A live PID and a TCP listener alone do not prove ownership of the data. */
-export async function verifyDevelopmentBackend(data, saved) {
+export async function verifyDevelopmentBackend(data, saved, { expectedVersion } = {}) {
     const origin = `http://127.0.0.1:${saved.port}`;
     const local = await request(origin + '/api/session/local', { method: 'POST', headers: { Origin: origin } });
     const cookie = local.headers.get('set-cookie')?.split(';')[0];
@@ -23,14 +23,20 @@ export async function verifyDevelopmentBackend(data, saved) {
     // original descriptor path, which may be a symlink to that directory.
     const scope = createHash('sha256').update(resolve(saved.dataDir ?? data)).digest('hex').slice(0, 32);
     if (!response.ok || !info.localAdmin || info.serverPid !== saved.pid || info.queueScope !== scope) throw new Error('开发后台身份核验失败，未停止任何进程。');
+    if (expectedVersion && info.serverVersion !== expectedVersion) throw new Error(`开发后台版本 ${info.serverVersion ?? '未知'} 与当前仓库 ${expectedVersion} 不一致，已保留原进程。请运行 ./restart-dev.sh 切换到当前仓库后台。`);
 }
 
-/** Restart only a verified development backend. Never signal a PID based on a stale file alone. */
-export async function stopDevelopmentBackend({ data, repo, url, port }) {
+export async function assertDevelopmentDataDirectory(data) {
     const directory = await canonical(data);
     for (const production of [join(homedir(), '.pulse', 'data'), join(process.env.PULSE_HOME ?? join(homedir(), '.pulse'), 'data')]) {
         if (directory === await canonical(production)) throw new Error('拒绝重启正式数据目录，请检查 PULSE_DEV_DIR。');
     }
+    return directory;
+}
+
+/** Restart only a verified development backend. Never signal a PID based on a stale file alone. */
+export async function stopDevelopmentBackend({ data, repo, url, port }) {
+    const directory = await assertDevelopmentDataDirectory(data);
     let saved;
     try { saved = JSON.parse(await readFile(join(data, 'service.json'), 'utf8')); }
     catch (error) { if (error.code !== 'ENOENT') throw new Error('无法读取开发后台 service.json，未停止任何进程。'); }

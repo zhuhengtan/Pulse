@@ -1,17 +1,9 @@
 # Continuous task controller (v57)
 
-The new policy is opt-in. `legacy` remains the default and starts controller v56.
-Restoration registers historical programs and v57 and uses the persisted version;
-changing the current configuration does not migrate an existing run.
-
-```sh
-pulse run --task-controller-policy continuous "Complete the requested task"
-```
-
-The equivalent trusted CLI configuration and `LocalHostOptions` field is
-`taskControllerPolicy: 'legacy' | 'continuous'`. Work still runs through the
-existing Lane/Step/Effect/Scheduler, cancellation, privacy and atomic persistence
-contracts. There is no second controller loop or task database.
+Continuous execution is now the single current Host policy. Historical controller
+labels and the legacy CLI configuration value do not select old behavior. Updates
+use the current implementation to diagnose and take over saved work. See
+[Current controller and autonomous recovery](current-controller-reliability.md).
 
 ## Execution and verification
 
@@ -50,8 +42,11 @@ Compaction considers the full preceding request, model-reported input usage when
 available, new history and output reserve, in addition to ordinary history limits.
 It preserves the pinned proposal and exact selected prefix across at most two
 summary repairs. Invalid summaries never execute tools or replace original
-history. Repeated failure leaves the failed runtime/checkpoint recoverable under
-the existing recovery preflight; it does not silently start a new run. Summary
+history. After bounded model-summary failure, the current Host uses a recorded-fact
+checkpoint containing the original contract, actual decisions and evidence refs.
+It marks the model summary unavailable and never imports a proposed operation
+as an executed receipt. Generic SDK programs without this fallback keep their
+original failure behavior. Summary
 requests alone cannot trigger recursive compaction without new work.
 
 ## Long commands
@@ -104,5 +99,5 @@ The comparison test prints `MOCK_COMPARISON` metrics for a fixed 20-read/one-wri
 script. These measurements establish deterministic control-flow behavior only;
 they do not establish autonomous completion rates or paid-token savings.
 
-No real-provider evaluation, production installation, service restart or change
-of the default policy is part of this implementation.
+The current policy is the default. Offline protocol validation does not establish
+real-provider quality, installed-client activation or cross-platform acceptance.

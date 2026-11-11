@@ -164,9 +164,7 @@ it('restores an approval-paused run with its original attachment and project-fil
     const conversation = await host.createConversation()
     const first = await host.sendMessage(conversation.id, { text: '读取上传附件并保存摘要，先审批', mentionedFiles: ['参考.txt'], attachments: [{ id: 'resume-upload', name: 'resume.txt', mediaType: 'text/plain', type: 'file', size: 16, data: Buffer.from('ORIGINAL_UPLOAD_ON_RESTORE').toString('base64') }] })
     for await (const event of first.events) { if (event.type === 'waiting') break }
-    const active = (host as unknown as { active: Map<string, { runtime: { cancelAgent: () => void } }> }).active.get(first.id)!
-    active.runtime.cancelAgent = () => {} // Preserve the waiting snapshot, simulating process loss rather than a user cancellation.
-    await host.close(); host = createLocalHost(options)
+    await host.close({ preserveRuns: true }); host = createLocalHost(options)
     const resumed = await host.resumeRun(conversation.id)
     for await (const event of resumed.events) if (event.type === 'waiting') await resumed.reply((event.data as { effectId: string }).effectId, { approved: true })
     expect(await resumed.outcome()).toMatchObject({ status: 'succeeded' })

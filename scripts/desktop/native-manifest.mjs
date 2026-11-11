@@ -8,9 +8,11 @@ async function readNative(runtime, platform, arch) {
     const file = join(root, 'manifest.json');
     const manifest = JSON.parse(await readFile(file, 'utf8'));
     assert.equal(manifest.protocolVersion, 1);
+    assert.equal(manifest.backend, 'agent-desktop');
+    assert.equal(manifest.version, '1.2.0');
     assert.equal(manifest.platform, platform);
     assert.equal(manifest.arch, arch);
-    assert.ok(manifest.hashes?.[`pulse-desktop-helper${platform === 'win32' ? '.exe' : ''}`], 'Native helper missing from manifest');
+    assert.ok(manifest.hashes?.[`agent-desktop${platform === 'win32' ? '.exe' : ''}`], 'Native helper missing from manifest');
     return { root, file, manifest };
 }
 

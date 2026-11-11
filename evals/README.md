@@ -11,6 +11,10 @@ node scripts/eval/run.mjs --dry-run
 
 The dry run lists the tasks and explicitly reports `qualityBaselineCreated: false`. It does not call a provider and must not be reported as an agent-quality result.
 
+For the bounded efficiency comparison, `scripts/eval/efficiency-pair.mjs --out <directory> --config <config> --baseline <archive> --candidate <archive>` runs code-04, research-07 and files-02 in baseline/candidate pairs. It freezes model settings and archive hashes, uses isolated workspaces with personal memory disabled, and never reruns a completed trial. Limits are 32 provider attempts and 10 minutes per trial, 192 attempts across six trials, and a 500,000 input-plus-output token stop threshold between trials. An in-flight trial may exceed that token threshold. Unknown usage or an unverified call ledger stops further trials. Mechanical grading still needs independent research and input-preservation review. Missing `--candidate` prepares only the first baseline trial and pauses until a candidate is supplied.
+
+The general runner keeps conservative token reservation by default. `--token-budget-mode between-trials` explicitly retains the requested per-trial call limit and checks token consumption between trials; it is a soft stop threshold, not a hard token ceiling. The mode is part of the immutable resume identity.
+
 For a real-provider run, first build and pack the CLI. Configure Pulse with a provider and model, and make the configured provider key available through its environment variable. The runner reads the config but does not print its contents. It runs the packed public CLI entry point with a separate workspace and Pulse data directory for each task trial:
 
 ```bash

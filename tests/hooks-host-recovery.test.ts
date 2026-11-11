@@ -22,8 +22,7 @@ it('cold restores the frozen hook version while preserving approval and settled 
     const journal = join(dataDir, 'conversations', c.id, 'runs', run.id, 'hooks')
     const before = await readdir(journal)
     expect(before).toHaveLength(1)
-    ;(first as any).active.get(run.id).runtime.cancelAgent = () => {}
-    await first.close()
+    await first.close({ preserveRuns: true })
     second = createLocalHost({ ...options, mockToolCalls: [], mockResponse: 'done' })
     const resumed = await second.resumeRun(c.id)
     for await (const event of resumed.events) if (event.type === 'waiting') await resumed.reply((event.data as any).effectId, { approved: true })

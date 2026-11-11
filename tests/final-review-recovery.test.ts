@@ -5,12 +5,13 @@ import { buildTaskControllerProgram } from '../packages/server/src/task-controll
 async function runReview(options: { version?: '18' | '19'; verdict?: 'passed' | 'not_met' | 'unverifiable'; repeated?: boolean; changing?: boolean; reason?: string; exhausted?: boolean; frozen?: boolean } = {}) {
   let agentId = '', plans = 0, finals = 0, calls = 0
   const writes: string[] = [], turns = new Map<string, number>()
-  const program = buildTaskControllerProgram({ version: options.version ?? '19', system: 'offline fixture', approvalMode: 'auto', maxTurns: 96, toolNames: ['fs.write', 'host.check'], modelBudgetView: () => ({ limit: 96, used: calls, workAllowed: !(options.exhausted && finals > 0), verificationAllowed: true, finalAllowed: true }) })
+  const program = buildTaskControllerProgram({ version: options.version ?? '19', system: 'offline fixture', approvalMode: 'auto', maxTurns: 96, toolNames: ['fs.write', 'fs.read', 'host.check'], modelBudgetView: () => ({ limit: 96, used: calls, workAllowed: calls < 92 && !(options.exhausted && finals > 0), verificationAllowed: calls < 94, finalAllowed: calls < 96 }) })
   const global = (): any => { const agent = runtime.state.agents.get(agentId)!; return agent.globalVersions.get(agent.latestGlobalVersion) }
   const runtime = new PulseRuntime({ effectExecutor: async effect => {
     if (effect.kind === 'tool') {
       const input = effect.input as any
       if (input.name === 'host.check') return { value: { checks: [{ id: 'reject-invalid', passed: writes.includes('correction-2.mjs'), detail: 'Validation must reject invalid input' }] } }
+      if (input.name === 'fs.read') return { value: { path: 'module.mjs', content: 'export const validation = true', hash: 'hash-module.mjs', nextOffset: null } }
       const path = input.arguments.path as string
       writes.push(path)
       return { value: { path, hash: `hash-${path}`, changed: true } }
@@ -33,7 +34,7 @@ async function runReview(options: { version?: '18' | '19'; verdict?: 'passed' | 
     }
     const taskId = (lane.resume.locals as any).taskControllerTaskId ?? state.activeId
     const turn = (turns.get(taskId) ?? 0) + 1; turns.set(taskId, turn)
-    return { value: turn === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.write', input: { path: plans === 1 ? 'module.mjs' : `correction-${plans}.mjs`, content: 'export const validation = true\n' } }] } : { text: 'Stage done', finishReason: 'stop' } }
+    return { value: turn === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: plans > 1 && options.reason?.startsWith('EVIDENCE_CHANGED') ? 'fs.read' : 'fs.write', input: { path: plans === 1 || options.reason?.startsWith('EVIDENCE_CHANGED') ? 'module.mjs' : `correction-${plans}.mjs`, content: 'export const validation = true\n' } }] } : { text: 'Stage done', finishReason: 'stop' } }
   } })
   const record: JsonValue = { schemaVersion: 1, runId: 'review', objective: 'Create module and reject invalid input', acceptanceCriteria: [{ id: 'c1', description: 'Invalid input is rejected' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [], ...(options.frozen ? { acceptanceChecks: [{ id: 'validation', description: 'Caller-owned invalid-input check', criterionIds: ['c1'], toolName: 'host.check', input: {}, expectedChecks: ['reject-invalid'], covers: [] }] } : {}) }
   agentId = runtime.createAgent({ goal: 'Create module and reject invalid input', program, initialGlobal: { taskRecord: record } }).agentId
@@ -54,33 +55,44 @@ it('repairs a final unmet requirement without replaying the passed delivery', as
   expect(result.controller.tasks[0]).toMatchObject({ id: 'delivery-1', status: 'passed', attempts: 1 })
 })
 
-it('keeps v18 terminal behavior when restoring its historical program', async () => {
+it('runs an old caller label through the current recovery policy', async () => {
   const result = await runReview({ version: '18' })
-  expect(result.outcome.status).toBe('incomplete')
-  expect(result.plans).toBe(1)
+  expect(result.outcome.status).toBe('accepted')
+  expect(result.plans).toBe(2)
 })
 
 it('stops a repeated final failure instead of indefinitely adding correction plans', async () => {
   const result = await runReview({ repeated: true })
   expect(result.outcome.status).toBe('incomplete')
-  expect(result.plans).toBe(2)
+  expect(result.plans).toBeGreaterThan(2)
+  expect(result.calls).toBeLessThanOrEqual(96)
 })
 
-it('bounds changing final failures by the existing goal recovery limit', async () => {
+it('continues changing final failures beyond three attempts within the durable budget', async () => {
   const result = await runReview({ changing: true })
   expect(result.outcome.status).toBe('incomplete')
-  expect(result.controller.goalRecoveries, JSON.stringify(result)).toBe(3)
-  expect(result.plans).toBe(4)
+  expect(result.controller.goalRecoveries, JSON.stringify(result)).toBeGreaterThan(3)
+  expect(result.calls).toBeLessThanOrEqual(96)
   expect(result.writes.filter(path => path === 'module.mjs')).toHaveLength(1)
 })
 
 it.each([
-  { verdict: 'unverifiable' as const },
-  { reason: 'APPROVAL_DENIED: user must approve the operation' },
+  { reason: 'APPROVAL_DENIED: choose another authorized operation' },
   { reason: 'EVIDENCE_CHANGED: original check is stale' },
-  { exhausted: true },
-])('retains uncertainty, refusal and budget stops: %j', async options => {
+])('diagnoses a failed method and completes through another approach: %j', async options => {
   const result = await runReview(options)
+  expect(result.outcome.status).toBe('accepted')
+  expect(result.plans).toBe(2)
+  expect(result.controller.recoveryAttempts[0].failures.length).toBeGreaterThan(0)
+})
+it('retains unresolved verification while trying alternatives within the original budget', async () => {
+  const result = await runReview({ verdict: 'unverifiable' })
+  expect(result.outcome.status).not.toBe('accepted')
+  expect(result.plans).toBeGreaterThan(1)
+  expect(result.calls).toBeLessThanOrEqual(96)
+})
+it('preserves the exhausted budget without launching another plan', async () => {
+  const result = await runReview({ exhausted: true })
   expect(result.outcome.status).toBe('incomplete')
   expect(result.plans).toBe(1)
 })

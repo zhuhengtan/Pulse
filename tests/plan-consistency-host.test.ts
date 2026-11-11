@@ -177,8 +177,7 @@ it('refuses legacy unreviewed approval after cold restore without replaying a wr
     expect(effectId).not.toBe('')
     // Simulate a pre-review checkpoint without changing its original file or human effect.
     await rm(join(cwd, 'data/conversations', conversation.id, 'runs', run.id, 'plan-reviews'), { recursive: true })
-    ;(first as any).active.get(run.id).runtime.cancelAgent = () => {}
-    await first.close()
+    await first.close({ preserveRuns: true })
     second = createLocalHost(options)
     const restored = await second.resumeRun(conversation.id)
     await expect(restored.reply(effectId, { value: 'execute' })).rejects.toMatchObject({ code: 'PLAN_REVIEW_REQUIRED' })

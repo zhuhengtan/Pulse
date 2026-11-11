@@ -1,6 +1,6 @@
 import { ContextLengthControl } from './ContextLengthControl.js'
 import { manualContextTokens, resolveContextTokens } from '@hunterzhu/pulse-server/model-settings'
-import { InputNumber } from 'antd'
+import { Drawer, InputNumber } from 'antd'
 import { useEffect, useMemo, useState } from 'react'
 import { Modal } from 'antd'
 import type { DiscoveredModel, ProviderDiscovery, ProviderPreset, ProviderProbe } from '@hunterzhu/pulse-server/protocol'
@@ -9,6 +9,21 @@ import { ApiError, apiJson, jsonRequest, type PulseWebTransport } from './transp
 import './providers.css'
 
 type Obj = Record<string, any>
+type ModelPurpose = NonNullable<DiscoveredModel['purposes']>[number]
+const modelPurposes = new Set<ModelPurpose>(['chat', 'image', 'video', 'speech', 'music', 'sound'])
+const capability = (value: unknown, fallback: DiscoveredModel['tools']): DiscoveredModel['tools'] => value === 'supported' || value === 'unsupported' || value === 'unknown' ? value : fallback
+function storedDiscoveredModel(raw: Obj): DiscoveredModel {
+  const purposes = Array.isArray(raw.purposes) ? raw.purposes.filter((item): item is ModelPurpose => modelPurposes.has(item)) : []
+  return {
+    modelCode: String(raw.modelCode),
+    displayName: typeof raw.displayName === 'string' ? raw.displayName : String(raw.modelCode),
+    imageInput: capability(raw.imageInput, 'unknown'),
+    tools: capability(raw.tools, 'unsupported'),
+    structuredOutput: capability(raw.structuredOutput, 'unknown'),
+    ...(purposes.length ? { purposes } : {}),
+    ...(typeof raw.remote === 'boolean' ? { remote: raw.remote } : {}),
+  }
+}
 const statusLabels = { passed: '通过', failed: '失败', skipped: '未验证', unsupported: '不支持' }
 export function providerFailure(error: unknown): string {
   const code = error instanceof ApiError ? String(error.detail ?? '') : ''
@@ -19,6 +34,7 @@ export function providerFailure(error: unknown): string {
   if (code.includes('429')) return '服务商限流或额度不足，请稍后重试。'
   if (/404|405/.test(code)) return '此地址没有提供模型目录，请确认地址，或手动填写模型代码。'
   if (code.includes('CREDENTIAL')) return '本机凭据不可用，请重新填写 Key。'
+  if (code.includes('CONNECTION_MISMATCH')) return '服务商接入配置已变化，请关闭编辑窗口后重新打开。'
   if (code.includes('ENDPOINT')) return '请填写有效的 HTTPS 服务地址；本机服务和内网自托管 Ollama 可使用 HTTP。'
   if (code.includes('AGENT_MODEL')) return '默认执行模型需要支持工具调用，请选择其他模型。'
   return '操作未完成，请检查服务连接、Key 和接入类型后重试。'
@@ -37,7 +53,10 @@ export function ProviderWizard({ transport, version, config, providerId, onClose
   const [defaultOutput, setDefaultOutput] = useState<number | undefined>(existing?.maxOutputTokens)
   const [modelOverrides, setModelOverrides] = useState<Record<string, { maxContextTokens?: number | null; maxOutputTokens?: number | null }>>({})
   const [discovery, setDiscovery] = useState<ProviderDiscovery>()
-  const [modelCode, setModelCode] = useState('')
+  const [modelCode, setModelCode] = useState<string>(() => {
+    const active = typeof config.activeModel === 'string' && config.activeModel.startsWith(`${providerId}/`) ? existing?.models?.[config.activeModel.slice(providerId!.length + 1)] : undefined
+    return active?.modelCode ?? (Object.values(existing?.models ?? {}) as Obj[]).find(item => !item.purposes?.length || item.purposes.includes('chat'))?.modelCode ?? ''
+  })
   const [probe, setProbe] = useState<ProviderProbe>()
   const [manualModel, setManualModel] = useState('')
   const [search, setSearch] = useState('')
@@ -49,9 +68,9 @@ export function ProviderWizard({ transport, version, config, providerId, onClose
   const [reload, setReload] = useState(0)
   useEffect(() => {
     let active = true
-    void apiJson<{ presets: ProviderPreset[] }>(transport, '/api/provider-presets').then(value => { if (active) { setPresets(value.presets); setError('') } }).catch(() => { if (active) setError('厂商列表加载失败，请重试。') })
+    void apiJson<{ presets: ProviderPreset[]; selection?: { presetId: string; connectionVariant: string } }>(transport, `/api/provider-presets${providerId ? `?providerId=${encodeURIComponent(providerId)}` : ''}`).then(value => { if (active) { setPresets(value.presets); if (value.selection) { setPresetId(value.selection.presetId); setVariantId(value.selection.connectionVariant); if (!existing?.baseURL) setBaseURL(value.presets.find(item => item.id === value.selection!.presetId)?.variants.find(item => item.id === value.selection!.connectionVariant)?.baseURL ?? '') }; setError('') } }).catch(() => { if (active) setError('厂商列表加载失败，请重试。') })
     return () => { active = false }
-  }, [transport, reload])
+  }, [transport, providerId, reload])
   const preset = presets.find(item => item.id === presetId)
   const variant = preset?.variants.find(item => item.id === variantId)
   const auth = variant?.auth ?? 'required'
@@ -77,8 +96,14 @@ export function ProviderWizard({ transport, version, config, providerId, onClose
   const run = async (action: string, operation: () => Promise<void>) => { setBusy(action); setError(''); try { await operation() } catch (error) { setError(providerFailure(error)) } finally { setBusy('') } }
   const discover = () => run('discover', async () => {
     const result = await apiJson<ProviderDiscovery>(transport, '/api/providers/discover', jsonRequest('POST', input()))
-    setModels(result.models); setDiscovery(result); setProbe(undefined); setPage(0)
-    setModelCode(current => result.models.some(item => item.modelCode === current) ? current : result.models.find(item => item.tools !== 'unsupported')?.modelCode ?? result.models[0]?.modelCode ?? '')
+    const retained = (Object.values(existing?.models ?? {}) as Obj[]).filter(raw => {
+      const code = typeof raw.modelCode === 'string' ? raw.modelCode : ''
+      const purposes = Array.isArray(raw.purposes) ? raw.purposes : []
+      return code && !result.models.some(item => item.modelCode === code) && (/embed|rerank|whisper/i.test(code) || purposes.length > 0 && !purposes.includes('chat'))
+    }).map(storedDiscoveredModel)
+    const next = [...retained, ...result.models]
+    setModels(next); setDiscovery(result); setProbe(undefined); setPage(0)
+    setModelCode(current => next.some(item => item.modelCode === current && (item.tools !== 'unsupported' && (!item.purposes?.length || item.purposes.includes('chat')))) ? current : next.find(item => item.tools !== 'unsupported' && (!item.purposes?.length || item.purposes.includes('chat')))?.modelCode ?? '')
   })
   const verify = () => run('probe', async () => { setProbe(undefined); setProbe(await apiJson<ProviderProbe>(transport, '/api/providers/probe', jsonRequest('POST', input()))) })
   const connect = () => run('connect', async () => {
@@ -86,8 +111,11 @@ export function ProviderWizard({ transport, version, config, providerId, onClose
     setApiKey(''); await onConnected(); onClose()
     window.dispatchEvent(new CustomEvent('pulse-toast', { detail: result.applied ? '服务商已接入，新任务可以使用。' : '接入配置已保存，重启后台后生效。' }))
   })
-  return <Modal open centered title={providerId ? '管理服务商接入' : '添加服务商'} onCancel={() => { if (busy !== 'connect') { setApiKey(''); onClose() } }} footer={null} width={780} className="provider-wizard" styles={{ body: { maxHeight: 'calc(100dvh - 150px)', overflowY: 'auto', paddingRight: 4 } }} mask={{ closable: false }} closable={busy !== 'connect'}>
-    <p>选择服务商，自动配置服务地址和模型。本机 Ollama 无需 Key。</p>
+  const discoveryHint = !preset ? '请先选择服务商' : !variant || variant.available === false ? '请选择可用的站点与套餐' : keyMissing ? '请填写 API Key 后获取模型' : endpointMissing ? '请填写服务地址后获取模型' : '点击“获取全部模型”拉取模型列表'
+  const actions = <div className="provider-wizard-actions"><span>{models.length ? `将导入 ${models.length} 个模型` : discoveryHint}</span><PulseButton type="button" className="settings-primary" title={discoveryHint} disabled={!preset || !variant || variant.available === false || Boolean(busy) || keyMissing || endpointMissing} onClick={() => void discover()}>{busy === 'discover' ? '正在获取模型…' : '获取全部模型'}</PulseButton><PulseButton type="button" disabled={busy === 'connect'} onClick={() => { setApiKey(''); onClose() }}>取消</PulseButton><PulseButton type="button" className="settings-primary" disabled={!models.length || Boolean(busy) || !preset || variant?.available === false || keyMissing || endpointMissing || setDefault && !modelCode} onClick={() => void connect()}>{busy === 'connect' ? '正在保存…' : providerId ? '保存修改' : probe?.chat.status === 'passed' ? '完成接入' : '保存为未验证配置'}</PulseButton></div>
+  const close = () => { if (busy !== 'connect') { setApiKey(''); onClose() } }
+  const content = <>
+    <p>{providerId ? '管理服务商连接、拉取模型列表并验证模型。保存后生效；取消不写入配置。' : '选择服务商，自动配置服务地址和模型。本机 Ollama 无需 Key。'}</p>
     {error && <div className="settings-alert" role="alert">{error}{!presets.length && <PulseButton onClick={() => setReload(value => value + 1)}>重新加载厂商</PulseButton>}</div>}
     <fieldset disabled={Boolean(busy)}>
       {!providerId && <div className="provider-preset-grid">{(['official', 'aggregator', 'custom'] as const).map(category => <section key={category}><h3>{category === 'official' ? '官方厂商' : category === 'aggregator' ? '中间商' : '自定义'}</h3><div>{presets.filter(item => item.category === category).map(item => <PulseButton type="button" key={item.id} aria-pressed={item.id === presetId} className={item.id === presetId ? 'selected' : ''} onClick={() => { setPresetId(item.id); setVariantId(item.variants.find(value => value.available !== false)?.id ?? ''); setName(item.name); setDefaultContext(undefined); setDefaultOutput(undefined); setModelOverrides({}); setApiKey(''); setBaseURL(item.variants.find(value => value.available !== false)?.baseURL ?? ''); resetConnection() }}>{item.name}</PulseButton>)}</div></section>)}</div>}
@@ -102,7 +130,6 @@ export function ProviderWizard({ transport, version, config, providerId, onClose
         <label className="field-control"><span>默认输出上限</span><InputNumber<number> aria-label="默认输出上限" value={defaultOutput ?? null} placeholder="自动（4096）" min={1} precision={0} onChange={value => setDefaultOutput(value ?? undefined)}/></label>
         {preset.variants.some(item => item.available === false) && <p className="field-note">{preset.variants.filter(item => item.available === false).map(item => item.unavailableReason).join(' ')}</p>}
         <p className="field-note">{auth === 'none' ? '连接本机已运行的 Ollama，无需 Key。只读取已有模型，不自动下载模型。' : auth === 'optional' ? '填写远程 Ollama 地址；网关需要鉴权时再填写 Key。远程服务按云端模型处理。' : 'Key 保存在本机独立凭据文件，不写入配置 JSON。套餐验证失败时不会切换到按量计费接口。'}</p>
-        <PulseButton type="button" className="settings-primary" disabled={!variant || variant.available === false || Boolean(busy) || keyMissing || endpointMissing} onClick={() => void discover()}>{busy === 'discover' ? '正在获取模型…' : '获取全部模型'}</PulseButton>
         {discovery && models.length === 0 && presetId === 'ollama' && <p className="field-note">没有发现对话模型。请先在 Ollama 安装模型，或检查所选服务地址。</p>}{discovery && <p role="status">{discovery.source === 'catalog' ? `官方预设清单 · ${discovery.catalogVersion}（尚未验证 Key）` : '已获取远程目录，具体模型权限仍需调用验证'} · {models.length} 个模型 {discovery.sourceURL && <a href={discovery.sourceURL} target="_blank" rel="noreferrer">来源 ↗</a>}</p>}
         <div className="provider-manual"><PulseInput aria-label="手动模型代码" value={manualModel} placeholder="需要时手动补充模型代码" onChange={event => setManualModel(event.target.value)} maxLength={250} /><PulseButton type="button" disabled={!manualModel.trim() || Boolean(busy)} onClick={() => { const code = manualModel.trim(); if (!models.some(item => item.modelCode === code)) setModels(items => [...items, { modelCode: code, displayName: code, tools: 'unknown', structuredOutput: 'unknown', imageInput: 'unknown' }]); setModelCode(code); setManualModel('') }}>添加模型</PulseButton></div>
         {models.length > 0 && <>
@@ -117,6 +144,8 @@ export function ProviderWizard({ transport, version, config, providerId, onClose
         </>}
       </>}
     </fieldset>
-    <footer className="provider-wizard-actions"><span>{models.length ? `将导入 ${models.length} 个模型` : '请选择厂商并获取模型'}</span><PulseButton type="button" disabled={busy === 'connect'} onClick={() => { setApiKey(''); onClose() }}>取消</PulseButton><PulseButton type="button" className="settings-primary" disabled={!models.length || Boolean(busy) || !preset || variant?.available === false || keyMissing || endpointMissing || setDefault && !modelCode} onClick={() => void connect()}>{busy === 'connect' ? '正在保存…' : probe?.chat.status === 'passed' ? '完成接入' : '保存为未验证配置'}</PulseButton></footer>
-  </Modal>
+  </>
+  return providerId
+    ? <Drawer open title="编辑服务商" onClose={close} footer={actions} size={780} rootClassName="provider-wizard provider-wizard-drawer" mask={{ closable: false }} closable={busy !== 'connect'}>{content}</Drawer>
+    : <Modal open centered title="添加服务商" onCancel={close} footer={actions} width={780} className="provider-wizard" styles={{ body: { maxHeight: 'calc(100dvh - 240px)', overflowY: 'auto', paddingRight: 4 } }} mask={{ closable: false }} closable={busy !== 'connect'}>{content}</Modal>
 }

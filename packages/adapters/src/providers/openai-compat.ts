@@ -27,7 +27,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       model: params.model ?? this.config.defaultModel,
       outputSchema: params.outputSchema,
       maxOutputTokens: params.maxOutputTokens ?? this.config.maxOutputTokens,
-      reasoningEffort: params.reasoningEffort ?? this.config.reasoningEffort,
+      reasoningEffort: params.ignoreConfiguredReasoning ? params.reasoningEffort : params.reasoningEffort ?? this.config.reasoningEffort,
       toolChoice: this.config.toolChoice,
       stream: streaming,
     })

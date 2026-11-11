@@ -16,6 +16,14 @@ constraints, not only prompt text:
 - `fs.apply_patch` bounds each find/replace fragment to 8192 bytes, rejects missing
   or ambiguous context, bounds broad replace-all changes, and always uses an
   atomic compare-and-write. Existing file permission bits are preserved.
+- The patch fragment limit is independent of the existing source file size.
+  `fs.apply_patch` and `fs.apply_patches` support UTF-8 source files up to 16 MiB;
+  the Host reads them in bounded chunks and applies only the requested fragments.
+  The model still reads relevant windows and submits small patches, never the
+  entire file. The Host preserves untouched bytes and checks the latest hash
+  before atomic publication. Above this source limit, `FILE_TOO_LARGE` identifies
+  the target file size/limit; shrinking the patch or paginating reads cannot fix
+  that resource limit. New-file draft limits remain separate.
 - These locks coordinate Pulse writers. They do not provide a filesystem-wide
   transaction against every unrelated editor; concurrent external edits should
   still be reviewed.

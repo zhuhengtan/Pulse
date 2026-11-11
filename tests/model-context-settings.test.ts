@@ -1,7 +1,8 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
+afterEach(() => vi.unstubAllEnvs())
 import { hostOptions, parse } from '../packages/cli/src/bin.js'
 import { contextSource, historyBudget, resolveContextTokens, runtimeTokenWindow, validateContextSettings } from '../packages/server/src/model-settings.js'
 import { estimateProjectionTokens } from '../packages/runtime/src/models/router.js'
@@ -51,6 +52,7 @@ it('loads an old conflicting context without changing stored values and keeps th
   expect(() => validateContextSettings(loaded.providers.local, 'local')).toThrow('MODEL_CONTEXT_OUTPUT_CONFLICT:local')
   const directory = await mkdtemp(join(tmpdir(), 'pulse-old-context-'))
   const path = join(directory, 'config.json')
+  vi.stubEnv('PULSE_HOME', join(directory, 'home')); vi.stubEnv('PULSE_CONFIG', path)
   await writeFile(path, JSON.stringify(stored))
   try {
     const options = await hostOptions(parse(['--config', path, '--cwd', directory]))
@@ -80,10 +82,11 @@ it('loads an old conflicting context without changing stored values and keeps th
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
-it('registers a 1-token legacy model and refuses a normal projection before any request', async () => {
+it('refuses a 1-token primary without importing alternatives from the personal configuration', async () => {
   const stored = { providers: { local: { provider: 'mock', maxContextTokens: 1, maxOutputTokens: 4096, models: { 'tiny-legacy': { modelCode: 'tiny', displayName: 'tiny-legacy', maxContextTokens: 1, maxOutputTokens: 4096, maxContextTokensSource: 'manual' as const } } } }, activeModel: 'local/tiny-legacy' }
   const directory = await mkdtemp(join(tmpdir(), 'pulse-tiny-context-'))
   const path = join(directory, 'config.json')
+  vi.stubEnv('PULSE_HOME', join(directory, 'home')); vi.stubEnv('PULSE_CONFIG', path)
   await writeFile(path, JSON.stringify(stored))
   try {
     const options = await hostOptions(parse(['--config', path, '--cwd', directory]))

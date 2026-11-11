@@ -68,10 +68,11 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
       tasks: ['reason', 'plan', 'merge', 'verify', 'vision'],
       priority: isActive ? 100 : 10,
       ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-      ...(selection.supportedReasoningEfforts === undefined ? {} : { supportedReasoningEfforts: selection.supportedReasoningEfforts }),
+      ...(selection.supportedReasoningEfforts === undefined ? support.verified ? { supportedReasoningEfforts: [...support.levels] } : {} : { supportedReasoningEfforts: selection.supportedReasoningEfforts }),
       capabilities: {
         imageInput: selection.imageInput === 'supported',
         toolCalling: selection.tools !== 'unsupported',
+        // The adapter validates JSON/schema output even when native structured transport is unavailable.
         structuredOutput: true,
         reasoning,
         maxContextTokens,
@@ -93,6 +94,7 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
     const modelAdapters = new Map<string, ProviderAdapter>()
     const translated: ProviderAdapter = {
       id: providerCode,
+      providerKind: profiles[providerCode]!.provider,
       name: adapter.name,
       releaseConnectionScope: scope => { adapter.releaseConnectionScope?.(scope); for (const child of modelAdapters.values()) child.releaseConnectionScope?.(scope) },
       dispose: () => { adapter.dispose?.(); for (const child of modelAdapters.values()) child.dispose?.(); modelAdapters.clear() },
@@ -120,7 +122,7 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
   const routes = options.taskRouting ?? {}
   for (const task of ['reason', 'plan', 'merge', 'verify', 'vision'] as const) {
     const configured = routes[task]
-    const entries = configured === undefined ? [options.activeModel] : configured.map(item => routeEntry(item, model => model))
+    const entries = configured === undefined ? [options.activeModel, ...candidates.filter(candidate => candidate.id !== options.activeModel).map(candidate => candidate.id)] : configured.map(item => routeEntry(item, model => model))
     const route = entries.map(routeModelId)
     if (route.length === 0) throw new Error(`EMPTY_MODEL_ROUTE:${task}`)
     if (new Set(route).size !== route.length) throw new Error(`DUPLICATE_MODEL_ROUTE_CANDIDATE:${task}`)

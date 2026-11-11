@@ -1,5 +1,5 @@
 import { readPatchRecoveries, rememberPatchFailures, refreshPatchRecoveries, isPatchRecoveryRead, stalePatchRecord } from './patch-recovery.js'
-import { isUnreadFileWindow, isReadProgress } from './read-continuation.js'
+import { isUnreadFileWindow, isUnreadWebWindow, isReadProgress } from './read-continuation.js'
 import { reusableEvidence } from './evidence-reuse.js'
 import { estimateProjectionTokens } from '../models/router.js'
 import { z, type ZodTypeAny } from 'zod'
@@ -15,10 +15,11 @@ export type NextStepTarget<TState = unknown> = string | { step: string } | { com
 export type ScalarProjection<T> = T extends string | number | boolean | null ? T : T extends readonly unknown[] ? never : T extends object ? { [K in keyof T]: T[K] extends string | number | boolean | null ? T[K] : never } : never
 export interface InstructionView<TState> { goal: string; state: ScalarProjection<TState>; /** Read-only persisted Global Context for host-owned task metadata. */ global?: Readonly<JsonValue> }
 export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; artifacts?: string[]; events?: string[]; conversation?: ConversationMessage[]; toolDiscovery?: RuntimeToolDiscoveryQuery }
-export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number; instruction?: string; maxSummaryRetries?: number; maxContextTokens?: number; outputReserveTokens?: number }
+export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number; instruction?: string; maxSummaryRetries?: number; maxContextTokens?: number; outputReserveTokens?: number; confirmBeforeCompaction?: boolean; /** Host-owned recorded facts only; never a model verdict or invented receipt. */ fallbackSummary?: (ctx: StepContext) => JsonValue }
 /** Full previous request plus newly retained history; Provider usage only raises the estimate. */
 function compactionPressure(state: RuntimeState, lane: LaneRecord, options: HistoryCompactionOptions | undefined): boolean {
-  if (!options?.maxContextTokens) return !!lane.historyPressure && lane.historyPressure.historyTokens > lane.historyPressure.softTokens
+  if (lane.historyPressure && lane.historyPressure.historyTokens > lane.historyPressure.softTokens) return true
+  if (!options?.maxContextTokens) return false
   const latest = [...state.effects.values()].reverse().find(e => e.kind === 'llm' && e.ownerLaneId === lane.id && e.key !== '$compact-summary' && callInput(e.input ?? {}).request)
   const request = latest ? callInput(latest.input ?? {}).request as unknown as import('../core/types.js').LLMRequestProjection : undefined
   if (!request) return false
@@ -34,8 +35,8 @@ function compactionPressure(state: RuntimeState, lane: LaneRecord, options: Hist
  */
 function compactionRetention(ctx: StepContext, options: HistoryCompactionOptions, protocol?: 1 | 2): number {
   const keep = Math.max(0, Math.floor(options.keepRecentRounds))
-  if (protocol !== 2 || !options.maxContextTokens) return keep
-  const available = Math.max(1, options.maxContextTokens - (options.outputReserveTokens ?? 4096))
+  const available = Math.min(ctx.lane.historyPressure?.hardTokens ?? Infinity, options.maxContextTokens === undefined ? Infinity : Math.max(1, options.maxContextTokens - (options.outputReserveTokens ?? 4096)))
+  if (!Number.isFinite(available) || available <= 0) return keep
   let retained = 0, bytes = 0
   const seen = new Set<string>()
   for (const record of ctx.lane.context.history.slice(-keep).reverse()) {
@@ -59,7 +60,9 @@ export interface StepContext<TState = JsonValue> {
   watchdog?: ProgressWatchdogState
   resumeInput?: ResumeInput
   humanInputs?: readonly HumanInputRecord[]
-  results: { meta(ref: ResultRef): ResultMeta | undefined; summary(ref: ResultRef): JsonValue | undefined; read(ref: ResultRef): JsonValue | undefined }
+  results: { list?(): ResultMeta[]; meta(ref: ResultRef): ResultMeta | undefined; summary(ref: ResultRef): JsonValue | undefined; read(ref: ResultRef): JsonValue | undefined }
+  /** Actual provider attempts for settled model effects owned by this lane. */
+  modelAttemptCount?(effectIds: readonly string[]): number
   /** Evidence of a settled direct child, even when it produced no completion result. */
   settledLaneEvidence(laneId: LaneId): { evidenceRefs: ResultRef[]; modelEffectIds: string[]; modelCalls: number; laneState?: JsonValue } | undefined
   mergeProposals: ReadonlyArray<MergeProposal>
@@ -111,11 +114,11 @@ function scalarProjection(value: unknown): JsonValue {
 function boundedInstruction(value: string): string {
   return assertDslInstructionSize(value)
 }
-function programLLMInput(config: { system?: string; explicitContext?: boolean; includeLaneHistory?: boolean; nativeToolHistory?: boolean; contextProtocolVersion?: 1 | 2; requestOutputReserveTokens?: number; toolSet?: string }, input: Record<string, JsonValue>): Record<string, JsonValue> {
-  const isolated = input.isolateVerification === true
+function programLLMInput(config: { system?: string; explicitContext?: boolean; includeLaneHistory?: boolean; nativeToolHistory?: boolean; contextProtocolVersion?: 1 | 2; requestOutputReserveTokens?: number; toolSet?: string; reviewExecution?: boolean }, input: Record<string, JsonValue>): Record<string, JsonValue> {
+  const isolated = input.isolateVerification === true || config.reviewExecution === true && input.task === 'verify'
   const source: Record<string, JsonValue> = { ...input }
   delete source.isolateVerification
-  const merged: Record<string, JsonValue> = { ...source, ...(config.contextProtocolVersion === 2 ? { contextProtocolVersion: 2 } : {}), ...(config.requestOutputReserveTokens ? { requirements: { ...callInput(source.requirements ?? {}), maxOutputTokens: config.requestOutputReserveTokens } } : {}), ...(config.explicitContext ? { explicitContext: true } : {}), ...(config.includeLaneHistory ? { includeLaneHistory: true } : {}), ...(config.nativeToolHistory ? { nativeToolHistory: true } : {}), ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSetId: config.toolSet }) }
+  const merged: Record<string, JsonValue> = { ...source, ...(config.contextProtocolVersion === 2 ? { contextProtocolVersion: 2 } : {}), ...(config.requestOutputReserveTokens ? { requirements: { ...callInput(source.requirements ?? {}), maxOutputTokens: config.reviewExecution && input.task === 'verify' ? Math.min(8192, config.requestOutputReserveTokens) : config.requestOutputReserveTokens } } : {}), ...(config.explicitContext ? { explicitContext: true } : {}), ...(config.includeLaneHistory ? { includeLaneHistory: true } : {}), ...(config.nativeToolHistory ? { nativeToolHistory: true } : {}), ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSetId: config.toolSet }) }
   if (!isolated) return merged
   return { ...merged, explicitContext: true, includeLaneHistory: false, nativeToolHistory: false, system: 'You are an isolated verifier. The visible content must be one JSON object matching the schema. Do not call tools. Private reasoning and provider continuation are not results. Whitespace-only content is invalid.', tools: { tools: [] }, toolSetId: 'pulse.verify.isolated' }
 }
@@ -623,7 +626,15 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   const ctx: StepContext<TState> = {
     lane: context.lane, goal: context.lane.goal, global, globalVersion, laneState: readonlyState, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}), ...(context.humanInputs?.length ? { humanInputs: context.humanInputs } : {}),
 
-    results: { meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary }, read: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return findResult(context, ref) } },
+    results: { list: () => [...context.state.results.keys()].flatMap(ref => {
+      const meta = resultMeta(ref)
+      const owner = meta?.producer.kind === 'effect' ? context.state.effects.get(meta.producer.id)?.agentId : meta ? context.state.lanes.get(meta.producer.id)?.agentId : undefined
+      return meta && !context.state.results.get(ref)?.privacyTaints?.length && owner === context.lane.agentId ? [meta] : []
+    }), meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary }, read: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return findResult(context, ref) } },
+    modelAttemptCount: (ids) => [...new Set(ids)].reduce((total, id) => {
+      const effect = context.state.effects.get(id)
+      return total + (effect?.kind === 'llm' && effect.agentId === context.lane.agentId && effect.ownerLaneId === context.lane.id ? (effect.attempts ?? []).reduce((n, attempt) => n + (attempt.providerAttempts ?? (effect.outcome?.error?.code?.startsWith('TASK_MODEL_CALL_BUDGET_') ? 0 : 1)), 0) : 0)
+    }, 0),
     settledLaneEvidence: (laneId) => {
       const child = context.state.lanes.get(laneId)
       if (!child || child.ownerLaneId !== context.lane.id || child.agentId !== context.lane.agentId || !['succeeded', 'failed', 'cancelled'].includes(child.status)) return undefined
@@ -669,7 +680,7 @@ export class StepBuilder<TState = JsonValue> {
   private readonly compactionBoundaries = new Set<string>()
   private boundaryHandler?: ErrorBoundaryHandler<TState>
   private checkpointHandler?: (ctx: StepContext<TState>, step: string) => ReturnType<Handler> | undefined
-  constructor(readonly config: { id: string; version: string; system?: string; explicitContext?: boolean; includeLaneHistory?: boolean; nativeToolHistory?: boolean; contextProtocolVersion?: 1 | 2; requestOutputReserveTokens?: number; modelRetryPolicy?: EffectSubmission['retryPolicy']; toolSet?: string; state?: z.ZodType<TState>; historyCompaction?: HistoryCompactionOptions }) {}
+  constructor(readonly config: { id: string; version: string; system?: string; explicitContext?: boolean; includeLaneHistory?: boolean; nativeToolHistory?: boolean; contextProtocolVersion?: 1 | 2; requestOutputReserveTokens?: number; modelRetryPolicy?: EffectSubmission['retryPolicy']; toolSet?: string; state?: z.ZodType<TState>; reviewExecution?: boolean; handleModelErrors?: boolean; historyCompaction?: HistoryCompactionOptions }) {}
   addStep(name: string, handler: Handler): this { this.handlers.set(name, handler); this.compactionBoundaries.add(name); return this }
   /** Runs before any step can dispatch effects, including queued tools and approvals. */
   beforeStep(handler: (ctx: StepContext<TState>, step: string) => ReturnType<Handler> | undefined): this { this.checkpointHandler = handler; return this }
@@ -686,19 +697,21 @@ export class StepBuilder<TState = JsonValue> {
     recoverRejectedOutput?: boolean
     detailedValidationErrors?: boolean
     isolateVerification?: boolean
+    reviewKey?: (ctx: StepContext<TState>) => string
     onSuccess: (data: z.infer<TOutput>, ctx: StepContext<TState>) => NextStepTarget<TState>
     onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState>
   }): this {
     this.compactionBoundaries.add(name)
     const submit = `${name}:submit`; const decode = `${name}:decode`
-    const maxCorrectionRounds = options.selfCorrect?.maxRounds ?? 1
+    const boundedReview = this.config.reviewExecution === true && options.task === 'verify'
+    const maxCorrectionRounds = boundedReview ? 0 : options.selfCorrect?.maxRounds ?? 1
     const correctionRoundKey = `${name}CorrectRound`
     const inputKey = `${name}Inputs`
     const originalInstructionKey = `${name}OriginalInstruction`
     const readSdk = (ctx: StepContext<TState>): Record<string, JsonValue> => sdkLocals(ctx.lane.resume.locals)
     const writeSdk = (ctx: StepContext<TState>, patch: Record<string, JsonValue>): JsonValue => { const locals = ctx.lane.resume.locals; const base = locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}; return { ...base, $sdk: { ...readSdk(ctx), ...patch } } }
-    const fail = (runtimeError: RuntimeError, ctx: StepContext<TState>): { next: NextStepTarget<TState> } => (runtimeError.code.startsWith('TASK_MODEL_CALL_BUDGET_') || runtimeError.code.startsWith('AI_APPROVAL_')) ? { next: { fail: runtimeError } } : options.onError ? { next: options.onError(runtimeError, ctx) } : (() => { throw Object.assign(new Error(runtimeError.message), runtimeError) })()
-    const retryPolicy = options.retryPolicy ?? this.config.modelRetryPolicy
+    const fail = (runtimeError: RuntimeError, ctx: StepContext<TState>): { next: NextStepTarget<TState> } => !this.config.handleModelErrors && (runtimeError.code.startsWith('TASK_MODEL_CALL_BUDGET_') || runtimeError.code.startsWith('AI_APPROVAL_')) ? { next: { fail: runtimeError } } : options.onError ? { next: options.onError(runtimeError, ctx) } : (() => { throw Object.assign(new Error(runtimeError.message), runtimeError) })()
+    const retryPolicy = boundedReview ? { maxAttempts: 2, sameModel: true, initialBackoffMs: 0, maxBackoffMs: 0, backoffMultiplier: 1, jitter: false, retryableCodes: ['REVIEW_REQUEST_TIMEOUT', 'PROVIDER_NETWORK_ERROR', 'OUTPUT_TRUNCATED', 'OUTPUT_SCHEMA_VIOLATION', ...[408, 425, 429, ...Array.from({ length: 100 }, (_, i) => 500 + i)].map(code => `PROVIDER_HTTP_${code}`)] } : options.retryPolicy ?? this.config.modelRetryPolicy
     const requirements = { ...(options.requirements ?? {}) }
     this.handlers.set(name, (ctx) => {
       const instruction = boundedInstruction(typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: scalarProjection(ctx.laneState) as ScalarProjection<TState>, global: ctx.global }))
@@ -707,12 +720,12 @@ export class StepBuilder<TState = JsonValue> {
       const inputArtifactRefs = [...new Set(inputs.artifacts ?? [])]
       const outputSchema = zodJsonSchema(options.schema)
       const derivedFrom: ProvenanceRef[] = [...inputResultRefs, ...inputArtifactRefs.map((ref) => ({ kind: 'artifact' as const, ref }))]
-      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction, inputs: asJson(inputs), outputSchema, requirements: { ...requirements, structuredOutput: { schema: outputSchema } }, ...(options.isolateVerification ? { isolateVerification: true } : {}), ...(options.executionPolicy === undefined ? {} : { executionPolicy: options.executionPolicy }) }), ...(retryPolicy === undefined ? {} : { retryPolicy }), ...(derivedFrom.length ? { derivedFrom } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode, locals: writeSdk(ctx, { [correctionRoundKey]: 0, [inputKey]: asJson(inputs), [originalInstructionKey]: instruction }) }
+      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction, inputs: asJson(inputs), outputSchema, requirements: { ...requirements, ...(boundedReview ? { reviewKey: options.reviewKey?.(ctx) ?? contentHash({ lane: ctx.lane.id, step: name, goal: ctx.goal, results: inputResultRefs, artifacts: inputArtifactRefs }) } : {}), structuredOutput: { schema: outputSchema } }, ...(options.isolateVerification ? { isolateVerification: true } : {}), ...(options.executionPolicy === undefined ? {} : { executionPolicy: options.executionPolicy }) }), ...(retryPolicy === undefined ? {} : { retryPolicy }), ...(derivedFrom.length ? { derivedFrom } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode, locals: writeSdk(ctx, { [correctionRoundKey]: 0, [inputKey]: asJson(inputs), [originalInstructionKey]: instruction }) }
     })
     this.handlers.set(submit, (ctx) => ({ next: decode }))
     this.handlers.set(decode, (ctx) => {
       const dependencyError = waitFailure(ctx)
-      const rejectedSchema = options.recoverRejectedOutput && dependencyError?.code === 'OUTPUT_SCHEMA_VIOLATION' && Object.values(waitResolution(ctx.resumeInput)?.dependencies ?? {}).some(d => d.state === 'settled' && d.outcome.rejectedOutputRefs?.length)
+      const rejectedSchema = !boundedReview && options.recoverRejectedOutput && dependencyError?.code === 'OUTPUT_SCHEMA_VIOLATION' && Object.values(waitResolution(ctx.resumeInput)?.dependencies ?? {}).some(d => d.state === 'settled' && d.outcome.rejectedOutputRefs?.length)
       if (dependencyError && !rejectedSchema) return fail(dependencyError, ctx)
       const input = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).find((dependency) => dependency.state !== 'pending') : undefined
       const ref = input?.state === 'settled' ? input.outcome.resultRef : undefined
@@ -745,7 +758,7 @@ export class StepBuilder<TState = JsonValue> {
     })
     return this
   }
-  addReActLoopStep(name: string, options: { terminalToolErrorCodes?: string[]; task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[] | ((ctx: StepContext<TState>) => string[]); maxTurns?: number; continuousExecution?: boolean; maxTruncationRetries?: number; reasoningRecovery?: (ctx: StepContext<TState>) => string | undefined; maxToolsPerTurn?: number; maxReadOnlyRounds?: number | ((ctx: StepContext<TState>) => number | undefined); serialTools?: string[]; stopAfterFirstSerialTool?: boolean; blockReadOnlyTools?: (ctx: StepContext<TState>) => boolean; preserveReadContinuations?: boolean; preserveReadWindowRequest?: boolean; scopeToolCallsToEffect?: boolean; reuseSettledEvidence?: boolean | ((ctx: StepContext<TState>) => boolean); freshAfterShell?: boolean; evidenceReadWindowBytes?: number; onEvidenceReused?: (refs: ResultRef[], ctx: StepContext<TState>) => void; onReuseEvidence?: (refs: ResultRef[], ctx: StepContext<TState>) => NextStepTarget<TState>; recoverAskInputErrors?: boolean; recoverMixedAskCalls?: boolean; maxHumanTurnResets?: 0 | 1; resetTurnsOnEntry?: (ctx: StepContext<TState>) => string | number | undefined; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; manualApprovalFallback?: boolean; manualApprovalCodes?: readonly string[]; onManualApprovalDenied?: (reason: string, ctx: StepContext<TState>) => NextStepTarget<TState>; validateToolInput?: (name: string, input: JsonValue) => void; toolApproval?: { requiresApproval?: (calls: JsonValue) => boolean; prompt: string | ((calls: JsonValue, ctx: StepContext<TState>) => string); onDenied?: (reason: string, ctx: StepContext<TState>) => NextStepTarget<TState> }; onFinish: ((resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>) | { text: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; structured?: { schema: ZodTypeAny; onParsed: (data: unknown, ctx: StepContext<TState>) => NextStepTarget<TState> } }; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; prepareQuestion?: (toolName: string, input: JsonValue, ctx: StepContext<TState>) => JsonValue; validateQuestion?: (toolName: string, input: JsonValue, ctx: StepContext<TState>) => string | undefined; onHumanReply?: (question: JsonValue, answer: JsonValue, ctx: StepContext<TState>) => NextStepTarget<TState> | undefined; onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
+  addReActLoopStep(name: string, options: { recoverToolDenials?: boolean; terminalToolErrorCodes?: string[]; task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[] | ((ctx: StepContext<TState>) => string[]); maxTurns?: number; continuousExecution?: boolean; maxTruncationRetries?: number; reasoningRecovery?: (ctx: StepContext<TState>) => string | undefined; maxToolsPerTurn?: number; maxReadOnlyRounds?: number | ((ctx: StepContext<TState>) => number | undefined); serialTools?: string[]; stopAfterFirstSerialTool?: boolean; blockReadOnlyTools?: (ctx: StepContext<TState>) => boolean; preserveReadContinuations?: boolean; preserveReadWindowRequest?: boolean; scopeToolCallsToEffect?: boolean; reuseSettledEvidence?: boolean | ((ctx: StepContext<TState>) => boolean); freshAfterShell?: boolean; evidenceReadWindowBytes?: number; onEvidenceReused?: (refs: ResultRef[], ctx: StepContext<TState>) => void; onReuseEvidence?: (refs: ResultRef[], ctx: StepContext<TState>) => NextStepTarget<TState>; recoverAskInputErrors?: boolean | readonly string[]; strictAskOptions?: boolean; recoverMixedAskCalls?: boolean; maxHumanTurnResets?: 0 | 1; resetTurnsOnEntry?: (ctx: StepContext<TState>) => string | number | undefined; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; manualApprovalFallback?: boolean; manualApprovalCodes?: readonly string[]; onManualApprovalDenied?: (reason: string, ctx: StepContext<TState>) => NextStepTarget<TState>; validateToolInput?: (name: string, input: JsonValue, ctx: StepContext<TState>) => void; toolApproval?: { requiresApproval?: (calls: JsonValue) => boolean; prompt: string | ((calls: JsonValue, ctx: StepContext<TState>) => string); onDenied?: (reason: string, ctx: StepContext<TState>) => NextStepTarget<TState> }; onFinish: ((resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>) | { text: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; structured?: { schema: ZodTypeAny; onParsed: (data: unknown, ctx: StepContext<TState>) => NextStepTarget<TState> } }; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; prepareQuestion?: (toolName: string, input: JsonValue, ctx: StepContext<TState>) => JsonValue; validateQuestion?: (toolName: string, input: JsonValue, ctx: StepContext<TState>) => string | undefined; onHumanReply?: (question: JsonValue, answer: JsonValue, ctx: StepContext<TState>) => NextStepTarget<TState> | undefined; onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
     this.compactionBoundaries.add(name)
     // The decode step handles ReAct compaction after consuming the current
     // model result. This preserves the wait's result references while the
@@ -852,9 +865,10 @@ export class StepBuilder<TState = JsonValue> {
         const calls = [...new Map(manualCalls.map(call => [call.toolCallId, call])).values()]
         return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-manual-approval`, kind: 'human', concurrencyClass: 'none', input: { prompt: '本地审批未通过或不可用。请确认下面的原始操作；未确认前不会执行。', tools: calls } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:manual-approval`, locals: { ...(ctx.lane.resume.locals as Record<string, JsonValue>), $sdk: { ...sdkLocals(ctx.lane.resume.locals), [`${name}ManualCalls`]: calls } } }
       }
-      // Stop before another model turn or queued call can bypass a denied operation.
-      const stopped = Object.values(waitResolution(ctx.resumeInput)?.dependencies ?? {}).find(dependency => dependency.state === 'settled' && (dependency.outcome.status === 'cancelled' || dependency.outcome.error?.code.startsWith('AI_APPROVAL_') || ['AI_APPROVAL_DENIED', 'APPROVAL_DENIED', 'APPROVAL_REQUIRED', 'TASK_MODEL_CALL_BUDGET_EXHAUSTED', 'TASK_MODEL_CALL_BUDGET_CORRUPT'].includes(dependency.outcome.error?.code ?? '')))
-      if (stopped?.state === 'settled') return { next: { fail: { code: stopped.outcome.error?.code ?? 'TOOL_CANCELLED', message: stopped.outcome.error?.message ?? stopped.outcome.reason ?? 'Operation cancelled; explicit user direction is required before retrying.', retryable: false } } }
+      // Generic programs stop at denial. The current Host may diagnose alternatives
+      // while its operation guard keeps the refused operation prohibited.
+      const stopped = Object.values(waitResolution(ctx.resumeInput)?.dependencies ?? {}).find(dependency => dependency.state === 'settled' && (dependency.outcome.status === 'cancelled' || dependency.outcome.error?.code.startsWith('TASK_MODEL_CALL_BUDGET_') || !options.recoverToolDenials && (dependency.outcome.error?.code.startsWith('AI_APPROVAL_') || ['APPROVAL_DENIED', 'APPROVAL_REQUIRED'].includes(dependency.outcome.error?.code ?? ''))))
+      if (stopped?.state === 'settled') return { next: this.config.handleModelErrors && options.onError ? options.onError(stopped.outcome.error ?? { code: 'TOOL_CANCELLED', message: stopped.outcome.reason ?? 'Operation cancelled.', retryable: false }, ctx) : { fail: { code: stopped.outcome.error?.code ?? 'TOOL_CANCELLED', message: stopped.outcome.error?.message ?? stopped.outcome.reason ?? 'Operation cancelled; explicit user direction is required before retrying.', retryable: false } } }
       const recovered = invalidInputRecovery(ctx)
       if (recovered) return recovered
       const turn = readTurns(ctx)
@@ -1029,7 +1043,7 @@ export class StepBuilder<TState = JsonValue> {
       if (options.validateToolInput) { const recovered = invalidInputRecovery(ctx); if (recovered) return recovered }
       // A denied or mismatched approval is the user's decision for this lane.
       // Stage recovery would mark one stage blocked and keep dispatching the rest.
-      const stopsLane = (code: string) => code === 'APPROVAL_DENIED' || code === 'APPROVAL_DIGEST_MISMATCH' || code === 'APPROVAL_CALLS_MISSING' || code === 'APPROVAL_RESPONSE_INVALID' || code === 'APPROVAL_RESPONSE_MISSING' || code.startsWith('TASK_MODEL_CALL_BUDGET_') || code.startsWith('AI_APPROVAL_')
+      const stopsLane = (code: string) => ['APPROVAL_DIGEST_MISMATCH', 'APPROVAL_CALLS_MISSING', 'APPROVAL_RESPONSE_INVALID', 'APPROVAL_RESPONSE_MISSING'].includes(code) || !options.recoverToolDenials && (code === 'APPROVAL_DENIED' || code.startsWith('AI_APPROVAL_')) || !options.continuousExecution && code.startsWith('TASK_MODEL_CALL_BUDGET_')
       const fail = (error: RuntimeError): ReturnType<Handler> => stopsLane(error.code) ? { next: { fail: error } } : options.onError ? { next: options.onError(error, ctx), locals: clearPendingResult(ctx) } : { next: { fail: error } }
       const resolution = waitResolution(ctx.resumeInput)
       const error = waitFailure(ctx)
@@ -1072,7 +1086,7 @@ export class StepBuilder<TState = JsonValue> {
       const record = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, JsonValue> : undefined
       const finishReason = record?.finishReason
       const toolCalls = Array.isArray(record?.toolCalls) ? record.toolCalls : []
-      const fail = (runtimeError: RuntimeError): { next: NextStepTarget<TState>; locals?: JsonValue } => (runtimeError.code.startsWith('TASK_MODEL_CALL_BUDGET_') || runtimeError.code.startsWith('AI_APPROVAL_')) ? { next: { fail: runtimeError } } : options.onError ? { next: options.onError(runtimeError, ctx), locals: clearPendingResult(ctx) } : (() => { const error = Object.assign(new Error(runtimeError.message), runtimeError); throw error })()
+      const fail = (runtimeError: RuntimeError): { next: NextStepTarget<TState>; locals?: JsonValue } => !this.config.handleModelErrors && (runtimeError.code.startsWith('TASK_MODEL_CALL_BUDGET_') || runtimeError.code.startsWith('AI_APPROVAL_')) ? { next: { fail: runtimeError } } : options.onError ? { next: options.onError(runtimeError, ctx), locals: clearPendingResult(ctx) } : (() => { const error = Object.assign(new Error(runtimeError.message), runtimeError); throw error })()
       const dependencyError = waitFailure(ctx)
       if (dependencyError) return fail(dependencyError)
       if (finishReason === 'length') {
@@ -1168,7 +1182,7 @@ export class StepBuilder<TState = JsonValue> {
         })
         if (options.validateToolInput) {
           for (const call of decodedCalls.filter(call => !call.toolName.startsWith('ask.'))) {
-            try { options.validateToolInput(call.toolName, call.input) }
+            try { options.validateToolInput(call.toolName, call.input, ctx) }
             catch (cause) {
               const error = cause as RuntimeError
               if (error.code !== 'INVALID_TOOL_INPUT') return fail({ code: error.code ?? 'TOOL_PREFLIGHT_FAILED', message: error.message ?? 'Tool preflight failed.', retryable: false })
@@ -1250,7 +1264,7 @@ export class StepBuilder<TState = JsonValue> {
         const previous = readInputs(ctx)
         const current = options.inputs?.(ctx) ?? {}
         const visibleRefs = [...new Set([...(options.preserveReadContinuations ? ctx.history.flatMap(h => h.resultRefs) : []), ...(previous.results ?? []), ...(current.results ?? [])])]
-        const safeContinuation = (call: typeof merged.calls[number]) => isBaselineValidationCall(call) || isPatchRecoveryRead(call, patchRecoveries) || isUnreadFileWindow(ctx, call, visibleRefs)
+        const safeContinuation = (call: typeof merged.calls[number]) => isBaselineValidationCall(call) || isPatchRecoveryRead(call, patchRecoveries) || isUnreadFileWindow(ctx, call, visibleRefs) || isUnreadWebWindow(ctx, call, visibleRefs)
         const continuations = options.preserveReadContinuations && wantsFileEdit && editGateReads >= 1 && !merged.calls.some(c => String(c.toolName).startsWith('ask.')) ? merged.calls.filter(safeContinuation) : merged.calls
         const partialContinuation = continuations.length > 0 && continuations.length < merged.calls.length
         const continuesRead = wantsFileEdit && merged.calls.length > 0 && merged.calls.every((call) => {
@@ -1312,7 +1326,7 @@ export class StepBuilder<TState = JsonValue> {
             const key = `${name}AskInputCorrections`
             const sdk = sdkLocals(ctx.lane.resume.locals)
             const count = typeof sdk[key] === 'number' ? sdk[key] as number : 0
-            if (!options.recoverAskInputErrors || count >= 2 || turns >= maxTurns) return fail(error)
+            if (!options.recoverAskInputErrors || Array.isArray(options.recoverAskInputErrors) && !options.recoverAskInputErrors.includes(error.code) || count >= 2 || turns >= maxTurns) return fail(error)
             const previous = readInputs(ctx), current = options.inputs?.(ctx) ?? {}
             const output = submitModel(ctx, turns + 1, { ...previous, ...current, results: [...new Set([...(previous.results ?? []), ...(current.results ?? []), ...(ref ? [ref] : [])])], conversation: [...(current.conversation ?? []), { role: 'user', content: `Runtime ask input notice: NONE of this ask batch was shown or answered. ${error.code}: ${error.message} Field: ${field}. Constraint: ${constraint}. The supplied model proposal is not a human reply. Correct the original question arguments or use another available ask type; never invent a caller answer or treat the rejected proposal as consent.` }] })
             const locals = output.locals as Record<string, JsonValue>
@@ -1344,7 +1358,7 @@ export class StepBuilder<TState = JsonValue> {
               return [{ label: item.label, value: item.value, ...(typeof item.description === 'string' ? { description: item.description.slice(0, 2_000) } : {}) }]
             })
             if (questionOptions.length === 0) return invalidAsk({ code: 'ASK_OPTIONS_REQUIRED', message: 'ask.choice and ask.multi require at least one valid option.', retryable: false }, 'options', 'Provide 1-50 strings or objects with nonempty string label/value (each at most 500 characters), with distinct values. Use ask.input for an open question.')
-            if (questionOptions.length !== rawOptions.length && options.recoverAskInputErrors) return invalidAsk({ code: 'ASK_OPTIONS_INVALID', message: 'Some ask options are invalid or have duplicate values.', retryable: false }, 'options', 'Every entry needs a nonempty string label/value (each at most 500 characters); values must be distinct.')
+            if (questionOptions.length !== rawOptions.length && (options.strictAskOptions ?? options.recoverAskInputErrors)) return invalidAsk({ code: 'ASK_OPTIONS_INVALID', message: 'Some ask options are invalid or have duplicate values.', retryable: false }, 'options', 'Every entry needs a nonempty string label/value (each at most 500 characters); values must be distinct.')
             askInput.options = questionOptions
             if (askType === 'multi') {
               const min = typeof rawInput.min === 'number' && Number.isInteger(rawInput.min) ? rawInput.min : undefined
@@ -1489,7 +1503,7 @@ export class StepBuilder<TState = JsonValue> {
       const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined
       const ref = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined
       const value = ref ? readResult(ctx, ref) : undefined
-      const fail = (runtimeError: RuntimeError): { next: NextStepTarget<TState> } => (runtimeError.code.startsWith('TASK_MODEL_CALL_BUDGET_') || runtimeError.code.startsWith('AI_APPROVAL_')) ? { next: { fail: runtimeError } } : options.onError ? { next: options.onError(runtimeError, ctx) } : (() => { throw Object.assign(new Error(runtimeError.message), runtimeError) })()
+      const fail = (runtimeError: RuntimeError): { next: NextStepTarget<TState> } => !this.config.handleModelErrors && (runtimeError.code.startsWith('TASK_MODEL_CALL_BUDGET_') || runtimeError.code.startsWith('AI_APPROVAL_')) ? { next: { fail: runtimeError } } : options.onError ? { next: options.onError(runtimeError, ctx) } : (() => { throw Object.assign(new Error(runtimeError.message), runtimeError) })()
       const dependencyError = waitFailure(ctx)
       if (dependencyError) return fail(dependencyError)
       if (options.schema) {
@@ -1574,6 +1588,18 @@ export class StepBuilder<TState = JsonValue> {
         const sdk = sdkLocals(ctx.lane.resume.locals)
         const returnStep = typeof sdk.compactReturnStep === 'string' ? sdk.compactReturnStep : ctx.lane.resume.step
         if (upToSeq === undefined) return { next: returnStep === compactSummarize ? entry : returnStep, locals: { ...locals, $sdk: sdk } }
+        if (compaction.confirmBeforeCompaction && sdk.compactConfirmed !== true) {
+          return {
+            actions: [{ type: 'submit_effects', effects: [{ key: '$compact-confirm', kind: 'human', concurrencyClass: 'none', input: {
+              kind: 'ask', type: 'choice', toolName: 'ask.choice',
+              prompt: '已达到本轮上下文容量，是否继续？',
+              context: '任务已暂停，已完成的操作和文件会保留。继续后会整理历史上下文，再接着执行；不会重做已完成的操作。',
+              options: [{ label: '继续', value: 'continue', description: '整理上下文后继续当前任务' }, { label: '暂不继续', value: 'stop', description: '保留已有内容，结束本轮任务' }],
+            } }], wait: { onUnsatisfied: 'resume_with_error' } }],
+            next: '$compact:confirm-result',
+            locals: { ...locals, $sdk: { ...sdk, compactPending: true, compactReturnStep: returnStep } },
+          }
+        }
         const checkpointContext = this.config.contextProtocolVersion === 2 ? { conversation: [{ role: 'user', content: `Original lane goal: ${ctx.goal}. Preserve requirements, subsequent corrections, settled evidence references, uncertain operations and next action.` }] } : undefined
         const available = compaction.maxContextTokens === undefined ? undefined : Math.max(1, compaction.maxContextTokens - (compaction.outputReserveTokens ?? 4096))
         const summaryConfig = this.config.contextProtocolVersion === 2 && available !== undefined ? { ...this.config, requestOutputReserveTokens: Math.max(64, Math.min(2048, compaction.outputReserveTokens ?? 4096, Math.floor(available * 0.2))) } : this.config
@@ -1583,6 +1609,17 @@ export class StepBuilder<TState = JsonValue> {
           next: compactApply,
           locals: { ...locals, $sdk: { ...sdk, compactPending: true, compactReturnStep: returnStep, compactUpToSeq: upToSeq } },
         }
+      })
+      this.handlers.set('$compact:confirm-result', (ctx) => {
+        const resolution = ctx.resumeInput?.type === 'wait' ? ctx.resumeInput.resolution : undefined
+        const dependency = resolution ? Object.values(resolution.dependencies).find(item => item.state === 'settled') : undefined
+        const error = dependency?.state === 'settled' ? dependency.outcome.error : undefined
+        if (error || resolution?.status !== 'satisfied') throw Object.assign(new Error(error?.message ?? 'Continuation confirmation did not settle.'), error ?? { code: 'HISTORY_CONTINUATION_FAILED', retryable: false })
+        const ref = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined
+        const answer = callInput(ref ? readResult(ctx, ref) ?? {} : {})
+        const continued = answer.value === 'continue' || (typeof answer.text === 'string' && /^(继续|continue)$/i.test(answer.text.trim()))
+        if (!continued) return { next: { complete: { value: { text: '暂不继续，本轮任务已结束；已完成的操作和文件予以保留。', taskStatus: 'deferred', stopReason: 'HISTORY_CONTINUATION_DECLINED' } } } }
+        return { actions: [], next: compactSummarize, locals: { ...ordinaryLocals(ctx.lane.resume.locals), $sdk: { ...sdkLocals(ctx.lane.resume.locals), compactConfirmed: true } } }
       })
       const retrySummary = (ctx: StepContext<TState>, error: RuntimeError): ReturnType<Handler> | undefined => {
         const sdk = sdkLocals(ctx.lane.resume.locals)
@@ -1594,6 +1631,17 @@ export class StepBuilder<TState = JsonValue> {
       }
       this.handlers.set(compactApply, (ctx) => {
         const sdk = sdkLocals(ctx.lane.resume.locals)
+        const fallback = (error: RuntimeError): ReturnType<Handler> | undefined => {
+          const retained = compactionRetention(ctx as unknown as StepContext, compaction, this.config.contextProtocolVersion)
+          const currentPrefix = ctx.lane.context.history.slice(0, Math.max(0, ctx.lane.context.history.length - retained)).at(-1)?.seq
+          const upToSeq = Math.max(typeof sdk.compactUpToSeq === 'number' ? sdk.compactUpToSeq : 0, currentPrefix ?? 0) || undefined
+          if (!compaction.fallbackSummary || upToSeq === undefined || /CANCEL|DENIED|REFUSAL/.test(error.code)) return undefined
+          const summary = compaction.fallbackSummary(ctx as unknown as StepContext)
+          const nextSdk: Record<string, JsonValue> = { ...sdk, compactLastProgressSeq: sdk.compactProgressSeq ?? 0 }
+          for (const key of ['compactProgressSeq', 'compactPending', 'compactReturnStep', 'compactUpToSeq', 'compactRetries', 'compactConfirmed']) delete nextSdk[key]
+          ctx.trace({ kind: 'context.compaction_fallback', data: { upToSeq, code: error.code, modelSummaryAvailable: false } })
+          return { contextDelta: { target: 'lane', baseVersion: ctx.lane.context.version, ops: [{ op: 'compact_history', upToSeq, summary }] }, next: typeof sdk.compactReturnStep === 'string' ? sdk.compactReturnStep : entry, locals: { ...ordinaryLocals(ctx.lane.resume.locals), $sdk: nextSdk } }
+        }
         const resolution = ctx.resumeInput?.type === 'wait' ? ctx.resumeInput.resolution : undefined
         const dependency = resolution ? Object.values(resolution.dependencies).find((item) => item.state === 'settled') : undefined
         const runtimeError = dependency?.state === 'settled' ? dependency.outcome.error : undefined
@@ -1601,6 +1649,8 @@ export class StepBuilder<TState = JsonValue> {
           const error = runtimeError ?? resolution?.error ?? { code: 'HISTORY_COMPACTION_FAILED', message: 'History compaction did not produce a summary.', retryable: false }
           const retry = retrySummary(ctx, error)
           if (retry) return retry
+          const checkpoint = fallback(error)
+          if (checkpoint) return checkpoint
           throw Object.assign(new Error(error.message), error)
         }
         const summaryRef = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined
@@ -1610,7 +1660,7 @@ export class StepBuilder<TState = JsonValue> {
         const nextSdk = { ...sdk }
         nextSdk.compactLastProgressSeq = sdk.compactProgressSeq ?? 0
         delete nextSdk.compactProgressSeq
-        delete nextSdk.compactPending; delete nextSdk.compactReturnStep; delete nextSdk.compactUpToSeq; delete nextSdk.compactRetries
+        delete nextSdk.compactPending; delete nextSdk.compactReturnStep; delete nextSdk.compactUpToSeq; delete nextSdk.compactRetries; delete nextSdk.compactConfirmed
         const summary = summaryRef ? readResult(ctx, summaryRef) : undefined
         const body = summary && typeof summary === 'object' && !Array.isArray(summary) ? summary : undefined
         if (!summaryRef || upToSeq === undefined || typeof body?.text !== 'string' || !body.text.trim() || ['length', 'refusal', 'tool_calls'].includes(String(body.finishReason)) || (body.toolCalls !== undefined && (!Array.isArray(body.toolCalls) || body.toolCalls.length > 0)) || /[<｜|](?:[｜|]*DSML[｜|]*|tool_call)/i.test(body.text)) {
@@ -1618,6 +1668,8 @@ export class StepBuilder<TState = JsonValue> {
           // import a tool proposal as a successful compacted history record.
           const retry = retrySummary(ctx, { code: 'HISTORY_COMPACTION_INVALID', message: 'Invalid summary; keep original evidence and return plain text only.', retryable: false })
           if (retry) return retry
+          const checkpoint = fallback({ code: 'HISTORY_COMPACTION_INVALID', message: 'Model summary unavailable; retain the Host checkpoint.', retryable: false })
+          if (checkpoint) return checkpoint
           return { next: { fail: { code: 'HISTORY_COMPACTION_INVALID', message: 'History summary was blank, truncated, or proposed tools. Original history and settled evidence retained; no proposed operation executed.', retryable: false } } }
         }
         return { contextDelta: { target: 'lane', baseVersion: ctx.lane.context.version, ops: [{ op: 'compact_history', upToSeq, summaryRef }] }, next: returnStep, locals: { ...base, $sdk: nextSdk } }
@@ -1679,7 +1731,7 @@ export class StepBuilder<TState = JsonValue> {
   }
 }
 
-export function defineLaneProgram<TState = JsonValue>(config: { id: string; version: string; system?: string; explicitContext?: boolean; includeLaneHistory?: boolean; nativeToolHistory?: boolean; contextProtocolVersion?: 1 | 2; requestOutputReserveTokens?: number; modelRetryPolicy?: EffectSubmission['retryPolicy']; toolSet?: string; state?: z.ZodType<TState>; historyCompaction?: HistoryCompactionOptions }, define: (builder: StepBuilder<TState>) => void): LaneProgramDefinition { const builder = new StepBuilder(config); define(builder); return builder.build() }
+export function defineLaneProgram<TState = JsonValue>(config: { id: string; version: string; system?: string; explicitContext?: boolean; includeLaneHistory?: boolean; nativeToolHistory?: boolean; contextProtocolVersion?: 1 | 2; requestOutputReserveTokens?: number; modelRetryPolicy?: EffectSubmission['retryPolicy']; toolSet?: string; state?: z.ZodType<TState>; reviewExecution?: boolean; handleModelErrors?: boolean; historyCompaction?: HistoryCompactionOptions }, define: (builder: StepBuilder<TState>) => void): LaneProgramDefinition { const builder = new StepBuilder(config); define(builder); return builder.build() }
 
 function pureStepViolation(api: string): never {
   throw Object.assign(new Error(`Pure Step attempted to access ${api}. Use StepContext.now or ctx.trace().`), { code: 'PURE_STEP_VIOLATION' })

@@ -1,3 +1,4 @@
+import { WorkspaceReadAccess, type WorkspaceAccessSnapshot } from './workspace-access.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { lstat, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -15,6 +16,8 @@ export interface ExecApprovalOffer { token: string; prefix: string[]; canAmend: 
 interface Prepared { argv: string[]; cwd: string; identity?: ShellIdentity; version: string; binding: string; decision: ReturnType<typeof evaluateExecPolicy> }
 
 export class ExecPolicyHost {
+  private workspaceAccess = new Map<string, WorkspaceReadAccess>()
+  bindWorkspaceAccess(conversation: string, run: string, root: string, snapshot: WorkspaceAccessSnapshot) { this.workspaceAccess.set(this.scope(conversation, run, root), new WorkspaceReadAccess(snapshot, root)) }
   private config: ExecPolicyConfig
   private base: ExecPolicyConfig
   private version: string
@@ -48,13 +51,14 @@ export class ExecPolicyHost {
   private key(conversation: string, run: string, id: string) { return JSON.stringify([conversation, run, id]) }
   clearRun(conversation: string, run: string, root: string) {
     this.sessions.delete(this.scope(conversation, run, root))
+    this.workspaceAccess.delete(this.scope(conversation, run, root))
     for (const map of [this.once, this.offers, this.launches]) for (const key of map.keys()) { const ids = JSON.parse(key); if (ids[0] === conversation && ids[1] === run) map.delete(key) }
   }
   identity(conversation: string, run: string, toolCallId: string) { return this.launches.get(this.key(conversation, run, toolCallId)) }
   private async prepare(args: Record<string, any>, root: string, conversation: string, run: string): Promise<Prepared> {
     await this.refresh()
     if (args.cwd !== undefined && typeof args.cwd !== 'string' || typeof args.command !== 'string' || args.args !== undefined && (!Array.isArray(args.args) || args.args.some((s: unknown) => typeof s !== 'string'))) throw failure('EXEC_POLICY_ARGV_INVALID')
-    const argv = [args.command, ...args.args ?? []], cwd = await within(root, typeof args.cwd === 'string' ? args.cwd : '.')
+    const argv = [args.command, ...args.args ?? []], cwd = this.workspaceAccess.has(this.scope(conversation, run, root)) ? (await this.workspaceAccess.get(this.scope(conversation, run, root))!.select(typeof args.cwd === 'string' ? args.cwd : '.')).path : await within(root, typeof args.cwd === 'string' ? args.cwd : '.')
     let identity: ShellIdentity | undefined
     try { identity = await resolveShellIdentity(argv[0]!, argv.slice(1), cwd, safeShellEnv()) } catch { /* unresolved commands cannot acquire an allow rule */ }
     const version = this.version

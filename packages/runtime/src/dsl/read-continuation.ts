@@ -7,6 +7,19 @@ const limitBytes = 3000
 const row = (value: unknown): Record<string, any> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {}
 const integer = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 
+/** Continue only an observed next page of the same source, never a new search. */
+export function isUnreadWebWindow(ctx: Pick<StepContext<unknown>, 'results'>, call: { toolName: JsonValue; input: JsonValue }, refs: readonly string[]): boolean {
+  if (call.toolName !== 'web.fetch') return false
+  const { url, offset = 0 } = row(call.input)
+  if (typeof url !== 'string' || !integer(offset) || offset === 0) return false
+  const pages = [...new Set(refs)].flatMap(ref => {
+    const meta = ctx.results.meta(ref), body = row(ctx.results.read(ref)), args = row(meta?.toolArguments)
+    return meta?.toolName === 'web.fetch' && meta.outcomeStatus === 'succeeded' && (args.url === url || body.url === url) && body.sourceTruncated === false && integer(body.offset) && typeof body.text === 'string' ? [body] : []
+  })
+  if (pages.some(page => offset >= page.offset && offset < page.offset + page.text.length || page.nextOffset === null && offset >= page.offset + page.text.length)) return false
+  return pages.some(page => page.truncated === true && page.nextOffset === offset && offset === page.offset + page.text.length && integer(page.totalChars) && offset < page.totalChars)
+}
+
 /** A bounded window must expose new bytes, rather than slide through already read text. */
 export function isUnreadFileWindow(ctx: Pick<StepContext<unknown>, 'results'>, call: { toolName: JsonValue; input: JsonValue }, refs: readonly string[]): boolean {
   if (call.toolName !== 'fs.read') return false
@@ -60,6 +73,7 @@ export function isUnreadFileWindow(ctx: Pick<StepContext<unknown>, 'results'>, c
 /** Count actual new windows/version changes, not arbitrary reads at positive offsets. */
 export function isReadProgress(ctx: Pick<StepContext<unknown>, 'results'>, ref: string, priorRefs: readonly string[]): boolean {
   const meta = ctx.results.meta(ref), body = row(ctx.results.read(ref)), args = row(meta?.toolArguments)
+  if (meta?.toolName === 'web.fetch' && meta.outcomeStatus === 'succeeded' && body.sourceTruncated === false && typeof body.text === 'string' && body.text.length > 0) return isUnreadWebWindow(ctx, { toolName: 'web.fetch', input: { url: args.url ?? body.url, offset: body.offset ?? args.offset ?? 0 } }, priorRefs)
   if (meta?.toolName !== 'fs.read' || meta.outcomeStatus !== 'succeeded') return false
   const path = body.path ?? args.path
   const priorFile = [...new Set(priorRefs)].sort((a, b) => Number(b.match(/\d+$/)?.[0] ?? 0) - Number(a.match(/\d+$/)?.[0] ?? 0)).find(prior => {

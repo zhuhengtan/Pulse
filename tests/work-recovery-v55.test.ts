@@ -274,7 +274,7 @@ it('retries one same-model disconnect within the shared budget without replaying
     const effects = snapshot.state.state.effects.map(([, effect]: any) => effect)
     expect(effects.filter((effect: any) => effect.kind === 'tool' && effect.input.name === 'fs.write')).toHaveLength(1)
     const retry = effects.find((effect: any) => effect.attemptNo === 2)
-    expect(retry.retryPolicy).toMatchObject({ sameModel: true, maxAttempts: 3, initialBackoffMs: 1000, backoffMultiplier: 3 })
+    expect(retry.retryPolicy).toMatchObject({ sameModel: false, maxAttempts: 3, initialBackoffMs: 1000, backoffMultiplier: 3 })
     expect((await run.usage()).modelCalls).toBe(requests)
   } finally { await host.close() }
 }, 20_000)
@@ -310,6 +310,7 @@ it('really reruns a stale artifact check instead of recycling the old cached suc
     const checks = snapshot.state.state.effects.map(([, e]: any) => e).filter((e: any) => e.kind === 'tool' && e.input.name === 'shell.exec' && e.outcome?.status === 'succeeded')
     expect(recheck).toBe(true); expect(checks).toHaveLength(2)
     expect(snapshot.state.state.effects.some(([, e]: any) => e.kind === 'tool' && e.input.name === 'fs.write')).toBe(false)
+    expect((await run.taskOutcome())?.status, JSON.stringify(await run.taskOutcome())).toBe('accepted')
     expect((await run.outcome()).text).toContain(artifact)
     const registered = await host.listArtifacts(conversation.id, 'turn')
     expect(registered.find(item => item.path === artifact)?.hash).toBe(hash('new bytes'))

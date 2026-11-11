@@ -4,6 +4,18 @@ import { H5Server } from '../packages/server/src/h5/server.js'
 import { CliNotificationBridge } from '../packages/cli/src/utils/notification-bridge.js'
 
 describe('shared execution and acceptance presentation', () => {
+  it('persists accepted recovery health across reconnect and ignores a late recovery status', async () => {
+    const saved = new Map<string, unknown>()
+    const host = { setAssistantWorkTools() {}, conversationData: { call: async (method: string, key: string, value?: unknown) => method === 'saveState' ? saved.set(key, structuredClone(value)) : saved.get(key) } }
+    const server = new H5Server(host as never, { dataDir: '/tmp/pulse-health-unused' }) as any
+    server.assistantInbox = { conversationId: 'assistant' }; server.runEventBuffers.set('r', [])
+    const recovering = { schemaVersion: 1, type: 'notice', conversationId: 'c', runId: 'r', seq: 1, data: { kind: 'task_progress', text: 'Trying another method', health: { execution: 'recovering', acceptance: 'pending', environment: 'recovering', recoveryAttempts: 1, reason: 'PROVIDER_NETWORK_ERROR', nextAction: 'alternate-provider' } } }
+    await server.publish('r', recovering)
+    await server.publish('r', { schemaVersion: 1, type: 'complete', conversationId: 'c', runId: 'r', seq: 2, data: { status: 'succeeded', taskOutcome: { status: 'accepted' } } })
+    await server.publish('r', { ...recovering, seq: 3 })
+    const reopened = new H5Server(host as never, { dataDir: '/tmp/pulse-health-unused' }) as any
+    expect((await reopened.snapshotRun('r', [], false)).health).toEqual({ execution: 'finished', acceptance: 'accepted', environment: 'unknown', recoveryAttempts: 1 })
+  })
   it('never treats runtime success or an old missing result as accepted', () => {
     expect(presentRun({ state: 'succeeded' }).state).toBe('unverifiable')
     expect(presentRun({ state: 'succeeded', completion: { status: 'succeeded', taskRequired: true } }).state).toBe('unverifiable')

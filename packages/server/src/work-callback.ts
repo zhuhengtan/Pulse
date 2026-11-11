@@ -9,6 +9,7 @@ export interface WorkCallback {
   title: string
   projectId?: string
   summary: string
+  approvalSource?: 'automatic' | 'user'
   controlRevision: number
   interaction?: WebPendingInteraction
   fingerprint?: string
@@ -18,6 +19,12 @@ export interface WorkCallback {
   error?: string
   answered?: boolean
   decision?: string
+}
+
+/** Routine policy decisions are already recorded in the work run's audit trail.
+ * Recognize old persisted events by their host-generated group ID too. */
+export function routineApprovalCallback(callback: WorkCallback): boolean {
+  return callback.kind === 'approval_resolved' && (callback.approvalSource === 'automatic' || callback.approvalSource === undefined && callback.interaction?.groupId.startsWith('approved:') === true)
 }
 
 export function callbackWorkState(kind: WorkCallbackKind): NonNullable<WebMessage['work']>['state'] {

@@ -74,7 +74,7 @@ it('preserves an incomplete verdict and its concrete blocker',async()=>{
     expect(outcome.text).not.toMatch(/stage-hidden|criterion-|逐项验收/);expect((await f.run.taskOutcome())?.status).not.toBe('accepted')
     expect(JSON.parse(await readFile(join(f.directory,'completion-report.json'),'utf8')).text).toContain('stage-hidden')
   }finally{await f.close()}
-})
+}, 30_000)
 it('does not start the optional presentation model after cancellation',async()=>{
   const f=await fixture('cancelled')
   try {

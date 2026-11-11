@@ -26,7 +26,11 @@ it('HTTP preflight is read-only and POST forwards only a current explicit build 
  const recovery={runId:f.preflight.runId,from:f.preflight.from,to:f.preflight.to,confirmed:true}
  const stale=await f.request('/resume',{recovery:{...recovery,to:'old'}});expect(stale.status).toBe(409);expect((await stale.json()).error).toBe('RECOVERY_CONFIRMATION_STALE');expect(f.resume).not.toHaveBeenCalled()
  expect((await f.request('/resume',{recovery})).status).toBe(200)
- expect(f.resume).toHaveBeenCalledWith(f.preflight.conversationId,{runId:recovery.runId,from:recovery.from,to:recovery.to})
+ expect(f.resume).toHaveBeenCalledTimes(1)
+ expect(f.resume).toHaveBeenCalledWith(f.preflight.conversationId,{runId:recovery.runId,from:recovery.from,to:recovery.to},expect.objectContaining({
+  runId:recovery.runId,conversationKey:expect.stringMatching(new RegExp(`:${f.preflight.conversationId}$`)),
+  directory:expect.any(String),jobId:expect.any(String),ownerToken:expect.any(String),
+ }))
 })
 it('POST refreshes blockers and returns structured compatibility errors without granting a retry',async()=>{
  const f=await fixture();await f.request('/recovery');f.check.mockResolvedValue({...f.preflight,status:'blocked',blockers:['RECOVERY_POLICY_INCOMPATIBLE']})

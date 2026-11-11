@@ -101,7 +101,7 @@ describe('efficient task continuation', () => {
     expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
     for (const request of requests) {
       expect(request.blocks.find((b: any) => b.kind === 'global').content).toEqual({})
-      expect(request.blocks.find((b: any) => b.kind === 'history').content).toEqual([])
+      expect(Array.isArray(request.blocks.find((b: any) => b.kind === 'history').content)).toBe(true)
       const text = JSON.stringify(request.blocks)
       expect(text).toContain(initial.taskRecord.objective)
       expect(text).toContain('contextSurface')
@@ -115,6 +115,7 @@ describe('efficient task continuation', () => {
       expect(text).not.toContain('priorStages')
       expect(text).not.toContain('bulkbulk')
     }
+    expect(requests.some(request => request.blocks.find((block: any) => block.kind === 'history').content.length > 0)).toBe(true)
     expect(JSON.stringify(requests.at(-1))).toContain('required evidence')
   })
 })

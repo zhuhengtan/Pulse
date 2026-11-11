@@ -35,7 +35,7 @@ export async function supervise(spec: ServiceSpec, verificationKeys?: Record<str
       const args = [...spec.args]
       if (port) { const at = args.indexOf('--port'); if (at >= 0) args[at + 1] = String(port); else args.push('--port', String(port)) }
       const manifest = runtime.directory ? JSON.parse(readFileSync(join(runtime.directory, 'desktop-runtime.json'), 'utf8')) as { buildId: string; browserExecutable?: string } : undefined
-      const current = child = spawn(runtime.node, [runtime.entry, ...args], { stdio: ['inherit', 'inherit', 'inherit', 'ipc'], env: { ...process.env,
+      const current = child = spawn(runtime.node, [runtime.entry, ...args], { windowsHide: true, stdio: ['inherit', 'inherit', 'inherit', 'ipc'], env: { ...process.env,
         PULSE_UPDATE_CHILD: '1', PULSE_MANAGED: '1', PULSE_HOME: spec.root, PULSE_UPDATE_TOKEN: token, PULSE_UPDATE_OWNER: String(process.pid),
         ...(runtime.directory ? { PULSE_RUNTIME_DIR: runtime.directory, PULSE_BOOTSTRAP_RUNTIME: baseRuntime, PULSE_RUNTIME_ID: createHash('sha256').update(manifest!.buildId + runtime.directory).digest('hex'), ...(manifest?.browserExecutable ? { PULSE_BROWSER_EXECUTABLE: join(runtime.directory, manifest.browserExecutable) } : {}) } : {}),
         PULSE_UPDATE_MAINTENANCE: maintenance ? '1' : '0',

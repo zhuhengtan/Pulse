@@ -27,3 +27,12 @@ it('a sealed hook child keeps sandbox runtime settings and drops injected host m
         for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     }
 }, nativeTimeout(1, 30000));
+
+it('denies a delayed artifact write in the read-only service workspace while allowing isolated scratch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse-service-readonly-'));
+    roots.push(root);
+    const script = `const fs=require('node:fs'),path=require('node:path');setTimeout(()=>{let denied=false;try{fs.writeFileSync('artifact.txt','late mutation')}catch(error){denied=['EPERM','EACCES','EROFS'].includes(error.code)}fs.writeFileSync(path.join(require('node:os').homedir(),'cache.txt'),'scratch');process.stdout.write(JSON.stringify({denied}));process.exit(denied?0:1)},25)`;
+    const result = await runShell(process.execPath, ['-e', script], { cwd: root, readOnlyWorkspace: true, isolatedHome: true, allowedDomains: [], timeoutMs: 20000 });
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ denied: true });
+}, nativeTimeout(1, 30000));

@@ -123,7 +123,7 @@ export class CliNotificationBridge {
 }
 
 export async function withCliNotifications(host: LocalHost | null, run: RunHandle, pending?: (effectIds: Set<string>) => void): Promise<RunHandle> {
-  if (!host) return run
+  if (!host || run.replyOnly) return run
   const bridge = new CliNotificationBridge(host.conversationData, run, pending)
   let warned = false
   const optional = async (work: Promise<void>) => { try { await work } catch { if (!warned) { warned = true; process.stderr.write('CLI 任务通知暂不可用，终端任务继续运行。\n') } } }

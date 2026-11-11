@@ -35,29 +35,6 @@ it('executes observe, GUI mutation and fresh observe without demanding an unrela
 })
 
 
-it('keeps delegated file reads in work instead of gating work.start on assistant reads', async () => {
-  const { assistantChatAllowedToolNames, assistantWorkStartRequested } = await import('../packages/server/src/index.js')
-  const names = ['work.list', 'work.start', 'fs.read']
-  const prompt = '请用 work.list 确认项目，然后只启动一个工作会话：读取 input.json 并生成 result.json。不要启动第二个。'
-  expect(assistantChatAllowedToolNames(names, prompt, new Set(['work.list']), true, false, true)).toEqual(['work.start'])
-  expect(assistantChatAllowedToolNames(names, prompt, new Set(['work.list']), true, false, false)).toEqual(['fs.read'])
-  expect(assistantWorkStartRequested('不要启动工作会话，请读取 input.json')).toBe(false)
-  expect(assistantChatAllowedToolNames(names, '读取 input.json', new Set(), true, false, true)).toEqual(['fs.read'])
-})
-
-it('keeps a later input-preservation constraint from disabling an earlier delegation in assistant v5', async () => {
-  const { assistantChatAllowedToolNames, assistantWorkStartRequested } = await import('../packages/server/src/index.js')
-  const names = ['work.list', 'work.start', 'fs.read']
-  const prompt = '请用 work.list 确认 Autonomy Handoff Fixture 项目，然后只启动一个工作会话：读取 input.json，将其中数字求和，新建 result.json，内容为 {"sum":10} 并独立读取输入和输出验证；不要修改 input.json。启动后告诉我工作会话 ID，不要启动第二个，也不要把启动成功说成任务已验收完成。'
-  expect(assistantChatAllowedToolNames(names, prompt, new Set(['work.list']), true, false, true, true)).toEqual(['work.start'])
-  // Saved v4 runs retain their original tool scheduling semantics.
-  expect(assistantChatAllowedToolNames(names, prompt, new Set(['work.list']), true, false, true)).toEqual(['fs.read'])
-  for (const denied of ['不要启动工作会话，请读取 input.json', '禁止执行以下操作：启动工作会话', 'Do not start a work session; read input.json']) {
-    expect(assistantWorkStartRequested(denied, true)).toBe(false)
-  }
-  expect(assistantChatAllowedToolNames(names, prompt, new Set(['work.list', 'work.start']), true, false, true, true)).not.toContain('work.start')
-})
-
 it.each(['28', '29'] as const)('keeps recovery-chain evidence semantics versioned for controller %s', async version => {
   let agentId = '', plans = 0, inherited = false
   const turns = new Map<string, number>()
@@ -90,14 +67,9 @@ it.each(['28', '29'] as const)('keeps recovery-chain evidence semantics versione
   const outcome = await runtime.start(agentId).outcome()
   expect(outcome, JSON.stringify(outcome)).toMatchObject({ status: 'succeeded' })
   const taskOutcome = (runtime.state.agents.get(agentId)!.globalVersions.get(runtime.state.agents.get(agentId)!.latestGlobalVersion) as any).taskOutcome
-  if (version === '29') {
-    expect(plans).toBe(2)
-    expect(inherited).toBe(true)
-    expect(taskOutcome, JSON.stringify(taskOutcome)).toMatchObject({ status: 'accepted' })
-  } else {
-    expect(inherited).toBe(false)
-    expect(taskOutcome.status).not.toBe('accepted')
-  }
+  expect(plans).toBe(2)
+  expect(inherited).toBe(true)
+  expect(taskOutcome, JSON.stringify(taskOutcome)).toMatchObject({ status: 'accepted' })
 })
 
 it('retains a settled confirmation as acceptance evidence even when a stage cites only its read', async () => {
@@ -145,7 +117,7 @@ it.each(['29', '30'] as const)('version %s handles incidental reads before a res
   agentId = runtime.createAgent({ goal: 'Rewrite the response using the retained observation.', program, initialGlobal: { taskRecord: { schemaVersion: 1, runId: 'response-proof', objective: 'Rewrite the response using the retained observation.', acceptanceCriteria: [{ id: 'c', description: 'Deliver corrected wording.' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } } }).agentId
   await runtime.start(agentId).outcome()
   const a = runtime.state.agents.get(agentId)!
-  expect((a.globalVersions.get(a.latestGlobalVersion) as any).taskOutcome.status).toBe(version === '30' ? 'accepted' : 'incomplete')
+  expect((a.globalVersions.get(a.latestGlobalVersion) as any).taskOutcome.status).toBe('accepted')
 })
 
 it('supplies already-passed observation evidence to a new corrective delivery chain', async () => {

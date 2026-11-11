@@ -156,8 +156,13 @@
 .chat-surface .message.message--chat.assistant { width:fit-content; max-width:85%; }
 .chat-surface .message.message--chat.assistant > .message-bubble-row > .bubble { padding:10px 16px; border-radius:18px; background:var(--surface-raised); font-size:15px; line-height:1.65; }
 .chat-surface[data-chat-theme="light"] .message.message--chat.assistant > .message-bubble-row > .bubble { background:#f3f3f3; }
-.message--chat .message-footer { display:none; }
-.message--chat:focus-within .message-footer,.message--chat:hover .message-footer { display:flex; }
+/* The timestamp row always keeps its height in chat; hover only reveals it, so messages never reflow. */
+.message--chat .message-footer { display:flex; align-items:center; min-height:24px; }
+.message--chat .message-time,.message--chat .message-copy-action { visibility:hidden; }
+.message--chat:focus-within .message-time,.message--chat:hover .message-time,
+.message--chat:focus-within .message-copy-action,.message--chat:hover .message-copy-action { visibility:visible; }
+/* Touch devices never reveal timestamps, so the reserved row must not leave a blank gap there. */
+@media (hover: none), (pointer: coarse) { .message--chat .message-footer { display:none; min-height:0; } }
 .message--chat .delivery-state.queued,.message--chat .delivery-state.replying { display:none; }
 .message--chat .work-message-card { width:auto; min-height:0; padding:6px 10px; border:0; background:transparent; font-size:12px; }
 .message--chat .work-message-card .work-progress { display:none; }

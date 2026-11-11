@@ -1,24 +1,111 @@
+# Dependencies and generated build/cache output
 node_modules/
 dist/
 .pnpm-store/
 *.tsbuildinfo
-artifacts/cli/
-.pulse-dev/
+coverage/
+.nyc_output/
+.cache/
+.vite/
+playwright-report/
+test-results/
+blob-report/
+/artifacts/
+output/
+.tmp
+/tmp/
+
+# Local Pulse state: conversations, credentials, recordings and model caches
 .pulse/
+.pulse-*
+.kilo/
+
+# Local configuration and credentials (keep distributable templates)
+development-desktop.json
+development-desktop.json.*.tmp
 .env
 .env.*
 !.env.example
-.tmp
+!.env.*.example
+!.env.template
+.envrc
+.npmrc
+.netrc
+.pypirc
+*.local.json
+*.local.yaml
+*.local.yml
+/secrets/
+/.aws/
+/.azure/
+service-account*.json
+*-service-account.json
+
+# Signing identities, private keys and provisioning material
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+*.jks
+*.p8
+*.mobileprovision
+*.provisionprofile
+id_rsa
+id_ed25519
+# Public, disposable TLS fixtures required by worker-http.test.ts
+!/tests/fixtures/worker-http-key.pem
+!/tests/fixtures/worker-http-cert.pem
+
+# Runtime databases, diagnostics, recordings and crash dumps
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+*.log.*
+*.pid
+*.pid.lock
+*.dmp
+*.heapprofile
+*.heapsnapshot
+*.cpuprofile
+/logs/
+/recordings/
+/screenshots/
+/diagnostics/
+/backups/
+
+# Personal planning and machine-specific acceptance records
+/docs/plans/
+/docs/desktop/*acceptance*.md
+
+# OS/editor files and local agent configuration
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+.claude/settings.local.json
+.cursor/*.local.*
+.codex/auth.json
+.codex/sessions/
+.codex/*.local.*
+
 # Native automation build output
-native/desktop-helper/target/
-native/desktop-helper/__pycache__/
 packages/server/native/
-# Local real-task evaluation files and generated run artifacts
-/tests/real-task/
-artifacts/desktop/
-artifacts/desktop-runtime/
-artifacts/desktop-connection-fix/
-artifacts/*
-output/
-.pulse-*
-.kilo
+# Local real-task scenarios and run artifacts; the shared runner is source code
+/tests/real-task/*
+!/tests/real-task/runner.mjs

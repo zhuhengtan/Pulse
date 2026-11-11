@@ -41,7 +41,6 @@
     "test:live": "vitest run tests/live --passWithNoTests",
     "check": "node scripts/build/ensure.mjs workspace && pnpm --filter @hunterzhu/pulse-web check && pnpm --filter @hunterzhu/pulse-web test && node scripts/ci/test.mjs",
     "web:dev": "pnpm --filter @hunterzhu/pulse-web dev",
-    "web:dev:server": "node scripts/web/dev-server.mjs",
     "web:build": "node scripts/build/ensure.mjs web",
     "desktop:build": "node scripts/automation/build-desktop.mjs",
     "data:migrate": "node scripts/data/migrate.mjs",

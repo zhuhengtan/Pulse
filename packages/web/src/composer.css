@@ -1,4 +1,11 @@
 /* RichComposer styles */
+.composer-voice-feedback { display:flex; align-items:center; flex-wrap:wrap; overflow-wrap:anywhere; gap:8px; padding:8px 12px; font-size:12px; color:var(--muted); }
+.composer-voice-feedback .pulse-button { margin-left:auto; }
+.composer-voice-dot { width:7px; height:7px; border-radius:50%; background:var(--danger,#da5353); flex:none; }
+.composer-voice-hint { padding:0 12px 8px; font-size:11px; color:var(--muted); }
+.rich-composer.is-dictating { border-color:var(--danger,#da5353); }
+.composer-voice-button.is-active { color:var(--danger,#da5353); background:var(--soft); }
+.composer-voice-button { touch-action:none; }
 .rich-composer {
   position: relative;
   display: flex;

@@ -15,7 +15,15 @@ export interface DataChange {
     kind: string;
     item: string | null;
 }
-export function dataEndpoint(directory: string): string { const digest = createHash('sha256').update(resolve(directory)).digest('hex').slice(0, 24); return process.platform === 'win32' ? `\\\\.\\pipe\\pulse-data-${digest}` : join('/tmp', `pulse-ipc-${process.getuid?.() ?? 'user'}`, `${digest}.sock`); }
+export function dataEndpoint(directory: string): string {
+    const digest = createHash('sha256').update(resolve(directory)).digest('hex').slice(0, 24);
+    if (process.platform === 'win32') return `\\\\.\\pipe\\pulse-data-${digest}`;
+    const root = process.env.PULSE_DATA_IPC_ROOT;
+    if (root && !root.startsWith('/')) throw new Error('DATA_ENDPOINT_ROOT_INVALID');
+    const endpoint = join(root || join('/tmp', `pulse-ipc-${process.getuid?.() ?? 'user'}`), `${digest}.sock`);
+    if (Buffer.byteLength(endpoint) > 100) throw new Error('DATA_ENDPOINT_PATH_TOO_LONG');
+    return endpoint;
+}
 // A kernel connection alone can target a writer that has already begun its
 // final shutdown. Only expose a socket after the writer has registered it.
 function connectReadySocket(endpoint: string): Promise<Socket> {

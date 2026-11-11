@@ -58,7 +58,12 @@ export function traceWatermark(events: ReadonlyArray<{ seq?: number }>): number 
 
 export function prepareRunEvent(event: WebRunEvent, runStartedAt?: number): WebRunEvent {
   const timestamp = event.timestamp ?? Date.now()
-  return sanitizeTraceEvent({ ...event, timestamp, runStartedAt: event.runStartedAt ?? runStartedAt ?? timestamp })
+  const admission = event.type === 'status' ? event.data.admission : undefined
+  if (admission && admission.startedAt === undefined && (admission.phase === 'queued' || admission.phase === 'starting')) {
+    const { runStartedAt: _notStarted, ...waiting } = event
+    return sanitizeTraceEvent({ ...waiting, timestamp })
+  }
+  return sanitizeTraceEvent({ ...event, timestamp, runStartedAt: admission?.startedAt ?? event.runStartedAt ?? runStartedAt ?? timestamp })
 }
 
 const TRACE_TEXT_LIMIT = 24_000

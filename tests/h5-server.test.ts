@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { readConversationFixture, writeConversationFixture } from './conversation-fixtures.js'
 import { createServer, request as httpRequest } from 'node:http'
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
@@ -275,6 +276,7 @@ describe('H5Server End-to-End', () => {
     const dir = await mkdtemp(join(tmpdir(), 'h5-server-test-'))
     temporaryDirectories.push(dir)
     const host = createLocalHost({ dataDir: dir, cwd: dir, jarvis: { enabled: false } })
+    acceptWorkRequests(host)
     const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
     const info = await server.start()
     const baseUrl = `http://127.0.0.1:${info.port}`
@@ -514,6 +516,7 @@ describe('H5Server End-to-End', () => {
     const dir = await mkdtemp(join(tmpdir(), 'h5-server-sse-'))
     temporaryDirectories.push(dir)
     const host = createLocalHost({ cwd: dir, dataDir: dir, mockResponse: '手机上能看到回答' })
+    acceptWorkRequests(host)
     const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
     const info = await server.start()
     const baseUrl = `http://127.0.0.1:${info.port}`
@@ -560,6 +563,7 @@ describe('H5Server End-to-End', () => {
     const host = createLocalHost({ cwd: dir, dataDir: dir, mockToolCalls: [
       { name: 'ask.choice', input: { prompt: 'Choose a mode', options: ['safe', 'fast'] } },
     ] })
+    acceptWorkRequests(host)
     const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
     const info = await server.start()
     const baseUrl = `http://127.0.0.1:${info.port}`
@@ -610,6 +614,7 @@ describe('H5Server End-to-End', () => {
       { name: 'ask.choice', input: { prompt: 'Choose a mode', options: ['safe', 'fast'] } },
       { name: 'ask.multi', input: { prompt: 'Optional additions', options: ['red', 'blue'], min: 0, max: 2 } },
     ], mockAfterToolResponse: '全部已收到' })
+    acceptWorkRequests(host)
     const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
     const info = await server.start()
     const baseUrl = `http://127.0.0.1:${info.port}`
@@ -683,8 +688,9 @@ describe('H5Server End-to-End', () => {
       approvalMode: 'ask',
       mockToolCalls: [{ name: 'fs.list', input: { path: '.' } }, { name: 'fs.write', input: { path: 'delegated.txt', content: 'const token = password; // implementation data for the test reviewer' } }],
       mockAfterToolResponse: '文件已写入。',
-      approvalReview: { provider: 'ollama', model: 'qwen3.5:4b', baseURL: `http://127.0.0.1:${reviewerPort}`, timeoutMs: 2_000 },
+      approvalReview: { provider: 'ollama', model: 'qwen3.5:4b', reasoningEffort: 'none', baseURL: `http://127.0.0.1:${reviewerPort}`, timeoutMs: 2_000 },
     })
+    acceptWorkRequests(host)
     const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
     const info = await server.start()
     const baseUrl = `http://127.0.0.1:${info.port}`
@@ -749,8 +755,9 @@ describe('H5Server End-to-End', () => {
       dataDir: dir,
       approvalMode: 'ask',
       mockToolCalls: [{ name: 'fs.write', input: { path, content: 'must remain pending' } }],
-      approvalReview: { provider: 'ollama', model: 'qwen3.5:4b', baseURL: `http://127.0.0.1:${reviewerPort}`, timeoutMs: 2_000 },
+      approvalReview: { provider: 'ollama', model: 'qwen3.5:4b', reasoningEffort: 'none', baseURL: `http://127.0.0.1:${reviewerPort}`, timeoutMs: 2_000 },
     })
+    acceptWorkRequests(host)
     const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
     const info = await server.start()
     const baseUrl = `http://127.0.0.1:${info.port}`
@@ -798,6 +805,7 @@ describe('H5Server End-to-End', () => {
     const dir = await mkdtemp(join(tmpdir(), 'h5-server-active-run-'))
     temporaryDirectories.push(dir)
     const host = createLocalHost({ cwd: dir, dataDir: dir, mockToolCalls: [{ name: 'fs.write', input: { path: 'held.txt', content: 'held' } }] })
+    acceptWorkRequests(host)
     const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
     const info = await server.start()
     const baseUrl = `http://127.0.0.1:${info.port}`
@@ -813,6 +821,8 @@ describe('H5Server End-to-End', () => {
       expect(reconcile.status).toBe(409)
       const deleted = await fetch(`${baseUrl}/api/conversations/${conversation.id}`, { method: 'DELETE', headers: { Cookie: cookie } })
       expect(deleted.status).toBe(409)
+      const archived = await fetch(`${baseUrl}/api/conversations/${conversation.id}`, { method: 'PATCH', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ archived: true }) })
+      expect(archived.status).toBe(409)
       const stopped = await fetch(`${baseUrl}/api/runs/${runId}/cancel`, { method: 'POST', headers: { Cookie: cookie } })
       expect(stopped.status).toBe(200)
       const events = await readSse(`${baseUrl}/api/runs/${runId}/events`, cookie)
@@ -827,6 +837,7 @@ describe('H5Server End-to-End', () => {
     const dir = await mkdtemp(join(tmpdir(), 'h5-server-interrupted-run-'))
     temporaryDirectories.push(dir)
     const host = createLocalHost({ cwd: dir, dataDir: dir, mockResponse: '新消息已正常发送。' })
+    acceptWorkRequests(host)
     const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
     const info = await server.start()
     const baseUrl = `http://127.0.0.1:${info.port}`

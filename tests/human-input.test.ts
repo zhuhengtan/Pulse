@@ -44,9 +44,8 @@ describe('external Human input', () => {
   it('keeps multiple urgent inputs FIFO ahead of background facts', async () => {
     const runtime = new PulseRuntime()
     const { agentId } = runtime.createAgent('idle', { id: 'idle-fifo', version: '1', step: () => ({ actions: [], next: point('idle-fifo', 'start') }) })
-    const session = runtime.start(agentId)
-    await session.submitHumanInput('first', { text: 'one' })
-    await session.submitHumanInput('second', { text: 'two' })
+    runtime.submitHumanInput(agentId, 'first', { text: 'one' })
+    runtime.submitHumanInput(agentId, 'second', { text: 'two' })
     const snapshot = runtime.factInbox.snapshot()
     expect(snapshot.urgentCount).toBe(2)
     expect(snapshot.queue.map((entry) => entry.fact.type)).toEqual(['human_input', 'human_input'])
@@ -71,7 +70,7 @@ describe('external Human input', () => {
     expect(runtime.state.lanes.get(child!.rootLaneId)?.priority).toBe(2)
   })
 
-  it('steers continuation and status messages into the current lane', async () => {
+  it('steers a structured command and defers conversational input without a model', async () => {
     const received: string[] = []
     const program: LaneProgram = {
       id: 'interaction-steer-rules',
@@ -89,12 +88,12 @@ describe('external Human input', () => {
     const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
     const { agentId, laneId } = runtime.createAgent('main', program)
     const session = runtime.start(agentId)
-    await session.submitHumanInput('continue-1', { text: '继续' })
-    await session.submitHumanInput('status-1', { text: '你还活着吗？' })
-    for (let i = 0; i < 5 && received.length < 2; i++) runtime.tick()
+    await session.submitHumanInput('continue-1', { command: 'steer', text: 'Setze die Aufgabe fort.' })
+    await session.submitHumanInput('status-1', { text: 'Wo stehen wir?', modelFirst: true })
+    for (let i = 0; i < 5 && received.length < 1; i++) runtime.tick()
     expect(runtime.state.humanInputs.get('continue-1')).toMatchObject({ status: 'consumed', decision: 'steer', handledByLaneId: laneId })
-    expect(runtime.state.humanInputs.get('status-1')).toMatchObject({ status: 'consumed', decision: 'steer', handledByLaneId: laneId })
-    expect(received).toEqual(expect.arrayContaining(['继续', '你还活着吗？']))
+    expect(runtime.state.humanInputs.get('status-1')).toMatchObject({ status: 'deferred', decision: 'defer' })
+    expect(received).toEqual(['Setze die Aufgabe fort.'])
   })
 
   it('carries the parent visible results into a spawned human interaction', async () => {

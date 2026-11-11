@@ -17,6 +17,34 @@ afterEach(() => { cleanup(); vi.restoreAllMocks() })
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
 
 describe('compact run status', () => {
+  it('restores queue admission and keeps stop available through ordinary status updates', async () => {
+    const base = sidebarFixture().transport
+    let receive: ((event: WebRunEvent) => void) | undefined
+    const transport: PulseWebTransport = {
+      async request(path, init) {
+        if (path === '/api/session/local' || path === '/api/session') return response({ localAdmin: true, canUseTerminal: false, connected: true })
+        if (path === '/api/runs/run-busy/state') return response({ runId: 'run-busy', state: 'running', seq: 1, activities: [], admission: { phase: 'queued', position: 2, queuedAt: 1000 } })
+        if (path === '/api/runs/run-busy/trace') return response({ events: [], seq: 1 })
+        if (path === '/api/web/conversations/busy/messages') return response([])
+        return base.request(path, init)
+      },
+      subscribe(_path, onEvent) { receive = onEvent; return () => { receive = undefined } },
+    }
+    render(<PulseDesignSystem><PulseApp transport={transport} /></PulseDesignSystem>)
+    fireEvent.click(await screen.findByRole('tab', { name: '工作' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^正在执行的任务/ }))
+    expect(await screen.findByRole('status', { name: '排队中（第 2 位）' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '停止生成' }).hasAttribute('disabled')).toBe(false)
+    await waitFor(() => expect(receive).toBeTypeOf('function'))
+    act(() => receive?.({ type: 'status', runId: 'run-busy', seq: 2, data: { kind: 'working', label: '正在处理' } }))
+    expect(screen.getByRole('status', { name: '排队中（第 2 位）' })).toBeTruthy()
+    act(() => receive?.({ type: 'status', runId: 'run-busy', seq: 3, data: { kind: 'working', admission: { phase: 'starting' } } }))
+    expect(await screen.findByRole('status', { name: '正在启动' })).toBeTruthy()
+    act(() => receive?.({ type: 'status', runId: 'run-busy', seq: 4, data: { kind: 'working', admission: { phase: 'quarantined' } } }))
+    expect(await screen.findByRole('status', { name: '任务状态需检查' })).toBeTruthy()
+    expect(screen.queryByRole('status', { name: '任务已完成' })).toBeNull()
+  })
+
   it('labels a terminal snapshot without completion conservatively', () => {
     expect(missingCompleteStatus('running')).toBeUndefined()
     expect(missingCompleteStatus('interrupted')?.label).toBe('任务已中断，没有自动恢复')

@@ -166,6 +166,34 @@ it('prioritizes stopping over pending interactions without conflating send and r
   expect(deriveChatState({ running: true, stopping: false, submitting: false, interaction: approval, stopped: false })).toBe('approval')
 })
 
+it('keeps an immediate explanation by its question and never reverts a settled direction on replay', async () => {
+  const fixture = followupFixture('work', true), runId = fixture.conversation.activeRunId!
+  const createdAt = fixture.conversation.createdAt
+  fixture.messages.push(
+    { id: 'msg-question', role: 'user', text: '为啥又没完成', runId, createdAt },
+    { id: 'msg-direction', role: 'user', text: '把时间行也修了', runId, createdAt },
+    { id: 'explanation', role: 'assistant', text: '自动测试遇到权限限制。', runId, createdAt, replyToId: 'msg-question' },
+  )
+  const router = createMemoryRouter([{ path: '*', element: <PulseApp transport={fixture.transport}/> }], { initialEntries: ['/work/busy'] })
+  const view = render(<PulseDesignSystem><RouterProvider router={router}/></PulseDesignSystem>)
+  try {
+    await view.findByText('自动测试遇到权限限制。')
+    await waitFor(() => expect(fixture.subscriptions.get(runId)?.size).toBe(1))
+    const sendState = (seq: number, steeringState: 'pending' | 'applied') => act(() => fixture.emit({ type: 'input_response', runId, seq, data: { messageId: 'steering', replyToId: 'msg-direction', text: '', steeringState, createdAt } }))
+    sendState(1, 'pending')
+    await view.findByText('方向调整 · 等待应用')
+    sendState(2, 'applied')
+    sendState(3, 'pending')
+    expect(view.getAllByText('方向调整 · 已应用')).toHaveLength(1)
+    expect(view.queryByText('方向调整 · 等待应用')).toBeNull()
+    const question = view.getByText('为啥又没完成').closest('article')!
+    const explanation = view.getByText('自动测试遇到权限限制。').closest('article')!
+    expect(question.nextElementSibling).toBe(explanation)
+    expect(view.getByRole('button', { name: '提交回答' })).toBeTruthy()
+    expect(fixture.calls.filter(call => call.path.endsWith('/replies'))).toHaveLength(0)
+  } finally { router.dispose() }
+})
+
 it('sends directly after an incomplete terminal event even before run_finished clears the busy marker', async () => {
   vi.spyOn(IndexedMessageQueueStore.prototype, 'list').mockResolvedValue([])
   const queueWrite = vi.spyOn(IndexedMessageQueueStore.prototype, 'update').mockRejectedValue(new Error('must not queue'))

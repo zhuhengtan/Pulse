@@ -101,3 +101,5 @@
 .run-process-output { background: #202020; color: #ededed; border-radius: 12px; padding: 16px; min-height: 200px; max-height: 50dvh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: 16px; }
 .approval-remember-scope { display:grid; gap:6px; padding:10px 0; border-top:1px solid var(--line); color:var(--muted); }
 .approval-remember-scope code { color:var(--ink); font-size:12px; overflow-wrap:anywhere; }
+
+.task-notice-count { color:#eb3a3a; }

@@ -1,6 +1,6 @@
 import { realpath } from 'node:fs/promises'
 import { resolve, join } from 'node:path'
-import { createLocalHost, MAX_SCHEDULED_TASK_INTERVAL_MS, MIN_SCHEDULED_TASK_INTERVAL_MS, ScheduledTaskStore, ScheduledTaskWorker, pulseDataPath, type LocalHostOptions } from '@hunterzhu/pulse-server'
+import { createLocalHost, MAX_SCHEDULED_TASK_INTERVAL_MS, MIN_SCHEDULED_TASK_INTERVAL_MS, ScheduledTaskStore, ScheduledTaskWorker, pulseDataPath, type LocalHostOptions, type CreateScheduledTaskInput } from '@hunterzhu/pulse-server'
 
 function parseInterval(raw: string | undefined): number {
   if (!raw) throw new Error('SCHEDULE_EVERY_REQUIRED')
@@ -11,6 +11,38 @@ function parseInterval(raw: string | undefined): number {
   const intervalMs = value * multiplier
   if (!Number.isSafeInteger(intervalMs) || intervalMs < MIN_SCHEDULED_TASK_INTERVAL_MS || intervalMs > MAX_SCHEDULED_TASK_INTERVAL_MS) throw new Error('SCHEDULE_INTERVAL_OUT_OF_RANGE')
   return intervalMs
+}
+
+function scheduleFromFlags(flags: Record<string, string | boolean>): Pick<CreateScheduledTaskInput, 'intervalMs' | 'schedule' | 'missedRun'> {
+  const kinds = ['every', 'at', 'daily', 'weekly'].filter(key => flags[key] !== undefined)
+  if (kinds.length !== 1) throw new Error('SCHEDULE_KIND_REQUIRED: choose exactly one of --every, --at, --daily, --weekly')
+  const kind = kinds[0]!
+  const value = flags[kind]
+  if (typeof value !== 'string') throw new Error('SCHEDULE_VALUE_REQUIRED')
+  const missedRun = flags['missed-run']
+  if (missedRun !== undefined && missedRun !== 'skip' && missedRun !== 'run-once') throw new Error('INVALID_MISSED_RUN_POLICY')
+  if (kind === 'every') {
+    if (flags.time !== undefined || flags.timezone !== undefined || missedRun !== undefined) throw new Error('SCHEDULE_CALENDAR_OPTIONS_REQUIRE_CALENDAR')
+    return { intervalMs: parseInterval(value) }
+  }
+  const timeZone = flags.timezone
+  if (typeof timeZone !== 'string') throw new Error('SCHEDULE_TIMEZONE_REQUIRED: use an IANA zone such as Asia/Shanghai')
+  const policy = missedRun === 'run-once' ? 'run-once' : 'skip'
+  if (kind === 'at') {
+    if (flags.time !== undefined) throw new Error('SCHEDULE_AT_INCLUDES_TIME')
+    const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$/.exec(value)
+    if (!match) throw new Error('INVALID_SCHEDULE_AT: use YYYY-MM-DDTHH:mm with --timezone')
+    return { schedule: { kind: 'once', date: match[1]!, time: match[2]!, timeZone }, missedRun: policy }
+  }
+  if (kind === 'daily') {
+    if (flags.time !== undefined) throw new Error('SCHEDULE_DAILY_INCLUDES_TIME')
+    return { schedule: { kind: 'daily', time: value, timeZone }, missedRun: policy }
+  }
+  if (typeof flags.time !== 'string') throw new Error('SCHEDULE_WEEKLY_TIME_REQUIRED')
+  const names = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
+  const days = value.toLowerCase().split(',').map(day => names.indexOf(day.trim()))
+  if (days.some(day => day < 0)) throw new Error('INVALID_SCHEDULE_DAYS: use mon,wed,fri')
+  return { schedule: { kind: 'weekly', days, time: flags.time, timeZone }, missedRun: policy }
 }
 
 function storeFor(options: LocalHostOptions): ScheduledTaskStore {
@@ -29,7 +61,7 @@ export async function runScheduledCommand(options: LocalHostOptions, args: strin
     const name = typeof flags.name === 'string' ? flags.name : undefined
     const instruction = args.slice(1).join(' ').trim()
     if (!instruction) throw new Error('SCHEDULE_TASK_REQUIRED')
-    const task = await store.create({ workspace: await realpath(resolve(options.cwd ?? process.cwd())), name: name ?? instruction.slice(0, 120), instruction, intervalMs: parseInterval(typeof flags.every === 'string' ? flags.every : undefined) })
+    const task = await store.create({ workspace: await realpath(resolve(options.cwd ?? process.cwd())), name: name ?? instruction.slice(0, 120), instruction, ...scheduleFromFlags(flags) })
     output(task, typeof flags.format === 'string' ? flags.format : 'text')
     return 0
   }

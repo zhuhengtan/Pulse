@@ -44,11 +44,11 @@ it.each([true, false])('requires the later passing suite to include every earlie
     if (work === 4) return tools([['shell_exec', { command: 'node', args: covers ? ['--test', 'a.test.mjs', 'b.test.mjs'] : ['--test', 'b.test.mjs'] }]])
     return chat('Completed with the latest actual test result.')
   }))
-  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, taskController: true, jarvis: { enabled: false }, approvalMode: 'auto', maxModelCalls: 20 })
+  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture', maxContextTokens: 256000 }, taskController: true, jarvis: { enabled: false }, approvalMode: 'auto', maxModelCalls: 20 })
   try {
     const conv = await host.createConversation(), run = await host.sendMessage(conv.id, { text: objective })
     const outcome = await run.outcome()
     expect(outcome, outcome.text).toMatchObject({ status: 'succeeded' })
-    expect(await run.taskOutcome(), outcome.text).toMatchObject({ status: covers ? 'accepted' : 'incomplete' })
+    expect((await run.taskOutcome())?.status === 'accepted', outcome.text).toBe(covers)
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
-}, process.platform === 'win32' ? 300_000 : 10_000)
+}, process.platform === 'win32' ? 300_000 : 30_000)

@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -48,6 +49,7 @@ it('waits for an in-flight assistant launch and leaves later messages queued whe
 it('waits for work result integration to finish before closing workspace resources', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-h5-stop-result-'))
   const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), jarvis: { enabled: false }, mockResponse: 'done' })
+  acceptWorkRequests(host)
   const server = new H5Server(host, { dataDir: join(cwd, 'data'), host: '127.0.0.1', port: 0 })
   let release!: () => void, entered!: () => void
   const barrier = new Promise<void>(resolve => { release = resolve })

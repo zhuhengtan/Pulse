@@ -27,8 +27,9 @@ it.each([false, true])('bounds provider-rejected final JSON correction without a
   try {
     const c = await host.createConversation(), run = await host.sendMessage(c.id, { text: 'Create note.txt containing ready.' })
     await run.outcome()
-    expect(finals).toBe(2)
-    expect((await run.taskOutcome())?.status).toBe(repeated ? 'incomplete' : 'accepted')
-    expect((await run.usage()).modelCalls).toBeLessThanOrEqual(7)
+    expect(finals).toBeGreaterThanOrEqual(2); expect(finals).toBeLessThanOrEqual(4)
+    expect((await run.taskOutcome())?.status).toBe(repeated ? 'unverifiable' : 'accepted')
+    if (repeated) expect((await run.taskOutcome())?.reviewStatus).toBe('unavailable')
+    expect((await run.usage()).modelCalls).toBeLessThanOrEqual(16)
   } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
 })

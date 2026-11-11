@@ -62,6 +62,18 @@ async function fixture() {
 }
 
 describe('real batch entry with an offline fake CLI', () => {
+  it('between-trial token mode keeps the call cap and stops after the first threshold crossing', async () => {
+    const f = await fixture()
+    try {
+      f.args[f.args.indexOf('--max-total-tokens') + 1] = '12'
+      await f.run(['--token-budget-mode', 'between-trials'])
+      expect(await f.invocations()).toMatchObject([{ calls: 16 }])
+      expect((await json(join(f.out, 'report.json'))).budget).toMatchObject({ tokenBudgetMode: 'between-trials', actualTokens: 12, stoppedBeforeNextRun: true, tokenLimitEnforced: false })
+      await f.run(['--token-budget-mode', 'between-trials', '--resume'])
+      expect(await f.invocations()).toHaveLength(1)
+      await expect(f.run(['--resume'])).rejects.toThrow('EVAL_BATCH_IDENTITY_MISMATCH')
+    } finally { await rm(f.directory, { recursive: true, force: true }) }
+  })
   it('forwards budgets and nested model references; resume never repeats finished or failed trials', async () => {
     const f = await fixture()
     try {

@@ -1,8 +1,8 @@
 import { createDesktopTransport } from './desktopTransport.js'
 import { ChatChannel } from './ChatChannel.js'
-import type { WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from '@hunterzhu/pulse-server/protocol'
+import type { WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunAdmission, WebRunEvent, WebRunSnapshot } from '@hunterzhu/pulse-server/protocol'
 
-export type { WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from '@hunterzhu/pulse-server/protocol'
+export type { WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunAdmission, WebRunEvent, WebRunSnapshot } from '@hunterzhu/pulse-server/protocol'
 
 export interface PulseWebTransport {
   messages?(id: string, before?: string, signal?: AbortSignal): Promise<{ items: WebMessage[]; before?: string; revision: number }>
@@ -145,7 +145,7 @@ export async function submitWorkMessage(
   transport: PulseWebTransport,
   conversationId: string,
   payload: Pick<WebMessage, 'text' | 'requestId' | 'attachments' | 'skills' | 'mentionedFiles' | 'richContent'> & { delivery: 'immediate' | 'whenIdle' },
-): Promise<{ runId: string }> {
+): Promise<{ runId: string; replyOnly?: true }> {
   try {
     return await apiJson(transport, `/api/conversations/${encodeURIComponent(conversationId)}/messages`, jsonRequest('POST', payload))
   } catch (error) {
@@ -163,7 +163,7 @@ export async function submitWorkMessage(
           && equal(message.richContent ?? null, payload.richContent ?? null)
           && equal((message.attachments ?? []).map(item => item.id), (payload.attachments ?? []).map(item => item.id))
           && equal(message.skills ?? [], payload.skills ?? [])
-          && equal(message.mentionedFiles ?? [], payload.mentionedFiles ?? [])) return { runId: message.runId }
+          && equal(message.mentionedFiles ?? [], payload.mentionedFiles ?? [])) return { runId: message.runId, ...(items.some(item => item.id === `msg-answer-${message.id}`) ? { replyOnly: true } : {}) }
         if (items.length) break
       } catch { break /* Keep the original error when readback itself is unavailable. */ }
     }

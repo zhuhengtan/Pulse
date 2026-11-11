@@ -59,15 +59,38 @@ describe('conversation pinning', () => {
   })
   it('retains title, project and busy state when PATCH returns only the changed pin field', async () => {
     const fixture = sidebarFixture(), request = fixture.transport.request
+    const stateCalls: string[] = [], deletions: string[] = []
+    let runState: 'running' | 'unknown' = 'running'
     fixture.transport.request = async (path, init) => {
+      if (path === '/api/runs/run-busy/state') {
+        stateCalls.push(runState)
+        return runState === 'running' ? Response.json({ runId: 'run-busy', state: 'running', seq: 0, activities: [] }) : Response.json({ error: 'unavailable' }, { status: 503 })
+      }
+      if (path === '/api/conversations/busy' && init?.method === 'DELETE') { deletions.push(path); return Response.json({ ok: true }) }
       const result = await request(path, init)
       return init?.method === 'PATCH' ? Response.json({ pinned: true }) : result
     }
     await show(fixture)
     fireEvent.click(screen.getByRole('button', { name: '置顶对话：正在执行的任务' }))
-    await within(pinnedSection()).findByRole('button', { name: '正在执行的任务 已置顶 运行状态待确认' })
-    expect(screen.getByRole('button', { name: '归档对话：正在执行的任务' }).getAttribute('disabled')).not.toBeNull()
+    const row = await within(pinnedSection()).findByRole('button', { name: '正在执行的任务 已置顶 运行状态待确认' })
+    expect(row).toBeTruthy()
     expect(screen.getByRole('button', { name: '折叠项目：Jarvis' })).toBeTruthy()
+    expect(fixture.patches).toEqual([{ id: 'busy', body: { pinned: true } }])
+    const archive = screen.getByRole('button', { name: '归档对话：正在执行的任务', hidden: true })
+    expect(archive.hasAttribute('disabled')).toBe(false)
+    fireEvent.click(archive)
+    expect(await screen.findByText('任务仍在运行或状态待确认，暂时不能归档。')).toBeTruthy()
+    expect(stateCalls).toEqual(['running'])
+    expect(fixture.patches).toEqual([{ id: 'busy', body: { pinned: true } }])
+    expect(screen.getByRole('button', { name: '正在执行的任务 已置顶 运行状态待确认' })).toBeTruthy()
+    runState = 'unknown'
+    fireEvent.click(screen.getByRole('button', { name: '对话操作：正在执行的任务', hidden: true }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: '删除', exact: true }))
+    expect(await screen.findByText('任务仍在运行或状态待确认，暂时不能删除。')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '确认', exact: true })).toBeNull()
+    expect(stateCalls).toEqual(['running', 'unknown'])
+    expect(deletions).toEqual([])
+    expect(fixture.patches).toEqual([{ id: 'busy', body: { pinned: true } }])
   })
 
   it('shows the optimistic pin and sends only one request while it is pending', async () => {

@@ -20,7 +20,7 @@ it.each(['server/task-controller/state.ts', 'server/task-controller/acceptance.t
     const backend = new FileRuntimePersistenceBackend(join(root, 'runtime.json'))
     await new PulseRuntime({ recoveryFingerprints: previous }).persist(backend)
     const saved = await readFile(join(root, 'runtime.json'), 'utf8')
-    await expect(prepareRecovery(backend, root, current)).rejects.toThrow('RECOVERY_BUILD_MIGRATION_REQUIRED')
+    await expect(prepareRecovery(backend, root, current)).resolves.toMatchObject({ status: 'migratable' })
     expect(await readFile(join(root, 'runtime.json'), 'utf8')).toBe(saved)
     await expect(prepareRecovery(backend, root, current, { from: before, to: after })).resolves.toMatchObject({ status: 'migratable' })
   } finally { await rm(root, { recursive: true, force: true }) }

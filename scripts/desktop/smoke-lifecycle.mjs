@@ -47,7 +47,7 @@ export async function quitFromMenu(desktop) {
                 const walk = menu => { for (const item of menu?.items ?? []) { items.push(item); if (item.submenu) walk(item.submenu) } }
                 walk(entry.menu)
                 const hide = items.find(item => item.label === '隐藏桌面窗口')
-                const quit = items.find(item => item.label === '退出托盘（保留后台服务）')
+                const quit = items.find(item => ['彻底退出 Pulse（保留后台服务）', '退出托盘（保留后台服务）'].includes(item.label))
                 if (hide?.enabled !== false || !quit?.enabled || typeof quit.click !== 'function') continue
                 // Return before the real menu action disconnects the inspector.
                 setTimeout(() => quit.click(), 0)

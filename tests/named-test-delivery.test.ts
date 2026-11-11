@@ -50,7 +50,7 @@ it.each(['legacy', 'candidate-only', 'rejected', 'no-op', 'corrected', 'final-ga
   } })
   agentId = runtime.createAgent({ goal: description, program, initialGlobal: { taskRecord: { schemaVersion: 1, runId: 'named-test', objective: description, acceptanceCriteria: [{ id: 'criterion-1', description }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } } }).agentId
   await runtime.start(agentId).outcome()
-  expect(global().taskOutcome.status === 'accepted').toBe(mode === 'legacy' || mode === 'corrected')
-  if (!['legacy', 'corrected'].includes(mode)) expect(JSON.stringify(global().taskOutcome)).toContain('NAMED_TEST_DELIVERY_MISSING')
+  expect(global().taskOutcome.status === 'accepted').toBe(mode === 'corrected')
+  if (mode !== 'corrected') expect(JSON.stringify(global().taskOutcome)).toContain('NAMED_TEST_DELIVERY_MISSING')
   if (mode === 'corrected') expect(writes).toEqual(['test/api.candidate.test.mjs', 'test/api.test.mjs'])
 })

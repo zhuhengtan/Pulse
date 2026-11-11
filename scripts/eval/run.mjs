@@ -38,6 +38,8 @@ if ((!archive && !localCli) || (archive && localCli) || !config || !model || !ou
   console.error('Real runs require exactly one of --archive <packed CLI .tar.gz> or --cli <local Pulse CLI entry>, plus --config <Pulse config> --model <display name> --out <new results directory> --auto-approve. This executes agent tool calls with auto approval inside per-task workspaces.')
   process.exit(2)
 }
+const tokenBudgetMode = option('--token-budget-mode', 'conservative')
+if (!['conservative', 'between-trials'].includes(tokenBudgetMode)) throw new Error('INVALID_TOKEN_BUDGET_MODE')
 const trials = Number(option('--trials', '1'))
 const { maxModelCalls: maxCalls, maxTurns } = parseEvaluationBudgets(args)
 const maxRunMs = Number(option('--max-run-ms', '600000'))
@@ -65,7 +67,7 @@ const apiKeyEnv = providerProfile.apiKeyEnv ?? (providerProfile.provider === 'an
 if (providerProfile.provider !== 'ollama' && !process.env[apiKeyEnv]) throw new Error(`Provider credential is unavailable in environment variable ${apiKeyEnv}`)
 if (!has('--resume')) await mkdir(outputRoot, { recursive: false }).catch((error) => { if (error.code !== 'EEXIST') throw error; throw new Error(`Output directory already exists: ${outputRoot}; use --resume to retain prior trials`) })
 const batchPath = join(outputRoot, 'batch.json'), runsPath = join(outputRoot, 'runs.jsonl')
-const batchIdentity = { schemaVersion: 1, dataset: fingerprint(dataset), tasks: tasks.map(task => task.id), trials, model: { reference: modelName, modelCode: selection.modelCode, provider: selection.providerCode, configuration: fingerprint({ profile: providerProfile, model: modelRow }) }, cli: { kind: archivePath ? 'archive' : 'local', hash: createHash('sha256').update(await readFile(archivePath ?? localCliPath)).digest('hex') }, maxCalls, maxTurns, maxRunMs, maxOutputTokens, maxCost: maxCost ?? null, maxTotalTokens, costCurrency }
+const batchIdentity = { schemaVersion: 1, ...(tokenBudgetMode === 'between-trials' ? { tokenBudgetMode } : {}), dataset: fingerprint(dataset), tasks: tasks.map(task => task.id), trials, model: { reference: modelName, modelCode: selection.modelCode, provider: selection.providerCode, configuration: fingerprint({ profile: providerProfile, model: modelRow }) }, cli: { kind: archivePath ? 'archive' : 'local', hash: createHash('sha256').update(await readFile(archivePath ?? localCliPath)).digest('hex') }, maxCalls, maxTurns, maxRunMs, maxOutputTokens, maxCost: maxCost ?? null, maxTotalTokens, costCurrency }
 const previousRecords = has('--resume') ? await readRunRecords(runsPath) : []
 let batch = has('--resume') ? await readJson(batchPath) : { identity: batchIdentity, trials: {} }
 if (fingerprint(batch.identity) !== fingerprint(batchIdentity)) throw new Error('EVAL_BATCH_IDENTITY_MISMATCH')
@@ -97,8 +99,8 @@ let budgetStopped = consumedTokens >= maxTotalTokens || inherited.unknownTokenRu
     if (budgetStopped) break
     const prior = batch.trials[key]
     const reservedElsewhere = Object.entries(batch.trials).filter(([otherKey, state]) => otherKey !== key && state.status === 'running' && !records.some(row => trialKey(row.taskId, row.trial) === otherKey)).reduce((sum, [, state]) => sum + state.reservedTokens, 0)
-    const tokensForTask = prior?.maxModelCalls ?? Math.min(maxCalls, Math.floor((maxTotalTokens - consumedTokens - reservedElsewhere) / (contextLimit + maxOutputTokens)))
-    if (prior && consumedTokens + reservedElsewhere + prior.reservedTokens > maxTotalTokens) { budgetStopped = true; break }
+    const tokensForTask = prior?.maxModelCalls ?? (tokenBudgetMode === 'between-trials' ? maxCalls : Math.min(maxCalls, Math.floor((maxTotalTokens - consumedTokens - reservedElsewhere) / (contextLimit + maxOutputTokens))))
+    if (tokenBudgetMode === 'conservative' && prior && consumedTokens + reservedElsewhere + prior.reservedTokens > maxTotalTokens) { budgetStopped = true; break }
     if (tokensForTask !== undefined && tokensForTask < 1) { budgetStopped = true; break }
     const taskRoot = join(outputRoot, 'workspaces', task.id, `trial-${trial}`)
     const dataDir = join(outputRoot, 'pulse-data', task.id, `trial-${trial}`)
@@ -190,6 +192,7 @@ let budgetStopped = consumedTokens >= maxTotalTokens || inherited.unknownTokenRu
     completedTrials([record])
     records.push(record)
     consumedTokens += (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0)
+    if (consumedTokens >= maxTotalTokens) budgetStopped = true
     if (maxTotalTokens !== undefined && (typeof usage?.inputTokens !== 'number' || typeof usage?.outputTokens !== 'number')) budgetStopped = true
     if (!usage?.providerCosts?.some(cost => cost.currency === costCurrency)) consumedCostUnknown = true
     if (maxCost !== undefined) {
@@ -212,7 +215,7 @@ let budgetStopped = consumedTokens >= maxTotalTokens || inherited.unknownTokenRu
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
     realProviderRun: providerProfile.provider !== 'mock',
-    budget: { stoppedBeforeNextRun: budgetStopped, consumedCostUnknown, maxModelCallsPerTrial: maxCalls, maxTurnsPerAttempt: maxTurns, providerCallLimitRequested: true, providerCallLimitEnforced: records.length > 0 && records.every(row => row.budgetVerified === true), tokenLimitEnforced: false, maxRunMs, maxOutputTokens, maxCost: maxCost ?? null, costCurrency, maxTotalTokens: maxTotalTokens ?? null, actualTokens: actualTokenTotal, unknownTokenRuns: records.filter(row => typeof row.usage?.inputTokens !== 'number' || typeof row.usage?.outputTokens !== 'number').length, actualCosts: Object.fromEntries(uniqueCosts), usageCompleteRuns, costLimitEnforced: false, note: 'max-model-calls (legacy alias max-calls) bounds cumulative attempts per work run; max-turns remains independent. Enforcement is confirmed only when every saved Host ledger matches the requested limit and reported usage; missing ledgers are unverified. Interrupted trials resume the same Host run and original budget. Token reservation is conservative, not an exact token ceiling. Unknown usage stops further trials; an explicit cost ceiling also stops on unknown prices. Cost is checked between trials and can exceed its ceiling within a trial.' },
+    budget: { tokenBudgetMode, stoppedBeforeNextRun: budgetStopped, consumedCostUnknown, maxModelCallsPerTrial: maxCalls, maxTurnsPerAttempt: maxTurns, providerCallLimitRequested: true, providerCallLimitEnforced: records.length > 0 && records.every(row => row.budgetVerified === true), tokenLimitEnforced: false, maxRunMs, maxOutputTokens, maxCost: maxCost ?? null, costCurrency, maxTotalTokens: maxTotalTokens ?? null, actualTokens: actualTokenTotal, unknownTokenRuns: records.filter(row => typeof row.usage?.inputTokens !== 'number' || typeof row.usage?.outputTokens !== 'number').length, actualCosts: Object.fromEntries(uniqueCosts), usageCompleteRuns, costLimitEnforced: false, note: 'max-model-calls (legacy alias max-calls) bounds cumulative attempts per work run; max-turns remains independent. Enforcement is confirmed only when every saved Host ledger matches the requested limit and reported usage; missing ledgers are unverified. Interrupted trials resume the same Host run and original budget. Token reservation is conservative, not an exact token ceiling. Unknown usage stops further trials; an explicit cost ceiling also stops on unknown prices. Cost is checked between trials and can exceed its ceiling within a trial.' },
     qualityBaselineCreated: fullSuiteSelected && records.length === 24 * trials && !budgetStopped,
     baselineDefinition: 'A baseline sample is complete only when all 24 tasks have at least three trials. Completion means the measurement exists; it does not mean the agent passed.',
     dataset: datasetPath,

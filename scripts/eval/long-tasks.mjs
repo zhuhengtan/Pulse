@@ -2,6 +2,7 @@
 import { mkdir, readFile, cp, readdir, writeFile, open, unlink } from 'node:fs/promises'
 import { spawn, execFileSync } from 'node:child_process'
 import { join, resolve, dirname } from 'node:path'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { gradeCase } from './long-task-grade.mjs'
 import { prepareEvaluationSupport, probeEvaluationEnvironment } from './long-task-support.mjs'
@@ -55,7 +56,7 @@ if (command === 'prepare') {
   save(join(output, 'frozen.json'), { frozenAt: new Date().toISOString(), support, supportHash: hash(await readFile(join(root, 'scripts/eval/long-task-support.mjs'))), dataset, datasetHash: hash(await readFile(datasetPath)), workerHash: hash(await readFile(join(root, 'scripts/eval/long-task-worker.mjs'))), libHash: hash(await readFile(join(root, 'scripts/eval/long-task-lib.mjs'))), graderHash: hash(await readFile(join(root, 'scripts/eval/long-task-grade.mjs'))), probeHash: hash(await readFile(join(root, 'scripts/eval/long-task-probe.mjs'))), resumeProbeHash: hash(await readFile(join(root, 'scripts/eval/long-task-resume-probe.mjs'))), acceptanceHash: hash(await readFile(join(root, 'scripts/eval/long-task-acceptance.mjs'))), sourceManifest, dirtyBaseline: execFileSync('git', ['status', '--short'], { cwd: root, encoding: 'utf8' }), sourceRevision: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(), limits: dataset.limits })
   console.log(JSON.stringify({ prepared: output, tasks: dataset.tasks.map(({ id, effort, title }) => ({ id, effort, title })), sourceFiles: Object.keys(sourceManifest).length, realCalls: 0 }))
 } else if (command === 'preflight') {
-  const config = load(process.env.PULSE_CONFIG ?? '/Users/zhuhengtan/.pulse/config.json')
+  const config = load(process.env.PULSE_CONFIG ?? join(homedir(), '.pulse', 'config.json'))
   const [providerId, modelId] = (config.activeModel ?? '').split('/'), profile = config.providers?.[providerId], model = profile?.models?.[modelId]
   const key = process.env[profile?.apiKeyEnv ?? 'DEEPSEEK_API_KEY']
   if (profile?.provider !== 'deepseek' || !model?.modelCode || !key) throw new Error('CONFIG_OR_CREDENTIAL_UNAVAILABLE')

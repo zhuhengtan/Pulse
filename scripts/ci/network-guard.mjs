@@ -3,7 +3,7 @@ import dgram from 'node:dgram';
 import {errorMonitor} from 'node:events';
 import {threadId} from 'node:worker_threads';
 import {constants} from 'node:os';
-import {promisify} from 'node:util';import net from 'node:net';import dns from 'node:dns';import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';import {appendFileSync,mkdirSync,statSync} from 'node:fs';import {fileURLToPath} from 'node:url';import {basename,join,dirname,posix,win32} from 'node:path';
+import {promisify} from 'node:util';import net from 'node:net';import dns from 'node:dns';import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';import {appendFileSync,mkdirSync,statSync,realpathSync} from 'node:fs';import {fileURLToPath} from 'node:url';import {basename,join,dirname,posix,win32} from 'node:path';
 const self=fileURLToPath(import.meta.url);
 let srtSequence=0;
 const srtOperations=new Set(['grant','stamp','revoke','restore','status','install','uninstall','remove','trust-ca','verify','probe','enable','disable']);
@@ -73,7 +73,29 @@ function reject(host){const report=reportPath();mkdirSync(dirname(report),{recur
 const connect=net.Socket.prototype.connect;
 net.Socket.prototype.connect=function(...args){let first=args[0];if(Array.isArray(first))first=first[0];if(first&&typeof first==='object'){if(first.port!==undefined&&!local(first.host))reject(first.host);}else if(typeof first==='number'&&!local(args[1])&&typeof args[1]!=='function')reject(args[1]);return Reflect.apply(connect,this,args);};
 const lookup=dns.lookup;dns.lookup=function(host,...args){if(!local(host))reject(host);return Reflect.apply(lookup,this,[host,...args]);};
-for(const key of ['spawn','spawnSync','execFile','execFileSync']){const original=cp[key];cp[key]=function(file,...rest){if(['npx', 'npx.cmd', 'npx.exe', 'uvx', 'uvx.cmd', 'uvx.exe', 'pnpx', 'pnpx.cmd', 'pnpx.exe', 'yarn', 'yarn.cmd', 'yarn.exe', 'corepack', 'corepack.cmd', 'corepack.exe', 'bun', 'bun.cmd', 'bun.exe', 'uv', 'uv.cmd', 'uv.exe', 'pip', 'pip.cmd', 'pip.exe', 'pip3', 'pip3.cmd', 'pip3.exe'].includes(basename(String(file))))throw Error('OFFLINE_PACKAGE_MANAGER_LAUNCH_BLOCKED');if(['node','node.exe'].includes(basename(String(file)))||file===process.execPath){if(Array.isArray(rest[0])&&!rest[0].some(x=>String(x)==='--import='+import.meta.url||String(x).includes(self)))rest[0]=['--import='+import.meta.url,...rest[0]];}return traceSrtCall(key,file,rest,()=>Reflect.apply(original,this,[file,...rest]));};if(original[promisify.custom])cp[key][promisify.custom]=function(file,...rest){if(['npx', 'npx.cmd', 'npx.exe', 'uvx', 'uvx.cmd', 'uvx.exe', 'pnpx', 'pnpx.cmd', 'pnpx.exe', 'yarn', 'yarn.cmd', 'yarn.exe', 'corepack', 'corepack.cmd', 'corepack.exe', 'bun', 'bun.cmd', 'bun.exe', 'uv', 'uv.cmd', 'uv.exe', 'pip', 'pip.cmd', 'pip.exe', 'pip3', 'pip3.cmd', 'pip3.exe'].includes(basename(String(file))))throw Error('OFFLINE_PACKAGE_MANAGER_LAUNCH_BLOCKED');if(['node','node.exe'].includes(basename(String(file)))||file===process.execPath){if(Array.isArray(rest[0])&&!rest[0].some(x=>String(x)==='--import='+import.meta.url||String(x).includes(self)))rest[0]=['--import='+import.meta.url,...rest[0]];}return traceSrtCall(key,file,rest,()=>Reflect.apply(original[promisify.custom],this,[file,...rest]));};}
+// The child already loads this exact guard when its effective NODE_OPTIONS carries our canonical --import URL as a whole token.
+// Anything else (scrubbed or overridden env, quoted text, other options merely containing the URL) is not proof, so the argv flag is added.
+export function guardInheritedFromEnv(env){
+  const key=process.platform==='win32'?Object.keys(env??{}).find(name=>name.toUpperCase()==='NODE_OPTIONS'):'NODE_OPTIONS';
+  const value=key===undefined?undefined:env?.[key];
+  if(typeof value!=='string'||/["']/.test(value))return false;
+  const tokens=value.split(/\s+/).filter(Boolean);
+  return tokens.some((token,index)=>isGuardUrl(token.startsWith('--import=')?token.slice(9):token==='--import'?tokens[index+1]:undefined));
+}
+// Same URL, or the same real file through a symlinked path; a query or hash would make it a different module instance.
+function isGuardUrl(text){
+  if(typeof text!=='string')return false;
+  if(text===import.meta.url)return true;
+  try{const url=new URL(text);if(url.protocol!=='file:'||url.search||url.hash)return false;return realpathSync(fileURLToPath(url))===realpathSync(self)}catch{return false}
+}
+function withGuardImport(rest){
+  const args=rest[0];
+  if(!Array.isArray(args)||args.some(x=>String(x)==='--import='+import.meta.url||String(x).includes(self)))return args;
+  const options=rest.slice(1).find(value=>value&&typeof value==='object'&&!Array.isArray(value));
+  if(guardInheritedFromEnv(options&&options.env!==undefined?options.env:process.env))return args;
+  return ['--import='+import.meta.url,...args];
+}
+for(const key of ['spawn','spawnSync','execFile','execFileSync']){const original=cp[key];cp[key]=function(file,...rest){if(['npx', 'npx.cmd', 'npx.exe', 'uvx', 'uvx.cmd', 'uvx.exe', 'pnpx', 'pnpx.cmd', 'pnpx.exe', 'yarn', 'yarn.cmd', 'yarn.exe', 'corepack', 'corepack.cmd', 'corepack.exe', 'bun', 'bun.cmd', 'bun.exe', 'uv', 'uv.cmd', 'uv.exe', 'pip', 'pip.cmd', 'pip.exe', 'pip3', 'pip3.cmd', 'pip3.exe'].includes(basename(String(file))))throw Error('OFFLINE_PACKAGE_MANAGER_LAUNCH_BLOCKED');if(['node','node.exe'].includes(basename(String(file)))||file===process.execPath){rest[0]=withGuardImport(rest);}return traceSrtCall(key,file,rest,()=>Reflect.apply(original,this,[file,...rest]));};if(original[promisify.custom])cp[key][promisify.custom]=function(file,...rest){if(['npx', 'npx.cmd', 'npx.exe', 'uvx', 'uvx.cmd', 'uvx.exe', 'pnpx', 'pnpx.cmd', 'pnpx.exe', 'yarn', 'yarn.cmd', 'yarn.exe', 'corepack', 'corepack.cmd', 'corepack.exe', 'bun', 'bun.cmd', 'bun.exe', 'uv', 'uv.cmd', 'uv.exe', 'pip', 'pip.cmd', 'pip.exe', 'pip3', 'pip3.cmd', 'pip3.exe'].includes(basename(String(file))))throw Error('OFFLINE_PACKAGE_MANAGER_LAUNCH_BLOCKED');if(['node','node.exe'].includes(basename(String(file)))||file===process.execPath){rest[0]=withGuardImport(rest);}return traceSrtCall(key,file,rest,()=>Reflect.apply(original[promisify.custom],this,[file,...rest]));};}
 const promiseLookup=dns.promises.lookup;dns.promises.lookup=function(host,...args){if(!local(host))reject(host);return Reflect.apply(promiseLookup,this,[host,...args]);};
 // DNS Resolver instances and UDP must not bypass the TCP/lookup boundary.
 const dnsMethods=['resolve','resolve4','resolve6','resolveAny','resolveCaa','resolveCname','resolveMx','resolveNaptr','resolveNs','resolvePtr','resolveSoa','resolveSrv','resolveTxt','reverse','lookupService'];

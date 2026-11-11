@@ -4,6 +4,8 @@ import { Icon } from './Icon.js'
 
 export type PendingInteraction = {
   kind: 'interaction'; runId: string; groupId: string; interactionKind: 'ask' | 'approval'
+  requestedAt?: number | undefined
+  action?: import('@hunterzhu/pulse-server/protocol').ChatWorkAction | undefined
   items: Array<{ effectId: string; input: Record<string, unknown> }>
   conversationId?: string; conversationTitle?: string; projectId?: string; approvalPolicy?: 'manual' | 'delegate'
 }

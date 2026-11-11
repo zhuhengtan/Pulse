@@ -16,6 +16,7 @@ import type { FollowupBehavior } from './MessageQueue.js'
 import { Icon } from './Icon.js'
 import { PulseButton } from './PulseControls.js'
 import { apiJson, type PulseWebTransport, type WebAttachment } from './transport.js'
+import { useHoldToTalk } from './useHoldToTalk.js'
 
 export interface AttachmentDraft {
   id: string
@@ -28,6 +29,7 @@ export interface AttachmentDraft {
 }
 
 export interface ComposerDraft {
+  qualityReviewEnabled?: boolean | undefined
   markdown: string
   document?: JSONContent | undefined
   attachments: AttachmentDraft[]
@@ -35,7 +37,7 @@ export interface ComposerDraft {
   revision: number
 }
 export const emptyComposerDraft = (): ComposerDraft => ({ markdown: '', attachments: [], processing: 0, revision: 0 })
-export type ComposerPayload = { text: string; assistantContext?: AssistantContextReference | undefined; richContent?: RichContent | undefined; attachments?: WebAttachment[] | undefined; skills?: string[] | undefined; mentionedFiles?: string[] | undefined }
+export type ComposerPayload = { qualityReviewEnabled?: boolean | undefined; text: string; assistantContext?: AssistantContextReference | undefined; richContent?: RichContent | undefined; attachments?: WebAttachment[] | undefined; skills?: string[] | undefined; mentionedFiles?: string[] | undefined }
 
 const fileSuggestionKey = new PluginKey('fileSuggestion')
 
@@ -308,7 +310,7 @@ export function RichComposer({
   }, [transport])
 
   const handleSend = async (behavior?: FollowupBehavior) => {
-    if (disabled || submitting || stopping || sendingRef.current || draft.processing) return
+    if (disabled || submitting || stopping || sendingRef.current || draft.processing || voiceInput.busy) return
     const currentMarkdown = (editor?.storage as any)?.markdown?.getMarkdown?.() ?? ''
     const trimmed = currentMarkdown.trim()
     if (!trimmed && attachments.length === 0) return
@@ -355,6 +357,7 @@ export function RichComposer({
     const snapshotRevision = draft.revision
     const payload: ComposerPayload = {
       text: trimmed,
+      ...(surfaceMode === 'work' && draft.qualityReviewEnabled !== undefined ? { qualityReviewEnabled: draft.qualityReviewEnabled } : {}),
       richContent,
       ...(webAttachments.length ? { attachments: webAttachments } : {}),
       ...(uniqueSkills.length ? { skills: uniqueSkills } : {}),
@@ -696,6 +699,19 @@ export function RichComposer({
     },
   })
 
+  const voiceAnchor = useRef<{segment?:number;from:number;to:number;prefix:string}>({from:1,to:1,prefix:''})
+  const voiceInput = useHoldToTalk({enabled:surfaceMode==='chat',disabled:disabled || submitting || stopping,transport,
+    onBegin:()=>{const at=editor?.state.selection.to??1;voiceAnchor.current={from:at,to:at,prefix:''}},
+    onText:value=>{
+      if(!editor || editor.isDestroyed)return
+      let anchor=voiceAnchor.current
+      if(anchor.segment!==value.segment){const at=anchor.to,before=editor.state.doc.textBetween(Math.max(0,at-1),at);anchor={segment:value.segment,from:at,to:at,prefix:/[A-Za-z0-9]$/.test(before)&&/^[A-Za-z0-9]/.test(value.text)?' ':''}}
+      const text=anchor.prefix+value.text
+      editor.commands.insertContentAt({from:anchor.from,to:anchor.to},{type:'text',text},{updateSelection:false})
+      voiceAnchor.current={...anchor,to:anchor.from+text.length}
+    },
+  })
+
   // Synchronize external value updates
   useEffect(() => {
     if (!editor) return
@@ -709,18 +725,18 @@ export function RichComposer({
   // Synchronize disabled state
   useEffect(() => {
     if (editor) {
-      editor.setEditable(!disabled, false)
+      editor.setEditable(!disabled && !voiceInput.busy, false)
     }
-  }, [disabled, editor, placeholder])
+  }, [disabled, editor, placeholder, voiceInput.busy])
 
   const sendRef = useRef(handleSend)
   sendRef.current = handleSend
-  const canSubmit = (hasContent || attachments.length > 0) && !draft.processing && !submitting && !disabled && !stopping
+  const canSubmit = (hasContent || attachments.length > 0) && !draft.processing && !submitting && !disabled && !stopping && !voiceInput.busy
 
   return (
     <div
       ref={containerRef}
-      className={`rich-composer ${isDragOver ? 'is-dragover' : ''}`}
+      className={`rich-composer ${isDragOver ? 'is-dragover' : ''} ${voiceInput.busy ? 'is-dictating' : ''}`}
       onDragOverCapture={e => {
         e.preventDefault()
         if (!disabled) { e.dataTransfer.dropEffect = 'copy'; setIsDragOver(true) }
@@ -737,6 +753,8 @@ export function RichComposer({
       }}
     >
       {sendError && <div role="alert">{sendError}</div>}
+      {surfaceMode==='chat' && voiceInput.error && <div className="composer-voice-feedback" role="alert">{voiceInput.error}</div>}
+      {surfaceMode==='chat' && voiceInput.busy && <div className="composer-voice-feedback" role="status"><span className="composer-voice-dot"/>{voiceInput.phase==='preparing'?'正在准备麦克风…':voiceInput.phase==='recording'?'正在听写，松开结束 · Esc 取消':'正在转写最后一段…'}<PulseButton type="button" onClick={voiceInput.cancel} aria-label="取消语音输入">取消</PulseButton></div>}
       {draft.processing > 0 && <div role="status">正在处理附件…</div>}
       {/* Suggestions Menu */}
       {suggestionState && (
@@ -782,7 +800,7 @@ export function RichComposer({
       {attachments.length > 0 && <div className="composer-attachments"><AttachmentCards items={attachments} onRemove={id => setAttachments(items => items.filter(item => item.id !== id))}/></div>}
 
       {/* Editor Content */}
-      <div className="composer-editor-wrap">
+      <div className="composer-editor-wrap" onPointerDown={event=>voiceInput.pointerDown(event)} onContextMenu={voiceInput.onContextMenu}>
         <textarea
           aria-hidden="true"
           tabIndex={-1}
@@ -856,6 +874,7 @@ export function RichComposer({
         </div>
 
         <div className="composer-tools-right">
+          {surfaceMode==='chat' && <PulseButton type="button" className={`composer-tool-btn composer-voice-button ${voiceInput.busy?'is-active':''}`} aria-label="按住说话" aria-pressed={voiceInput.phase==='recording'} aria-describedby={`${composerId}-voice-hint`} title="长按输入框或按住此按钮说话，松开后保留文字草稿" disabled={disabled || submitting || stopping || voiceInput.phase==='transcribing'} onPointerDown={event=>voiceInput.pointerDown(event,true)} onKeyDown={voiceInput.onKeyDown} onKeyUp={voiceInput.onKeyUp} onContextMenu={voiceInput.onContextMenu}><Icon name="microphone" size={19}/></PulseButton>}
           {running && (
             <PulseButton
               type="button"
@@ -882,6 +901,7 @@ export function RichComposer({
           }}><button type="button" className="composer-send-menu" aria-label="发送方式" aria-haspopup="menu" aria-expanded={sendMenuOpen} disabled={!canSubmit}><Icon name="down" size={12}/></button></Dropdown>}
         </div>
       </div>
+      {surfaceMode==='chat' && <span id={`${composerId}-voice-hint`} className="composer-voice-hint">长按输入框听写 · 松开结束，确认后发送</span>}
     </div>
   )
 }

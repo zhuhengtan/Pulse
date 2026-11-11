@@ -1,7 +1,19 @@
+import { reviewEffort, type ReviewExecutionPolicy, type ReviewAttemptEvent } from './review-policy.js'
 import { randomUUID } from 'node:crypto'
 import type { EffectExecutor, EffectExecution, JsonValue, LLMRequestProjection, LLMResult, ModelCandidate, ModelRouteRequirements, ModelRouter } from '@hunterzhu/pulse-runtime'
 import { assignRuntimeToolCallIds, contentHash, ModelFallbackController, OutputValidationError, estimateProjectionTokens, stableSerialize, validateAdapterResult, validateJsonSchema, modelFallbackError, runtimeErrorFromCause } from '@hunterzhu/pulse-runtime'
 import type { ProviderAdapter } from './types.js'
+
+/** Stop waiting even if a provider does not settle promptly after abort. */
+function abortable<T>(run: () => Promise<T>, signal: AbortSignal, enabled: boolean): Promise<T> {
+  if (!enabled) return run()
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason ?? new Error('EFFECT_CANCELLED'))
+    if (signal.aborted) { abort(); return }
+    signal.addEventListener('abort', abort, { once: true })
+    Promise.resolve().then(run).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+  })
+}
 
 class AsyncSlot {
   private active = 0
@@ -91,7 +103,7 @@ function candidateMetadata(candidate: ModelCandidate, attempts: Array<{ effectId
   }) }
 }
 
-export function createModelEffectExecutor(config: { resolveImage?: (ref: string, agentId: string, privacy: LLMRequestProjection['privacy']) => string | Promise<string>; router: ModelRouter; providers: ReadonlyMap<string, ProviderAdapter>; requirements?: ModelRouteRequirements; maxConcurrentByProvider?: Readonly<Record<string, number>>; maxConcurrentByModel?: Readonly<Record<string, number>>; modelBudget?: () => { limit: number; used: number }; beforeProviderAttempt?: (purpose?: string) => Promise<void>; afterProviderAttempt?: (usage: LLMResult['usage'], receiptId?: string) => Promise<void> }): EffectExecutor & { forkConnectionScope(): EffectExecutor & { dispose(): void } } {
+export function createModelEffectExecutor(config: { reviewPolicy?: ReviewExecutionPolicy; resolveImage?: (ref: string, agentId: string, privacy: LLMRequestProjection['privacy']) => string | Promise<string>; router: ModelRouter; providers: ReadonlyMap<string, ProviderAdapter>; requirements?: ModelRouteRequirements; maxConcurrentByProvider?: Readonly<Record<string, number>>; maxConcurrentByModel?: Readonly<Record<string, number>>; modelBudget?: () => { limit: number; used: number }; beforeProviderAttempt?: (purpose?: string) => Promise<void>; afterProviderAttempt?: (usage: LLMResult['usage'], receiptId?: string, purpose?: string) => Promise<void> }): EffectExecutor & { forkConnectionScope(): EffectExecutor & { dispose(): void } } {
   const fallback = new ModelFallbackController()
   const providerSlots = new SlotPool(config.maxConcurrentByProvider)
   const modelSlots = new SlotPool(config.maxConcurrentByModel)
@@ -102,7 +114,7 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
     const request = input.request
     if (typeof task !== 'string' || !request || typeof request !== 'object' || Array.isArray(request)) throw new Error('INVALID_LLM_EFFECT_INPUT')
     const projection = request as unknown as LLMRequestProjection
-    const purpose = effect.key?.startsWith('progress-review') ? 'progress-review' : effect.key === 'safety-review' ? 'approval' : effect.key?.startsWith('verify-task') ? 'final-verification' : effect.key?.startsWith('verify-stage') || task === 'verify' ? 'verification' : task === 'plan' ? 'planning' : 'work'
+    const purpose = effect.key?.startsWith('$compact') ? 'compaction' : effect.key?.startsWith('verify-sources') ? 'source-verification' : effect.key?.startsWith('verify-claims') ? 'claim-verification' : effect.key?.startsWith('progress-review') ? 'progress-review' : effect.key === 'safety-review' ? 'approval' : effect.key?.startsWith('verify-task') ? 'final-verification' : effect.key?.startsWith('verify-stage') || task === 'verify' ? 'verification' : task === 'plan' ? 'planning' : 'work'
     let providerAttempts = 0
     const observations: NonNullable<EffectExecution['observations']> = []
     const usage = new Map<string, NonNullable<LLMResult['usage']>>()
@@ -110,16 +122,21 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
     let lastSchemaViolation: JsonValue | undefined
     let failedForSchema = false
     const dynamicRequirements = input.requirements && typeof input.requirements === 'object' && !Array.isArray(input.requirements) ? input.requirements as Record<string, JsonValue> : {}
+    const reviewKey = task === 'verify' && config.reviewPolicy && typeof dynamicRequirements.reviewKey === 'string' ? dynamicRequirements.reviewKey : undefined
+    let reviewAudit: Omit<ReviewAttemptEvent, 'elapsedMs' | 'status' | 'code'> | undefined
+    let reviewStartedAt = 0
     const structuredRequirement = dynamicRequirements.structuredOutput
     const structuredSchema = structuredRequirement && typeof structuredRequirement === 'object' && !Array.isArray(structuredRequirement) ? (structuredRequirement as Record<string, JsonValue>).schema : undefined
     if (structuredSchema !== undefined && (input.outputSchema === undefined || stableSerialize(structuredSchema) !== stableSerialize(input.outputSchema))) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'STRUCTURED_OUTPUT_CONTRACT_MISMATCH', message: 'requirements.structuredOutput.schema must equal outputSchema.' } }
     const routeRequirements: ModelRouteRequirements = { ...(projection.images?.length ? { imageInput: true } : {}), ...config.requirements, ...(typeof dynamicRequirements.toolCalling === 'boolean' ? { toolCalling: dynamicRequirements.toolCalling } : {}), ...(typeof dynamicRequirements.structuredOutput === 'boolean' ? { structuredOutput: dynamicRequirements.structuredOutput } : structuredSchema === undefined ? {} : { structuredOutput: true }), ...(dynamicRequirements.reasoning === 'low' || dynamicRequirements.reasoning === 'medium' || dynamicRequirements.reasoning === 'high' ? { reasoning: dynamicRequirements.reasoning } : {}), ...(typeof dynamicRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: dynamicRequirements.maxOutputTokens } : {}), ...(typeof dynamicRequirements.contextSize === 'number' ? { contextSize: dynamicRequirements.contextSize } : {}) }
+    if (reviewKey) delete routeRequirements.maxOutputTokens
     const routeDiagnostics = config.router.diagnostics(task, projection.privacy, routeRequirements, estimateProjectionTokens(projection) + (typeof routeRequirements.maxOutputTokens === 'number' ? routeRequirements.maxOutputTokens : 0))
     const candidates = config.router.routeProjection(task, projection, routeRequirements)
     const attemptNo = Math.max(1, effect.attemptNo)
-    const candidate = candidates[effect.retryPolicy?.sameModel ? 0 : attemptNo - 1]
+    const retryIndex = effect.retryPolicy?.sameModel === false && candidates.length ? Math.min(attemptNo - 1, candidates.length - 1) : attemptNo - 1
+    const candidate = candidates[effect.retryPolicy?.sameModel ? 0 : retryIndex]
     const maxAttempts = effect.retryPolicy?.maxAttempts ?? candidates.length
-    const canFallback = candidate !== undefined && attemptNo < Math.max(0, maxAttempts) && (effect.retryPolicy?.sameModel === true || candidates[attemptNo] !== undefined)
+    const canFallback = candidate !== undefined && attemptNo < Math.max(0, maxAttempts) && (effect.retryPolicy?.sameModel !== undefined || candidates[attemptNo] !== undefined)
     const contextExhausted = projection.contextSpec?.contextProtocolVersion === 2 && routeDiagnostics.some(route => route.reasons.length > 0 && route.reasons.every(reason => reason === 'CONTEXT_WINDOW_TOO_SMALL'))
     if (candidate === undefined) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: candidates.length === 0 ? contextExhausted ? 'CONTEXT_BUDGET_EXCEEDED' : 'NO_ELIGIBLE_MODEL' : 'MODEL_ATTEMPT_LIMIT_REACHED', message: candidates.length === 0 ? contextExhausted ? 'Required context exceeds the model window. Settled evidence and checkpoint are retained; reduce context or select a larger model before resuming.' : 'No model candidate satisfies the task, privacy, capability, and context requirements.' : 'No additional routed model candidate is available for this Effect.' }, metadata: { routes: routeDiagnostics as unknown as JsonValue, attempts: [] } }
     const result = await fallback.execute(effect.id, [candidate], async (attempt) => {
@@ -136,6 +153,10 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
       try { modelRelease = await modelSlots.get(attempt.candidate.id).acquire(signal) } catch (cause) { providerRelease(); if (signal.aborted) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause }); throw cause }
       slotWaitMs.set(attempt.attemptId, Math.max(0, Date.now() - slotStartedAt))
       const releases = [providerRelease, modelRelease]
+      const parentSignal = signal
+      let reviewTimer: ReturnType<typeof setTimeout> | undefined
+      let reviewTimedOut = false
+      let requestSignal = signal
       let providerStartedAt: number | undefined
       let feedbackRecorded = false
       const recordFeedback = (outcome: 'succeeded' | 'failed' | 'refused' | 'schema_rejected', quality: number): void => {
@@ -148,12 +169,14 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
         const usageReceiptId = randomUUID()
         const streamAttempt = { no: attemptNo, emitted: false }
         const onObservation = (chunk: string): void => {
+          if (reviewKey && requestSignal.aborted) return
           streamAttempt.emitted = true
           const observation = { type: 'chunk' as const, data: chunk }
           if (emitObservation) emitObservation(observation)
           else observations.push(observation)
         }
         const onReasoning = emitObservation === undefined ? undefined : (chunk: string): void => {
+          if (reviewKey && requestSignal.aborted) return
           streamAttempt.emitted = true
           emitObservation({ type: 'chunk', data: { kind: 'reasoning', text: chunk, task, modelId: attempt.candidate.id, providerId: attempt.candidate.providerId, attemptNo: streamAttempt.no } })
         }
@@ -165,30 +188,41 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
         }))
         const hydrated = images === undefined ? projection : { ...projection, images }
         signal.throwIfAborted()
+        const review = reviewKey ? await config.reviewPolicy!.claim(reviewKey) : undefined
+        if (review) {
+          const controller = new AbortController()
+          reviewTimer = setTimeout(() => { reviewTimedOut = true; controller.abort() }, review.timeoutMs)
+          signal = AbortSignal.any([parentSignal, controller.signal])
+          requestSignal = signal
+        }
         await config.beforeProviderAttempt?.(purpose)
         const override = config.router.reasoningEffort(task, attempt.candidate.id)
-        const configuredEffort = override ?? attempt.candidate.reasoningEffort
+        const configuredEffort = review ? reviewEffort(provider.providerKind ?? provider.id, attempt.candidate, override) : override ?? attempt.candidate.reasoningEffort
         const reasoningEffort = configuredEffort ?? (dynamicRequirements.reasoningEffort === 'low' ? 'low' : undefined)
-        const maxOutputTokens = routeRequirements.maxOutputTokens ?? attempt.candidate.capabilities.maxOutputTokens
+        const maxOutputTokens = review ? Math.max(1, Math.min(review.attempt === 1 ? 8192 : 16384, attempt.candidate.capabilities.maxOutputTokens ?? 4096, attempt.candidate.capabilities.maxContextTokens - estimateProjectionTokens(projection))) : routeRequirements.maxOutputTokens ?? attempt.candidate.capabilities.maxOutputTokens
+        if (review && reviewKey) { reviewStartedAt = Date.now(); reviewAudit = { reviewKey, attempt: review.attempt, model: attempt.candidate.id, ...(reasoningEffort ? { reasoningEffort } : {}), maxOutputTokens: maxOutputTokens!, timeoutMs: review.timeoutMs } }
+
         providerStartedAt = Date.now()
         providerAttempts++
         const budget = config.modelBudget?.()
         const blocks = budget && projection.contextSpec?.contextProtocolVersion !== 2 ? [...hydrated.blocks, { kind: 'lane' as const, content: `Host model-call ledger: limit=${budget.limit}, used=${budget.used} (including this request), remaining=${Math.max(0, budget.limit - budget.used)}. This is shared by planning, tools' approval reviews, retries, compaction and final verification. Reserve at least two requests for verification. Produce an incremental usable deliverable now; do not spend the remaining allowance on discovery or start another run.` }] : hydrated.blocks
-        const budgeted = budget ? { ...hydrated, blocks, projectionHash: contentHash(blocks) } : hydrated
-        const output = assignRuntimeToolCallIds(validateAdapterResult(await provider.executeAttempt({ request: budgeted, connectionKey: `${scope}:${effect.agentId}:${effect.ownerLaneId}`, signal, model: attempt.candidate.id, onRequest: diagnostic => {
+        const reviewBlocks = review && review.attempt > 1 ? [...blocks, { kind: 'lane' as const, content: 'Final bounded verification attempt: return concise visible JSON matching the requested schema. Preserve every material finding. No tools, invented evidence, or execution authorization.' }] : blocks
+        const budgeted = budget || review ? { ...hydrated, blocks: reviewBlocks, projectionHash: contentHash(reviewBlocks) } : hydrated
+        const output = assignRuntimeToolCallIds(validateAdapterResult(await abortable(() => provider.executeAttempt({ request: budgeted, connectionKey: `${scope}:${effect.agentId}:${effect.ownerLaneId}`, signal, model: attempt.candidate.id, onRequest: diagnostic => {
           const observation = { type: 'trace' as const, data: { kind: 'context.request', protocol: projection.contextSpec?.contextProtocolVersion ?? 1, segment: projection.contextSpec?.journal?.segment ?? null, reason: projection.contextSpec?.journal?.reason ?? null, ...diagnostic } }
           if (emitObservation) emitObservation(observation); else observations.push(observation)
           if (projection.contextSpec?.contextProtocolVersion === 2 && diagnostic.estimatedInputTokens + (diagnostic.outputReserveTokens ?? routeRequirements.maxOutputTokens ?? 4096) > attempt.candidate.capabilities.maxContextTokens) throw Object.assign(new Error('Prepared provider payload exceeds the model context budget. Checkpoint and settled receipts are retained.'), { code: 'CONTEXT_BUDGET_EXCEEDED', retryable: false })
-        }, ...(reasoningEffort === undefined ? {} : { reasoningEffort }), ...(configuredEffort === undefined ? {} : { strictReasoning: true }), ...(attempt.candidate.supportedReasoningEfforts === undefined ? {} : { supportedReasoningEfforts: attempt.candidate.supportedReasoningEfforts }), ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }), onObservation, ...(onReasoning === undefined ? {} : { onReasoning }), ...(config.beforeProviderAttempt === undefined ? {} : { beforeRetryAttempt: async () => {
-          await config.beforeProviderAttempt!(purpose)
+        }, ...(review ? { ignoreConfiguredReasoning: true } : {}), ...(reasoningEffort === undefined ? {} : { reasoningEffort }), ...(configuredEffort === undefined ? {} : { strictReasoning: true }), ...(attempt.candidate.supportedReasoningEfforts === undefined ? {} : { supportedReasoningEfforts: attempt.candidate.supportedReasoningEfforts }), ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }), onObservation, ...(onReasoning === undefined ? {} : { onReasoning }), ...(config.beforeProviderAttempt === undefined && !review ? {} : { beforeRetryAttempt: async () => {
+          if (review) throw Object.assign(new Error('Provider retry is owned by the bounded review policy.'), { code: 'PROVIDER_NETWORK_ERROR', retryable: true })
+          await config.beforeProviderAttempt?.(purpose)
           providerAttempts++
           if (!streamAttempt.emitted) return
           streamAttempt.no += 1
           streamAttempt.emitted = false
           emitObservation?.({ type: 'trace', data: { kind: 'llm.attempt', task, purpose, modelId: attempt.candidate.id, providerId: attempt.candidate.providerId, attemptNo: streamAttempt.no, fallback: true } })
-        } }) })), effect.id)
+        } }) }), signal, Boolean(review))), effect.id)
         const measuredUsage = { ...(output.usage ?? {}), outputTruncated: output.finishReason === 'length', visibleOutputChars: output.text.length, latencyMs: output.usage?.latencyMs ?? Math.max(0, Date.now() - startedAt), ...(output.usage?.uncachedInputTokens === undefined && output.usage?.inputTokens !== undefined && output.usage.cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, output.usage.inputTokens - output.usage.cachedInputTokens) } : {}) }
-        await config.afterProviderAttempt?.(measuredUsage, usageReceiptId)
+        await config.afterProviderAttempt?.(measuredUsage, usageReceiptId, purpose)
         usage.set(attempt.attemptId, measuredUsage)
         if (output.finishReason === 'length' && input.outputSchema !== undefined) throw Object.assign(new OutputValidationError('adapter', 'OUTPUT_TRUNCATED', 'Model output reached its token limit; incomplete output was rejected.', { outputTokens: output.usage?.outputTokens ?? null, reasoningTokens: output.usage?.reasoningTokens ?? null, visibleOutputChars: output.text.length, maxOutputTokens: routeRequirements.maxOutputTokens ?? config.requirements?.maxOutputTokens ?? null }), { retryable: false })
         if (output.finishReason === 'refusal') { recordFeedback('refused', 0); throw new OutputValidationError('adapter', 'MODEL_REFUSAL', output.refusal ?? 'Provider refused the request.') }
@@ -207,6 +241,7 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
         recordFeedback('succeeded', 1)
         return output
       } catch (cause) {
+        if (reviewTimedOut && !parentSignal.aborted) cause = Object.assign(new Error('Review request timed out; evidence retained.'), { code: 'REVIEW_REQUEST_TIMEOUT', retryable: true })
         // Transport failure still consumed time. Preserve measured timing, but
         // never invent token counts or costs when the provider returned none.
         if (providerStartedAt !== undefined) {
@@ -216,10 +251,10 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
         }
         const stopped = cause && typeof cause === 'object' && 'code' in cause && /^(?:TASK_MODEL_CALL_BUDGET_|AI_APPROVAL_DENIED|APPROVAL_DENIED|TOOL_CANCELLED)/.test(String(cause.code))
         if (!stopped) recordFeedback('failed', 0)
-        if (signal.aborted) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause })
+        if (signal.aborted && !reviewTimedOut) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause })
         const retryable = cause && typeof cause === 'object' && 'retryable' in cause && typeof (cause as { retryable?: unknown }).retryable === 'boolean' ? (cause as { retryable: boolean }).retryable : true
         throw modelFallbackError({ retryable, localClosed: true, sideEffectState: 'none', cause })
-      } finally { for (const release of releases.reverse()) release() }
+      } finally { if (reviewTimer) clearTimeout(reviewTimer); signal = parentSignal; for (const release of releases.reverse()) release() }
     }, 1).then((value) => {
       const providerAttempt = value.attempts.at(-1)
       const measuredUsage = providerAttempt === undefined ? undefined : usage.get(providerAttempt.attemptId)
@@ -233,8 +268,12 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
       if (inner instanceof OutputValidationError && inner.code === 'MODEL_REFUSAL') return { result: { text: '', refusal: inner.message, toolCalls: [], finishReason: 'refusal' as const }, candidate, attempts: [{ effectId: effect.id, attemptId: effect.attemptId, attemptNo, candidate }], refused: true, retryable: canFallback }
       const fallbackError = cause && typeof cause === 'object' && 'modelFallback' in cause ? (cause as { modelFallback?: { retryable?: boolean; cause?: unknown } }).modelFallback : undefined
       const error = runtimeErrorFromCause(fallbackError?.cause ?? cause, 'MODEL_EXECUTION_FAILED')
-      return { result: { text: '', toolCalls: [], finishReason: 'error' as const }, candidate, attempts: [{ effectId: effect.id, attemptId: effect.attemptId, attemptNo, candidate }], failed: { ...error, ...(canFallback && fallbackError?.retryable !== false && error.retryable !== false ? { retryable: true } : {}) } }
+      return { result: { text: '', toolCalls: [], finishReason: 'error' as const }, candidate, attempts: [{ effectId: effect.id, attemptId: effect.attemptId, attemptNo, candidate }], failed: { ...error, ...(reviewKey && error.code === 'OUTPUT_TRUNCATED' ? { retryable: canFallback } : canFallback && fallbackError?.retryable !== false && error.retryable !== false ? { retryable: true } : {}) } }
     })
+    if (reviewAudit) {
+      const code = 'schemaRejected' in result ? 'OUTPUT_SCHEMA_VIOLATION' : 'refused' in result ? 'MODEL_REFUSAL' : 'failed' in result ? result.failed.code : result.result.finishReason === 'length' ? 'OUTPUT_TRUNCATED' : undefined
+      await config.reviewPolicy!.record({ ...reviewAudit, elapsedMs: Math.max(0, Date.now() - reviewStartedAt), status: code ? 'unavailable' : 'completed', ...(code ? { code } : {}) })
+    }
     if ('schemaRejected' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Provider output did not match the declared schema.', ...(canFallback ? { retryable: true } : {}) }, metadata: { ...(candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue) as Record<string, JsonValue>), providerAttempts }, rejectedOutput: { value: result.schemaRejected, privacy: projection.privacy, derivedFrom: [...(effect.derivedFrom ?? [])] } }
     if ('refused' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'MODEL_REFUSAL', message: result.result.refusal ?? 'Provider refused the request.', ...(result.retryable ? { retryable: true } : {}) }, metadata: { ...(candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue) as Record<string, JsonValue>), providerAttempts } }
     if ('failed' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: result.failed, metadata: { ...(candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue) as Record<string, JsonValue>), providerAttempts } }

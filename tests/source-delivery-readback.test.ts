@@ -3,9 +3,10 @@ import { PulseRuntime } from '@hunterzhu/pulse-runtime'
 import { buildTaskControllerProgram } from '../packages/server/src/task-controller/program.js'
 
 it.each(['passed','conflict','changed','missing','coverage','metadata-invalid'] as const)('audits complete persisted body rather than a worker summary: %s',async mode=>{
+ // Reserve remaining capacity for readback/audit only; macro recovery is tested separately.
  let agentId='',work=0,audits=0,pages=0
  const body='A'.repeat(mode==='coverage'?200000:3100)+'ACTUAL_BODY_TAIL'
- const program=buildTaskControllerProgram({version:'28',system:'test',toolNames:['fs.write','web.fetch','fs.read'],approvalMode:'auto',maxTurns:24,modelBudgetView:()=>({limit:24,used:8,workAllowed:audits===0,verificationAllowed:true,finalAllowed:true})})
+ const program=buildTaskControllerProgram({version:'28',system:'test',toolNames:['fs.write','web.fetch','fs.read'],approvalMode:'auto',maxTurns:24,modelBudgetView:()=>({limit:24,used:8,workAllowed:work<3&&audits===0,verificationAllowed:true,finalAllowed:true})})
  const runtime=new PulseRuntime({effectExecutor:async effect=>{
   const input=effect.input as any
   if(effect.kind==='tool'){

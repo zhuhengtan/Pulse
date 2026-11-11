@@ -417,6 +417,8 @@ A foreground Worker can process persistent scheduled tasks:
 
 ```bash
 pulse schedule add --every 1h --name "Project check" "Check the project and report items that need attention"
+pulse schedule add --daily 09:00 --timezone Asia/Shanghai "Review project status"
+pulse schedule add --weekly mon --time 10:00 --timezone Asia/Shanghai "Review weekly work"
 pulse schedule list
 pulse schedule pause <task-id>
 pulse schedule resume <task-id>
@@ -424,7 +426,7 @@ pulse schedule remove <task-id>
 pulse --read-only schedule daemon
 ```
 
-Background tasks are stored in the Pulse data directory and support cross-process claim deduplication, failure records, and recovery after process exit. Workers require `read-only` or explicitly configured `auto` approval. For plans that write data, explicitly set `approvalMode: "auto"` in user config and keep model safety review enabled. `pulse schedule run-once` executes one currently due task.
+Background tasks are stored in the Pulse data directory and support cross-process claim deduplication, failure records, and recovery after process exit. Workers require `read-only` or explicitly configured `auto` approval. For plans that write data, explicitly set `approvalMode: "auto"` in user config and keep model safety review enabled. `pulse schedule run-once` executes one currently due task. Calendar plans also support a specific date (`--at`) and skip missed occurrences by default; see [timezones, DST, downtime and restart](docs/scheduled-tasks.md).
 
 In interactive mode, switch models with `/model gpt5.6-a`. You can also select a model at startup with `--model gpt5.6-a` or `PULSE_MODEL=gpt5.6-a`. See [`docs/cli-config.md`](./docs/cli-config.md) for the full configuration loading order and field reference.
 

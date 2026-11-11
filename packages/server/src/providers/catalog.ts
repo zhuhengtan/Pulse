@@ -54,3 +54,20 @@ export function resolveProviderVariant(presetId: string, variantId: string): { p
   if (variant.available === false) throw new Error('PROVIDER_VARIANT_UNAVAILABLE')
   return { preset, variant }
 }
+
+/** Edit the saved connection without guessing its vendor, billing plan or protocol. */
+export function savedProviderPreset(provider: { provider: string; name?: string; baseURL?: string }): ProviderPreset {
+  const candidates = providerPresets.flatMap(preset => preset.variants).filter(variant => variant.provider === provider.provider && variant.available !== false)
+  const baseURL = provider.baseURL ?? (candidates.length === 1 ? candidates[0]!.baseURL : '')
+  const ollama = ['ollama', 'ollama-cloud', 'ollama-remote'].includes(provider.provider)
+  let loopback = false
+  try { loopback = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(baseURL).hostname) } catch { /* The editor asks for a valid address. */ }
+  return {
+    id: 'saved', name: provider.name ?? provider.provider, category: 'custom', keyURL: '', docsURL: '', catalogVersion: version,
+    variants: [{ id: 'current', name: `当前接入 · ${provider.provider}`, provider: provider.provider, baseURL, editableBaseURL: true,
+      discovery: ollama ? 'ollama' : provider.provider === 'anthropic' ? 'anthropic' : 'openai',
+      auth: provider.provider === 'ollama' && loopback ? 'none' : provider.provider === 'ollama-remote' ? 'optional' : 'required',
+      ...(provider.provider === 'ollama' && loopback ? { loopbackOnly: true } : {}),
+    }],
+  }
+}

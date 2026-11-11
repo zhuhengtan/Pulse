@@ -54,15 +54,14 @@ describe('task-level bounded replanning in LocalHost', () => {
 
   it('does not execute tools for an explicit status question', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-status-turn-'))
-    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', mockToolCalls: [{ name: 'fs.write', input: { path: 'must-not-exist.txt', content: 'unexpected' } }] })
+    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', mockResponse: JSON.stringify({ action: 'respond', response: 'Il n’y a pas encore d’erreur enregistrée.' }) })
     try {
       const conversation = await host.createConversation()
-      const run = await host.sendMessage(conversation.id, { text: '你把所有报错输出给我我看看怎么回事' })
-      await run.outcome()
+      const run = await host.sendWorkTurn(conversation.id, { text: 'Pourrais-tu me montrer les erreurs enregistrées ?' }, async () => { throw new Error('Status question started an execution run') })
+      expect(run.replyOnly).toBe(true)
+      await expect(run.outcome()).resolves.toMatchObject({ text: 'Il n’y a pas encore d’erreur enregistrée.' })
       await expect(readFile(join(directory, 'must-not-exist.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
-      const snapshot = await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8')
-      const effects = JSON.parse(snapshot).state.state.effects.map((entry: [string, { kind: string }]) => entry[1])
-      expect(effects.some((effect: { kind: string }) => effect.kind === 'tool')).toBe(false)
+      await expect(readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'runtime.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await host.close(); await rm(directory, { recursive: true, force: true }) }
   })
 

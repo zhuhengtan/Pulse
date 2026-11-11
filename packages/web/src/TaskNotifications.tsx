@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Icon } from './Icon.js'
 import type { PulseWebTransport } from './transport.js'
 
-type Notice = { id: string; kind: 'complete' | 'ask' | 'approval'; conversationId: string; runId: string; groupId?: string; surface?: 'chat' | 'work' }
+type Notice = { revision?: string; readAt?: number; id: string; kind: 'complete' | 'ask' | 'approval'; conversationId: string; runId: string; groupId?: string; surface?: 'chat' | 'work' }
 type NoticeBox = { top: number; left: number; width: number }
 /** Keep the menu inside the viewport. A right-anchored 280px panel overflows when the toggle sits near the left edge. */
 function noticeBox(anchor: DOMRect): NoticeBox {
@@ -15,14 +15,14 @@ function noticeBox(anchor: DOMRect): NoticeBox {
 
 /** Browser notifications require an explicit gesture. The inbox works without permission. */
 export function TaskNotificationInbox({ transport, open }: { transport: PulseWebTransport; open: (path: string) => void }) {
-  const [items, setItems] = useState<Notice[]>([]), [expanded, setExpanded] = useState(false)
+  const [unread, setUnread] = useState(0)
+  const [items, setItems] = useState<Notice[]>([]), [expanded, setExpanded] = useState(() => new URLSearchParams(window.location.search).get('notices') === '1')
   const [permission, setPermission] = useState(() => typeof Notification === 'undefined' ? 'unsupported' : Notification.permission)
   const [box, setBox] = useState<NoticeBox>()
   const toggleRef = useRef<HTMLButtonElement>(null)
   const seen = useRef(new Set<string>()), initialized = useRef(false)
-  const navigate = (item: Notice) => open(`${item.surface === 'chat' ? '/chat' : '/work/' + encodeURIComponent(item.conversationId)}?notification=${encodeURIComponent(item.groupId ?? item.id)}`)
+  const navigate = (item: Notice) => open(`${item.surface === 'chat' ? '/chat' : '/work/' + encodeURIComponent(item.conversationId)}?notification=${encodeURIComponent(item.groupId ?? item.id)}${item.revision ? '&noticeRevision=' + encodeURIComponent(item.revision) : ''}&noticeRun=${encodeURIComponent(item.runId)}`)
   useEffect(() => {
-    if (window.pulseDesktop) return
     let closed = false, busy = false
     try { seen.current = new Set(JSON.parse(localStorage.getItem('pulse-task-notices') ?? '[]')) } catch { /* Optional notification cache. */ }
     const sync = async () => {
@@ -41,7 +41,7 @@ export function TaskNotificationInbox({ transport, open }: { transport: PulseWeb
             pending.push(item)
           }
           let shown = false
-          if (!closed && permission === 'granted' && (initialized.current || item.kind !== 'complete') && !seen.current.has(item.id)) {
+          if (!closed && !window.pulseDesktop && permission === 'granted' && (initialized.current || item.kind !== 'complete') && !seen.current.has(item.id)) {
             try {
               const notice = new Notification(item.kind === 'complete' ? 'Pulse · 任务已结束' : 'Pulse · 有待处理事项', { body: '打开 Pulse 查看详情。', tag: item.id })
               notice.onclick = () => { window.focus(); navigate(item); notice.close() }
@@ -50,7 +50,7 @@ export function TaskNotificationInbox({ transport, open }: { transport: PulseWeb
           }
           if (shown || (item.kind === 'complete' && !initialized.current)) seen.current.add(item.id)
         }
-        if (!closed) { setItems([...pending, ...feed.filter(item => item.kind === 'complete').slice(-5).reverse()]); initialized.current = true; try { localStorage.setItem('pulse-task-notices', JSON.stringify([...seen.current].slice(-1000))) } catch { /* Inbox remains available. */ } }
+        if (!closed) { setUnread(feed.filter(item => !item.readAt && (item.kind === 'complete' || pending.some(current => current.id === item.id))).length); setItems([...pending, ...feed.filter((item, index) => item.kind === 'complete' && (!item.readAt || index >= feed.length - 5)).reverse()]); initialized.current = true; try { localStorage.setItem('pulse-task-notices', JSON.stringify([...seen.current].slice(-1000))) } catch { /* Inbox remains available. */ } }
       } catch { /* Offline: retain the last known inbox, never submit answers. */ }
       finally { busy = false }
     }
@@ -64,16 +64,15 @@ export function TaskNotificationInbox({ transport, open }: { transport: PulseWeb
     window.addEventListener('resize', place)
     return () => window.removeEventListener('resize', place)
   }, [expanded])
-  if (window.pulseDesktop) return null
   return <aside className="task-notice" aria-label="任务通知">
     <button ref={toggleRef} type="button" className="task-notice-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
-      <span className="task-notice-full">通知 / 待办（{items.length}）</span>
-      <span className="task-notice-compact" aria-hidden="true"><Icon name="archive" size={16}/><span className="task-notice-count">{items.length}</span></span>
+      <span className="task-notice-full">通知 / 待办（{unread} 未读）</span>
+      <span className="task-notice-compact" aria-hidden="true"><Icon name="archive" size={16}/><span className="task-notice-count">{unread > 0 ? '●' : ''}</span></span>
     </button>
     {expanded && <div className="task-notice-panel" role="region" aria-label="待办列表" style={box ? { top: box.top, left: box.left, width: box.width, right: 'auto' } : undefined}>
-      {permission === 'default' && <button type="button" className="task-notice-action" onClick={() => { void Notification.requestPermission().then(setPermission).catch(() => setPermission('denied')) }}>启用系统通知</button>}
+      {!window.pulseDesktop && permission === 'default' && <button type="button" className="task-notice-action" onClick={() => { void Notification.requestPermission().then(setPermission).catch(() => setPermission('denied')) }}>启用系统通知</button>}
       <p>{permission === 'granted' ? '此页面打开时接收通知；点击通知进入任务。' : '系统通知未启用，待办仍保留在这里。'}</p>
-      <p>浏览器通知内无法直接作答，请进入任务回答。</p>
+      <p>阅读后清除红点；未回答的问题和审批仍保留在待办。</p>
       {items.map(item => <button type="button" className="task-notice-action" key={item.id} onClick={() => navigate(item)}>{item.kind === 'approval' ? '查看待审批任务' : item.kind === 'complete' ? '查看已结束任务' : '回答待处理问题'}</button>)}
       {!items.length && <p>暂无待处理事项</p>}
     </div>}

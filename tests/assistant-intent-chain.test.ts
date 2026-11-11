@@ -15,6 +15,14 @@ async function scenario(name:string,goal:string,replies:any[],setup?:(host:any,i
  finally{await host.close();await rm(root,{recursive:true,force:true})}
 }
 const tool=(name:string,args:any,id:string)=>({content:'',tool_calls:[{id,function:{name,arguments:JSON.stringify(args)}}]})
+it.each(['你是什么模型？','枣子是良性食物吗？'])('does not append empty runtime messages after the actual chat input: %s',async text=>{
+ const r=await scenario('nonempty-current',text,[{content:'fixture reply'}])
+ expect(r.out.status).toBe('succeeded')
+ const messages=r.requests[0].messages
+ expect(messages.filter((m:any)=>m.role==='user' && m.content===text)).toHaveLength(1)
+ expect(messages.some((m:any)=>m.role!=='system' && ['{}','[]'].includes(m.content))).toBe(false)
+ expect(messages.some((m:any)=>['lane','events','results','artifacts'].includes(m.name))).toBe(false)
+})
 it('supports sequential status calls for different tasks',async()=>{const r=await scenario('two-status','分别看看任务A和B现在在做什么',[tool('work_status',{conversationId:'task-a'},'a'),tool('work_status',{conversationId:'task-b'},'b'),{content:'status'}]);expect(r.statuses).toEqual(['task-a','task-b']);expect(JSON.stringify(r.requests[1].tools)).toContain('work_status');})
 it('preserves the long current correction in the actual model request',async()=>{const marker='TAIL_CORRECTION_BETA_73';const text='请核对这段项目说明。'+('普通背景内容。'.repeat(650))+'\n不是上面的Alpha，实际只处理Beta，'+marker;const r=await scenario('long-current',text,[{content:'fixture'}]);expect(Buffer.byteLength(text)).toBeGreaterThan(6000);expect(JSON.stringify(r.requests)).toContain(marker);})
 it('preserves recent previous selection and the current correction in the model input',async()=>{const r=await scenario('recent-correction','不是Alpha，是Beta；继续刚才那个，只读',[{content:'fixture'}],async(h,id)=>{await h.appendAssistantUserMessage(id,{id:'fixture-before',runId:'fixture-run',text:'选择Alpha项目',createdAt:new Date().toISOString()})});const body=JSON.stringify(r.requests);expect(body).toContain('选择Alpha项目');expect(body).toContain('不是Alpha，是Beta');})

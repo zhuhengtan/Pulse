@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -30,6 +31,7 @@ it('persists explicit ownership, rejects stale agent commands and allows user ta
 it('enforces ownership at authenticated HTTP endpoints, preserving current state on concurrent transfers', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pulse-control-http-')), dataDir = join(root, 'data')
   const host = createLocalHost({ cwd: root, dataDir, mockResponse: 'done', taskController: false, jarvis: { enabled: false } })
+  acceptWorkRequests(host)
   const server = new H5Server(host, { dataDir, host: '127.0.0.1', port: 0 })
   try {
     const base = `http://127.0.0.1:${(await server.start()).port}`

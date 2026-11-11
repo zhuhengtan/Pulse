@@ -1,5 +1,11 @@
-import { expect } from 'vitest'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { beforeEach, expect } from 'vitest'
 
+// Failure/quarantine probes intentionally retain capacity. Give independent
+// tests separate host ledgers, while their child processes inherit the same one.
+beforeEach(() => { process.env.PULSE_TEST_TASK_ADMISSION_DIR = mkdtempSync(join(tmpdir(), 'pulse-admission-tests-')) })
 const nativeFetch = globalThis.fetch
 
 // Real CLI/worker children do not execute Vitest setup. Carry the same offline

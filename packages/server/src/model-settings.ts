@@ -65,9 +65,16 @@ export function runtimeTokenWindow(context: number, output: number | undefined):
 }
 
 /** Use the real context, including a 1-token window. Missing context still defaults inside runtimeTokenWindow. */
-export function historyBudget(capabilities: { maxContextTokens?: number; maxOutputTokens?: number }): { historySoftTokens: number; historyHardTokens: number } {
+export function historyBudget(capabilities: { maxContextTokens?: number; maxOutputTokens?: number }, storage?: { maxSnapshotBytes: number; maxTotalMemoryBytes: number }): { historySoftTokens: number; historyHardTokens: number } {
   const fitted = runtimeTokenWindow(capabilities.maxContextTokens ?? 0, capabilities.maxOutputTokens)
-  return { historyHardTokens: fitted.historyHardTokens, historySoftTokens: fitted.historySoftTokens }
+  if (!storage) return { historyHardTokens: fitted.historyHardTokens, historySoftTokens: fitted.historySoftTokens }
+  // History is serialized into both the lane checkpoint and in-flight requests.
+  // Reserve half for those copies, locals, tool schemas and the next result;
+  // compression starts at half this hard ceiling, leaving more room for the
+  // summary request. The runtime estimates four serialized bytes per token.
+  const storageHardTokens = Math.max(1, Math.floor(Math.min(storage.maxSnapshotBytes, storage.maxTotalMemoryBytes) / 8))
+  const historyHardTokens = Math.min(fitted.historyHardTokens, storageHardTokens)
+  return { historyHardTokens, historySoftTokens: Math.min(fitted.historySoftTokens, Math.max(1, Math.floor(historyHardTokens / 2))) }
 }
 
 export type ModelRouteEntry = string | { model: string; reasoningEffort?: ReasoningEffort }

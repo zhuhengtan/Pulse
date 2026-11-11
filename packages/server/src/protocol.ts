@@ -61,11 +61,17 @@ export interface WebAttachment {
 /** Exact navigation references; never an instruction or permission grant. */
 export interface AssistantContextReference { projectId?: string; conversationId?: string }
 
-export interface ChatWorkAction { callbackId: string; conversationId: string; runId: string; controlRevision: number; fingerprint: string; interaction: WebPendingInteraction; state?: 'pending' | 'answered' | 'obsolete' }
+export interface WebQuestionAnswer { effectId: string; input: Record<string, unknown>; answer: Record<string, unknown> }
+export interface ChatWorkAction { callbackId: string; conversationId: string; runId: string; controlRevision: number; fingerprint: string; interaction: WebPendingInteraction; state?: 'pending' | 'answered' | 'obsolete'; answers?: Array<{ effectId: string; value: Record<string, unknown> }> }
 export interface WebMessage {
+  questionAnswer?: WebQuestionAnswer
+  inputMode?: 'voice'
+  qualityReviewEnabled?: boolean
   workAction?: ChatWorkAction
 
   messageKind?: 'pre_reply' | 'reply' | 'work_notice'
+  replyToId?: string
+  steeringState?: 'pending' | 'applied' | 'not_applied'
 
   assistantContext?: AssistantContextReference
   sequence?: number
@@ -90,6 +96,7 @@ export interface WebMessage {
 }
 
 export interface WebAssistantMessageReceipt {
+  inputMode?: 'voice'
   messageId: string
   runId: string
   state: 'queued' | 'replying' | 'failed' | 'interrupted' | 'completed'
@@ -103,11 +110,18 @@ export type WebTraceData =
   | { kind: 'model'; effectId?: string; laneId?: string; attemptId?: string; task: string; modelId: string; providerId?: string; attemptNo: number; fallback: boolean }
   | { kind: 'reasoning' | 'note'; effectId?: string; laneId?: string; attemptId?: string; attemptNo?: number; task: string; modelId?: string; text: string }
 
+export interface WebRunAdmission {
+  phase: 'queued' | 'starting' | 'running' | 'cancelling' | 'quarantined'
+  position?: number
+  queuedAt?: number
+  startedAt?: number
+}
+
 type WebRunEventPayload =
   | { type: 'chat_message'; runId: string; seq: number; data: { message: WebMessage } }
   | { type: 'resync'; runId: string; seq: number; data: WebRunSnapshot }
-  | { type: 'status'; runId: string; seq: number; data: { kind: 'working' | 'context'; label?: string } }
-  | { type: 'input_response'; runId: string; seq: number; data: { messageId: string; text: string } }
+  | { type: 'status'; runId: string; seq: number; data: { kind: 'working' | 'context'; label?: string; admission?: WebRunAdmission; health?: import('./run-presentation.js').RunHealth } }
+  | { type: 'input_response'; runId: string; seq: number; data: { messageId: string; text: string; replyToId?: string; steeringState?: WebMessage['steeringState']; createdAt?: string } }
   | { type: 'text'; runId: string; seq: number; data: string; activityId?: string }
   | { type: 'tool'; runId: string; seq: number; data: { activityId: string; effectId: string; attemptId?: string; laneId?: string; tool: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled'; args?: Record<string, unknown>; preview?: Record<string, unknown>; error?: Record<string, unknown> } }
   | { type: 'trace'; runId: string; seq: number; data: WebTraceData }
@@ -123,12 +137,14 @@ export type WebRunEvent = WebRunEventPayload & { conversationId?: string; timest
 
 export interface WebPendingInteraction {
   groupId: string
+  requestedAt?: number
   kind: 'ask' | 'approval'
   items: Array<{ effectId: string; input: Record<string, unknown> }>
 }
 
 /** A work-session interaction projected into the persistent assistant chat. */
 export interface WebAssistantWorkInteraction extends WebPendingInteraction {
+  action?: ChatWorkAction
   runId: string
   conversationId: string
   title: string
@@ -137,6 +153,8 @@ export interface WebAssistantWorkInteraction extends WebPendingInteraction {
 }
 
 export interface WebRunSnapshot {
+  admission?: WebRunAdmission
+  health?: import('./run-presentation.js').RunHealth
   runId: string
   state: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
   seq: number

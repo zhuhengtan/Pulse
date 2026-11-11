@@ -11,7 +11,7 @@ function activeState(r: PulseRuntime, laneId: string): any { return (r.state.lan
 function fixture(tasks: ReturnType<typeof stage>[], retry?: string, fail?: string, pause?: string, failCheck?: string, autoCheck = false) {
   let r: PulseRuntime
   const work = new Map<string, number>(), owners = new Map<string, Set<string>>(), writes: string[] = [], inputs: any[] = []
-  const program = buildTaskControllerProgram({ system: 'offline simulation', toolNames: ['fs.write', 'shell.exec', 'ask.choice'], approvalMode: 'auto', maxTurns: 128 })
+  const program = buildTaskControllerProgram({ system: 'offline simulation', toolNames: ['fs.write', 'shell.exec', 'ask.choice'], approvalMode: 'auto', maxTurns: 128, modelBudgetView: () => { const current = rootState(r).taskController?.tasks ?? []; return { limit: 128, used: 8, workAllowed: !(fail || failCheck) || !current.length || current.some((task: any) => ['pending', 'running', 'verifying'].includes(task.status)), verificationAllowed: true, finalAllowed: true } } })
   const executor = async (e: any) => {
     if (e.key === '$compact-summary') return { value: { text: 'Preserve the original task, settled delivery receipts, and pending verification. Continue unfinished work without replaying completed writes.', finishReason: 'stop', toolCalls: [] } }
     if (e.key?.startsWith('plan')) return { value: { tasks } }
@@ -154,7 +154,8 @@ describe('v14 delivery-chain continuity', () => {
 
   it('retains completed stages and rejects a failed required check during a same-lane retry', async () => {
     const f = fixture([stage('a'), stage('b', ['a']), stage('c', ['b'])], 'b', undefined, undefined, 'b')
-    expect((await f.r.start(f.agentId).outcome()).status).toBe('succeeded')
+    const outcome = await f.r.start(f.agentId).outcome()
+    expect(outcome, JSON.stringify(outcome)).toMatchObject({ status: 'succeeded' })
     const g = rootState(f.r)
     expect(g.taskOutcome.status).toBe('incomplete')
     expect(g.taskController.tasks.map((t: any) => t.status)).toEqual(['passed', 'blocked', 'blocked'])
@@ -211,6 +212,6 @@ describe('v14 delivery-chain continuity', () => {
   expect(tasks.every((t: any) => t.candidateAttempt === t.attempts)).toBe(true)
   const final = f.r.state.results.get(result.resultRef!)?.value as any
   expect(final.text.match(/Stage delivered: a/g)).toHaveLength(1)
-  expect(final.text).not.toContain('Stage delivered: b')
-  expect(final.text).not.toContain('Stage delivered: c')
+  expect(final.text.match(/Stage delivered: b/g)).toHaveLength(1)
+  expect(final.text.match(/Stage delivered: c/g)).toHaveLength(1)
  })

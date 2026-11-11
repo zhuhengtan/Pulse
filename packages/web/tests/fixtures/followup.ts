@@ -62,5 +62,5 @@ export function followupFixture(surface: 'chat' | 'work', ask = false) {
     if (path.endsWith('/cancel')) { calls.push({ path, body: {} }); finish('cancelled'); return response({ ok: true }) }
     return request(path, init)
   }
-  return { transport: base.transport, calls, conversation, finish, states, subscriptions, setConnected: (connected: boolean) => connections.forEach(listener => listener(connected)) }
+  return { transport: base.transport, calls, conversation, finish, states, subscriptions, messages, emit, setConnected: (connected: boolean) => connections.forEach(listener => listener(connected)) }
 }

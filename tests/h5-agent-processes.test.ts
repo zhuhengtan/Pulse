@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,6 +13,7 @@ it.skipIf(process.platform === 'win32')('authenticates run-owned read/cancel rou
   await writeFile(script, "console.log(process.stdin.isTTY?'worker-tty-ready':'NOT_TTY');setInterval(()=>{},1000)")
   const identity = await resolveShellIdentity('node', [script], root)
   const host = createLocalHost({ cwd: root, dataDir: root, taskController: false, jarvis: { enabled: false }, provider: { provider: 'mock' }, approvalMode: 'ask', execPolicy: { rules: [{ pattern: [identity.path, script], decision: 'allow' }] } })
+  acceptWorkRequests(host)
   const server = new H5Server(host, { dataDir: root, host: '127.0.0.1', port: 0, workWorker: { entry: fileURLToPath(new URL('./fixtures/agent-process-worker.mjs', import.meta.url)), dataDir: root, cwd: root, approvalMode: 'ask', runtimeOptions: host.getWorkWorkerOptions() } })
   await host.init()
   const info = await server.start(), base = `http://127.0.0.1:${info.port}`

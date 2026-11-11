@@ -23,6 +23,8 @@ describe('required-check enforcement against a mistaken verifier', () => {
     agentId = runtime.createAgent({ goal: 'Follow the immutable contract', program, initialGlobal: { taskRecord: { schemaVersion: 1, runId: 'offline', objective: legitimateNegative || mode === 'other-criterion-negative' ? 'Verify CLI negative test, then make post-fix regression pass' : 'Make regression pass', acceptanceCriteria: [{ id: 'c', description: legitimateNegative ? 'CLI negative test must fail with expected nonzero exit' : 'Post-fix tests must exit zero' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } } }).agentId
     expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
     expect(global(runtime, agentId).taskOutcome.status).toBe(['negative', 'successful-rerun', 'zero'].includes(mode) ? 'accepted' : 'incomplete')
-    expect(global(runtime, agentId).taskController.goalRecoveries).toBe(0)
+    const controller = global(runtime, agentId).taskController
+    if (['negative', 'successful-rerun', 'zero'].includes(mode)) expect(controller.goalRecoveries).toBe(0)
+    else { expect(controller.goalRecoveries).toBeGreaterThan(0); expect(controller.priorTasks.some((task: any) => task.evidenceRefs.length)).toBe(true) }
   })
 })

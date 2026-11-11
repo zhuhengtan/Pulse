@@ -10,16 +10,18 @@
 ./start-dev.sh
 ```
 
-也可以运行 `pnpm dev`（Windows 使用此命令）。要求已安装 Node >=22.13、pnpm 12.4.2；缺少项目依赖、Electron 或 Chromium 时脚本会自动准备，首次运行需要网络。默认启动开发后台 `7333`、前端 `5174` 及 Electron 窗口。前端代码/样式保存后自动刷新，Electron 主进程/preload 的修改须重开窗口，后端修改须重启开发后台后生效。
+也可以运行 `pnpm dev`（Windows 使用此命令）。要求已安装 Node >=22.13、pnpm 12.4.2；缺少项目依赖、Electron 或 Chromium 时脚本会自动准备，首次运行需要网络。默认启动开发后台 `7333`、前端 `5174` 及 Electron 窗口。前端代码/样式保存后自动刷新，Electron 主进程、preload 和后端修改通过 `./restart-dev.sh` 完整重启后生效。
 
-脚本核验 `.pulse-dev/h5/data` 中已运行后台的 PID 和数据目录，并复用匹配当前仓库及实际后台端口的 Vite。默认后台端口被占用、或默认前端连接了其他后台时，会自动选择空闲端口，无需手动设置环境变量，不会切换数据目录或停止已有进程。显式指定端口时仍严格使用该端口，冲突则报错。已有后台若是旧代码，可运行 `./restart-dev.sh`：先构建，再核验数据目录、服务 PID 和前端归属，使用 SIGTERM 正常停止开发后台并在原端口启动新版。它保留聊天和配置，执行中的任务会中断；匹配的 Vite 与 Electron 窗口继续复用，主进程/preload 修改仍须关闭窗口后重开。停止超时会报错，不强杀。配置和模型沿用 `PULSE_CONFIG` / `PULSE_HOME` / `~/.pulse` 的现有规则；开发聊天、设备与窗口配置保存在 `.pulse-dev`，不注册用户 CLI 或修改终端 PATH。脚本不打包应用，也不编译可选的原生桌面控制辅助程序（需要时单独运行 `pnpm desktop:build`）。
+开发环境统一通过根目录 `start-dev.sh`（或 `pnpm dev`）启动，网页模式使用 `--web-only`。不再保留独立启动后台的 `web:dev:server` 入口。
+
+脚本核验 `.pulse-dev/h5/data` 中已运行后台的 PID、数据目录和版本，并复用匹配当前仓库及实际后台端口的 Vite。后台版本与仓库不一致时，启动会明确提示运行 `./restart-dev.sh`，保留原进程；新后台固定运行当前仓库的 CLI，不使用已安装版本的受管运行时。默认后台端口被占用、或默认前端连接了其他后台时，会自动选择空闲端口，无需手动设置环境变量，不会切换数据目录或停止已有进程。显式指定端口时仍严格使用该端口，冲突则报错。已有后台若是旧代码，可运行 `./restart-dev.sh`：先构建，再核验数据目录、服务 PID 和前端归属，正常退出当前配置目录下已核验的开发桌面及其语音进程，再用 SIGTERM 停止已核验的 Vite 和开发后台，在原端口启动新版。它保留聊天、配置和模型，执行中的任务会中断；Vite、Electron 主进程、preload 和语音工作进程均重新加载，不将复用旧进程当作重启成功。前端除核对仓库和后台地址外，还核对实际监听进程的 Vite 启动命令；macOS 使用 lsof/ps，Linux 使用 /proc，Windows 使用系统进程与端口信息。`--web-only` 重启 Vite 和后台，不退出桌面。桌面身份通过独立配置目录中的本地控制端点核验；旧 macOS/Linux 开发实例会同时检查启动命令与实际打开的配置目录文件，明确提示从应用菜单或托盘彻底退出一次（macOS 开发版需激活窗口，在屏幕左上角的 Electron 菜单中选择“彻底退出 Pulse（保留后台服务）”，无需找到托盘图标）；不会向会把退出当隐藏的旧实例发送退出信号。首次加载新主进程后，后续 `restart-dev` 可自动重启桌面。无法核验或退出超时会报错，不强杀。配置和模型沿用 `PULSE_CONFIG` / `PULSE_HOME` / `~/.pulse` 的现有规则；开发聊天、设备与窗口配置保存在 `.pulse-dev`，不注册用户 CLI 或修改终端 PATH。脚本不打包应用，也不编译可选的原生桌面控制辅助程序（需要时单独运行 `pnpm desktop:build`）。
 
 ```sh
 ./start-dev.sh --web-only  # 仅开后台和网页，用输出的地址访问
 ./start-dev.sh --no-build  # 已编译时快速启动，不适用于刚修改过后端的情况
 ./start-dev.sh --help
-./restart-dev.sh             # 构建并重启开发后台，复用或打开预览
-./restart-dev.sh --web-only  # 重启后台，仅保留或启动网页预览
+./restart-dev.sh             # 构建并完整重启桌面、语音进程、Vite 和开发后台
+./restart-dev.sh --web-only  # 重启 Vite 和后台，不退出桌面
 ./restart-dev.sh --no-build  # 已有最新 dist 时跳过构建
 ```
 
@@ -124,7 +126,7 @@ pnpm desktop:app:smoke
 
 真实 Electron smoke 验证本地历史绕过 Server、聊天 WS、工作 POST+SSE、分页和窗口化、30次切换、窗口退出后服务继续，以及服务停止后刷新仍可读取历史。使用临时数据和模拟模型，不读取用户配置或发送外部模型请求。
 
-本机 macOS 的实测证据和执行状态见 [验收记录](./acceptance-2026-10-21.md)。Windows/Linux 必须由对应 CI/设备验证，不能用 macOS arm64 的通过结果代替。
+本机验收记录保存在开发者本地，不随源码分发。Windows/Linux 必须由对应 CI/设备验证，不能用 macOS arm64 的通过结果代替。
 
 ## 内置浏览器
 

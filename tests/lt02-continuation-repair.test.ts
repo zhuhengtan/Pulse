@@ -88,7 +88,7 @@ it('reports shared independent failure once and suppresses old candidate prose o
   const controller = initialController(16)
   controller.tasks = [{ id: 's', kind: 'verify', goal: 'Check delivery', check: 'Actual check', criterionIds: ['a', 'b'], dependsOn: [], status: 'blocked', attempts: 1, candidateRef: 'old', candidateAttempt: 1, evidenceRefs: [], note: 'PROVIDER_NETWORK_ERROR: TimeoutError' }]
   controller.acceptanceResults = [{ id: 'check', status: 'failed', reason: 'specific frozen assertion failed' }]
-  const runtime = new PulseRuntime(), p = buildTaskControllerProgram({ system: 'x', approvalMode: 'auto', toolNames: [], maxTurns: 16 })
+  const runtime = new PulseRuntime(), p = buildTaskControllerProgram({ system: 'x', approvalMode: 'auto', toolNames: [], maxTurns: 16, modelBudgetView: () => ({ limit: 16, used: 14, workAllowed: false, verificationAllowed: true, finalAllowed: true }) })
   const { laneId } = runtime.createAgent({ goal: 'Verify delivery', program: p, initialGlobal: { taskController: controller, taskRecord: { schemaVersion: 1, runId: 'x', objective: 'Verify delivery', status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [], acceptanceCriteria: [{ id: 'a', description: 'A' }, { id: 'b', description: 'B' }], acceptanceChecks: [{ id: 'check', description: 'Actual', criterionIds: ['a', 'b'], toolName: 'verify', input: {}, expectedChecks: ['one'], covers: [] }] } } as any })
   const lane = runtime.state.lanes.get(laneId)!; lane.resume.step = 'report'
   runtime.state.results.set('old', { id: 'old', privacy: 'public', value: { text: 'STALE INTENTION I WILL READ FILES' }, derivedFrom: [] }); lane.visibleResultRefs?.add('old')
@@ -113,28 +113,31 @@ it('attributes assertion failures only to Host-declared criteria and rejects mis
 it('salvages legacy empty checkpoints from archived receipts without rewriting the historical run', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-legacy-facts-'))
   execFileSync('git', ['init', '-q', dir]); await writeFile(join(dir, 'a.mjs'), 'export const delivery = "DELIVERY-V1"\n')
-  const options = { cwd: dir, dataDir: join(dir, 'data'), taskController: true, jarvis: { enabled: false }, approvalMode: 'auto' as const, mockParallelPlan: { tasks: [{ id: 'read', kind: 'analyze' as const, goal: 'Read a.mjs', check: 'Actual file evidence', criterionIds: ['criterion-1'], dependsOn: [] }] }, mockToolCalls: [{ name: 'fs.read', input: { path: 'a.mjs' } }], mockAfterToolResponse: 'Source delivered' }
+  const options = { cwd: dir, dataDir: join(dir, 'data'), taskController: true, jarvis: { enabled: false }, approvalMode: 'auto' as const, mockParallelPlan: { tasks: [{ id: 'read', kind: 'analyze' as const, goal: 'Read a.mjs', check: 'Actual file evidence', criterionIds: ['criterion-1'], dependsOn: [] }] }, mockToolCalls: [{ name: 'fs.read', input: { path: 'a.mjs' } }], mockAfterToolResponse: 'Source delivered', maxModelCalls: 16, mockStageAssessments: [{ status: 'passed', evidenceRefs: ['result-3'], note: 'Actual source inspected' }], mockTaskAssessments: [{ criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: ['AUTO'], rationale: 'Actual source inspected' }] }] }
   let host = createLocalHost(options)
   try {
     const c = await host.createConversation(), first = await host.sendMessage(c.id, { text: 'Read a.mjs' })
-    expect((await first.outcome()).status).toBe('succeeded'); const oldDir = join(dir, 'data/conversations', c.id, 'runs', first.id)
+    expect((await first.outcome()).status).toBe('succeeded'); expect(await first.taskOutcome()).toMatchObject({ status: 'accepted' }); const oldDir = join(dir, 'data/conversations', c.id, 'runs', first.id)
     const cp = JSON.parse(await readFile(join(oldDir, 'checkpoint.json'), 'utf8'))
     delete cp.facts; cp.reusableIds = []; cp.evidence = {}; cp.fileHashes = {}; cp.stageFileHashes = {}
     const legacy = JSON.stringify(cp); await writeFile(join(oldDir, 'checkpoint.json'), legacy)
-    await host.close(); host = createLocalHost(options)
+    await host.close(); host = createLocalHost({ ...options, mockStageAssessments: [{ status: 'passed', evidenceRefs: ['result-4'], note: 'Actual source inspected after recall' }] })
     const next = await host.sendMessage(c.id, { text: '继续', continueTask: true }); await next.outcome()
     const snapshot = JSON.parse(await readFile(join(dir, 'data/conversations', c.id, 'runs', next.id, 'runtime.json'), 'utf8'))
-    const plan = snapshot.state.state.effects.map((x: any) => x[1]).find((e: any) => e.key === 'plan-llm')
-    expect(JSON.stringify(plan.input)).toContain('Validated continuation filesystem facts')
-    expect(JSON.stringify(plan.input)).toContain('DELIVERY-V1')
+    const plan = snapshot.state.state.effects.map((x: any) => x[1]).find((effect: any) => effect.key === 'plan-llm')
+    expect(JSON.stringify(plan?.input)).toContain('Validated continuation filesystem facts')
+    expect(JSON.stringify(plan?.input)).toContain('DELIVERY-V1')
+    expect(await next.taskOutcome()).toMatchObject({ status: 'accepted' })
+    expect(snapshot.state.state.effects.map((x: any) => x[1]).some((effect: any) => ['fs.write', 'fs.apply_patch'].includes(effect.input?.name))).toBe(false)
     expect(await readFile(join(oldDir, 'checkpoint.json'), 'utf8')).toBe(legacy)
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
 }, process.platform === 'win32' ? 240_000 : 15_000)
 
-it.each(['REASONING_OUTPUT_EXHAUSTED', 'OUTPUT_TRUNCATED'])('does not reopen exhausted recovery with a reworded plan: %s', code => {
+it.each(['REASONING_OUTPUT_EXHAUSTED', 'OUTPUT_TRUNCATED'])('permits another method after local output recovery while retaining the original budget: %s', code => {
   const state = initialController(256)
   state.tasks = [{ id: 'edit', kind: 'edit', goal: 'Fix a file', check: 'Check it', criterionIds: ['c'], dependsOn: [], status: 'blocked', attempts: 4, evidenceRefs: [], note: `${code}: recovery exhausted` }]
-  expect(unmetGoalCanChangeApproach(state)).toBe(false)
+  expect(unmetGoalCanChangeApproach(state)).toBe(true)
+  expect(state.maxTurns).toBe(256)
 })
 
 it('ignores installed node_modules links in the source stamp but rejects arbitrary links', async () => {

@@ -1,4 +1,5 @@
 import { ChatWorkPrompt } from './ChatInteraction.js'
+import { AnsweredQuestion } from './AnsweredQuestion.js'
 import { AttachmentCards } from './AttachmentCards.js'
 import { RichMessage } from './RichMessage.js'
 import { PulseButton, usePulseDialogs } from './PulseControls.js'
@@ -126,15 +127,16 @@ export const MessageBubble = memo(function MessageBubble({ message, mode, retry,
   const timeTitle = useMemo(() => validTime ? `${messageTimeTitle.format(sentAt)}（本地时间）` : '', [sentAt, validTime])
   const copyLabel = message.role === 'user' ? '复制消息' : '复制回复'
 
-  const hasContent = Boolean(message.text.trim()) || Boolean(message.attachments?.length)
+  const questionCard = Boolean(message.questionAnswer) || (mode === 'chat' && message.workAction?.interaction.kind === 'ask')
+  const hasContent = Boolean(message.text.trim()) || Boolean(message.attachments?.length) || questionCard
   const canRetry = (message.deliveryState === 'failed' || message.deliveryState === 'interrupted') && Boolean(message.requestId)
 
   return <article className={`message message--${mode} ${message.role === 'user' ? 'user' : 'assistant'}`} tabIndex={hasContent ? 0 : undefined} aria-label={message.role === 'user' ? '你的消息' : 'Pulse 消息'} onKeyDown={event => { if (hasContent && event.target === event.currentTarget && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) { event.preventDefault(); actions.setAnchor({ x: 16, y: 12 }); actions.open() } }}>
     {(hasContent || canRetry) && <div className="message-bubble-row">
       {canRetry && <button type="button" className="message-retry" aria-label="发送失败，重新发送" title="发送失败，点击确认重新发送" onClick={() => void confirmRetry()}>!</button>}
-      {hasContent && <div className={`bubble ${actions.menuOpen ? 'has-message-menu' : ''}`} {...actions.gesture}>
+      {hasContent && <div className={`${questionCard ? 'message-card-content' : 'bubble'} ${actions.menuOpen ? 'has-message-menu' : ''}`} {...actions.gesture}>
         {message.role === 'user' && <AttachmentCards items={message.attachments ?? []} onPreview={setPreviewImage}/>}
-        {message.text.trim() && (message.role === 'user' ? <RichMessage content={message.richContent} fallback={text} onFileClick={onFileClick ? scopedFileClick : undefined} onDiffClick={onDiffClick}/> : <Markdown text={text} imageApi={imageApi ? scopedImageApi : undefined} transport={transport} onFileClick={onFileClick ? scopedFileClick : undefined} onDiffClick={onDiffClick} />)}
+        {message.questionAnswer ? <AnsweredQuestion question={message.questionAnswer}/> : message.text.trim() && (message.role === 'user' ? <RichMessage content={message.richContent} fallback={text} onFileClick={onFileClick ? scopedFileClick : undefined} onDiffClick={onDiffClick}/> : <Markdown text={text} imageApi={imageApi ? scopedImageApi : undefined} transport={transport} onFileClick={onFileClick ? scopedFileClick : undefined} onDiffClick={onDiffClick} />)}
         {message.bodyTruncated && expandedText === undefined && <div><PulseButton onClick={() => void loadBody()} disabled={bodyLoading}>{bodyLoading ? '加载中…' : '展开完整消息'}</PulseButton>{bodyError && <span role="alert">{bodyError}</span>}</div>}
         {mode === 'chat' && message.workAction && <ChatWorkPrompt action={message.workAction} transport={transport} notificationTarget={notificationTarget}/>}
         {message.role !== 'user' && <AttachmentCards items={message.attachments ?? []} onPreview={setPreviewImage}/>}
@@ -149,6 +151,7 @@ export const MessageBubble = memo(function MessageBubble({ message, mode, retry,
         <img src={previewImage} alt="放大预览" className="attachment-modal-image" />
       </div>
     )}
+    {message.steeringState && <div className="message-steering-status" role="status">{message.steeringState === 'pending' ? '方向调整 · 等待应用' : message.steeringState === 'applied' ? '方向调整 · 已应用' : '方向调整 · 未应用'}</div>}
     {message.deliveryState && <div className={`delivery-state ${message.deliveryState}`}><span>{message.deliveryState === 'queued' ? '排队中' : message.deliveryState === 'replying' ? '正在回复' : message.deliveryState === 'interrupted' ? '回复中断' : '发送失败'}</span></div>}
     {message.work && <PulseButton type="button" className={`work-message-card ${message.work.state}`} onClick={() => onOpenWork(message.work!.conversationId)}><span className="work-message-icon"><Icon name="folder"/></span>{mode === 'chat' ? <span>查看工作对话：{message.work.title}</span> : <span><strong>{message.work.title}</strong><small>{workCardStatus(message.work.state)} · 查看工作会话</small>{message.work.progress && <small className="work-progress">{message.work.progress}</small>}{typeof message.work.laneCount === 'number' && <small>{message.work.laneCount} 条执行 Lane</small>}</span>}<Icon name="chevron"/></PulseButton>}
     {hasContent && <div className="message-footer"><button type="button" className="pulse-button message-copy-action" aria-label={copyLabel} title={copyLabel} disabled={copying} onClick={() => void copy()}><Icon name="copy" size={15}/></button>{validTime && <time className="message-time" dateTime={sentAt.toISOString()} title={timeTitle} aria-label="发送时间">{timeLabel}</time>}<span className="message-feedback" role="status">{feedback}</span>{message.restored && <small>已从归档恢复答案</small>}{message.legacy && <small>旧版记录</small>}</div>}

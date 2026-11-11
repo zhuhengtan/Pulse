@@ -11,6 +11,7 @@ import '../src/style.css'
 import '../src/redesign.css'
 import '../src/messages.css'
 import '../src/composer.css'
+import '../src/chat-surface.css'
 const params = new URLSearchParams(location.search), state = params.get('state') ?? 'running', surface = params.get('surface') === 'chat' ? 'chat' : 'work'
 const theme = params.get('theme') === 'dark' ? 'dark' : 'light'
 document.documentElement.dataset.theme = theme
@@ -24,6 +25,16 @@ const items: PendingInteraction['items'] = state === 'question' ? [
   { effectId: 'note', input: { type: 'input', prompt: '还有哪些需要注意的地方？', placeholder: '补充要求…' } },
 ] : [{ effectId: 'command', input: { prompt: '需要运行项目测试，检查这次改动是否影响已有功能。', operationCount: 1, tools: [{ toolName: 'shell.exec', details: { command: 'pnpm', args: ['--filter', '@hunterzhu/pulse-web', 'test'], cwd: '/example/Pulse' } }] } }]
 const awaiting = state === 'approval' || state === 'question'
+const showFollowups = params.get('followups') === '1'
+if (showFollowups) {
+  const createdAt = fixture.conversation.createdAt
+  fixture.messages.push(
+    { id: 'msg-question', role: 'user', text: '为啥又没完成', runId, createdAt },
+    { id: 'msg-direction', role: 'user', text: '把时间行也修了', runId, createdAt },
+    { id: 'fixture-explanation', role: 'assistant', text: '自动测试遇到权限限制。', runId, createdAt, replyToId: 'msg-question' },
+    { id: 'fixture-direction', role: 'assistant', text: '', runId, createdAt, replyToId: 'msg-direction', steeringState: sessionStorage.getItem('fixture-direction') === 'applied' ? 'applied' : 'pending' },
+  )
+}
 fixture.transport.request = async (path, init) => {
   if (path === '/api/session') return Response.json({ queueScope: scope, localAdmin: true })
   if (path.endsWith('/state') && awaiting && !decided && fixture.conversation.activeRunId) {
@@ -63,6 +74,12 @@ function Preview() {
       <label>状态 <select aria-label="预览状态" value={state} onChange={event => { params.set('state', event.target.value); location.search = params.toString() }}>{['idle','running','queue','approval','question','stopping','stop-failure'].map(value => <option key={value}>{value}</option>)}</select></label>
       <label>主题 <select aria-label="预览主题" value={theme} onChange={event => { params.set('theme', event.target.value); location.search = params.toString() }}><option>light</option><option>dark</option></select></label>
       <button onClick={() => { fixture.finish(); update('当前运行已完成，队列逐条发送。') }}>完成当前运行</button>
+      {showFollowups && <button onClick={() => {
+        sessionStorage.setItem('fixture-direction', 'applied')
+        const item = fixture.messages.find(message => message.id === 'fixture-direction')!
+        item.steeringState = 'applied'
+        fixture.emit({ type: 'input_response', runId, seq: 1, data: { messageId: item.id, replyToId: 'msg-direction', text: '', steeringState: 'applied', createdAt: item.createdAt } })
+      }}>模拟应用方向</button>}
       {state === 'stopping' && <button onClick={() => releaseCancel?.()}>确认停止</button>}
       <output>{result}</output>
     </div><RouterProvider router={router}/>

@@ -6,7 +6,7 @@ import './chat-surface.css'
 import './question-dialog.css'
 type Answers = Array<{ effectId: string; value: Record<string, unknown> }>
 export type QuestionState = { status: 'expired' | 'submitted' } | { status: 'ready'; fingerprint: string; interaction: PendingInteraction }
-export interface QuestionBridge { state(): Promise<QuestionState>; submit(answers: Answers): Promise<boolean>; openFull(): Promise<void>; close(): Promise<void> }
+export interface QuestionBridge { read?(fingerprint: string): Promise<void>; state(): Promise<QuestionState>; submit(answers: Answers): Promise<boolean>; openFull(): Promise<void>; close(): Promise<void> }
 declare global { interface Window { pulseQuestion?: QuestionBridge } }
 export function QuestionDialog({ bridge = window.pulseQuestion }: { bridge?: QuestionBridge | undefined }) {
   const [state, setState] = useState<QuestionState>(), [error, setError] = useState('')
@@ -27,6 +27,7 @@ export function QuestionDialog({ bridge = window.pulseQuestion }: { bridge?: Que
     window.addEventListener('keydown', key)
     return () => { active.current = false; window.clearInterval(timer); window.removeEventListener('keydown', key) }
   }, [bridge])
+  useEffect(() => { if (state?.status === 'ready' && !error && document.visibilityState === 'visible') void bridge?.read?.(state.fingerprint).catch(() => undefined) }, [bridge, state, error])
   const submit = async (answers: Answers) => {
     if (!bridge || state?.status !== 'ready' || committed.current) return false
     // Refresh before submitting; the main process independently checks the exact target again.

@@ -84,11 +84,15 @@ export interface PulseCliConfig {
   assistantModel?: string
   /** Ordered providerId/modelId references per task; later entries act as fallbacks. */
   taskRouting?: Partial<Record<PulseModelTask, ModelRouteEntry[]>>
+  /** Quality review of new tasks; tool authorization remains independent. */
+  qualityReviewEnabled?: boolean
   capabilities?: PulseCliCapabilities
   execPolicy?: import('@hunterzhu/pulse-server').ExecPolicyConfig
   approvalMode?: 'read-only' | 'ask' | 'auto'
-  /** Task controller execution mode: 'legacy' (v56 DAG/stages, default) or 'continuous' (v57 continuous execution slices). */
+  /** Current continuous controller; the old 'legacy' value is accepted as the same policy. */
   taskControllerPolicy?: 'legacy' | 'continuous'
+  /** Host-owned, cross-process task admission limits for this OS user. */
+  taskAdmission?: { maxRunning?: number; maxQueued?: number }
   maxTurns?: number
   /** Provider attempts allowed across one controlled work task; defaults to 256. */
   maxModelCalls?: number
@@ -114,7 +118,7 @@ export interface PulseCliConfig {
     timeoutMs?: number
   }
   approvalReview?: {
-    provider?: 'ollama' | 'deepseek'
+    provider?: string
     model?: string
     baseURL?: string
     timeoutMs?: number
@@ -158,7 +162,7 @@ export const defaultPulseConfig: PulseCliConfig = {
   },
   activeModel: 'mock/mock',
   approvalMode: 'ask',
-  taskControllerPolicy: 'legacy',
+  taskControllerPolicy: 'continuous',
   maxTurns: 32,
   maxModelCalls: 256,
   autoCompactPercent: 90,
@@ -210,6 +214,21 @@ export function expandHome(path: string | undefined): string | undefined {
 function asConfig(value: unknown): PulseCliConfig | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   return value as PulseCliConfig
+}
+
+/** Reject malformed limits rather than silently changing the host's capacity. */
+export function parseTaskAdmission(value: unknown): PulseCliConfig['taskAdmission'] {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_TASK_ADMISSION_CONFIG')
+  const input = value as Record<string, unknown>
+  const result: NonNullable<PulseCliConfig['taskAdmission']> = {}
+  for (const [key, min, max] of [['maxRunning', 1, 16], ['maxQueued', 0, 256]] as const) {
+    const limit = input[key]
+    if (limit === undefined) continue
+    if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < min || limit > max) throw new Error(`INVALID_TASK_ADMISSION_LIMIT:${key}`)
+    result[key] = limit
+  }
+  return result
 }
 
 /** Workspace files must not escalate approval, network, provider credentials, the system prompt, or the Jarvis endpoint. */
@@ -278,6 +297,7 @@ export function mergePulseConfigs(layers: Array<{ value: PulseCliConfig; trust: 
       ...(execPolicy ? { execPolicy } : {}),
     }
   }
+  if (merged.taskAdmission !== undefined) merged.taskAdmission = parseTaskAdmission(merged.taskAdmission)!
   return merged
 }
 
@@ -285,6 +305,7 @@ export async function loadPulseConfig(cwd: string, explicitPath?: string, trustW
   if (scope === 'host') {
     const read = readMergedHostConfig(explicitPath)
     const value = read.config as PulseCliConfig
+    if (value.taskAdmission !== undefined) value.taskAdmission = parseTaskAdmission(value.taskAdmission)!
     if (value.lsp !== undefined) value.lsp = parseLspConfig(value.lsp)
     return { value, ...(read.source ? { source: read.source } : {}) }
   }
@@ -310,6 +331,7 @@ export async function loadPulseConfig(cwd: string, explicitPath?: string, trustW
         // Search endpoints and credentials are host-owned even when other workspace fields are trusted.
         // Provider protocol stays host-owned. Trusted workspace fields may remain, but apiMode and responsesTransport never do.
         if (workspaceLayer) {
+          delete parsed.taskAdmission
           delete parsed.hooks
           delete parsed.lsp
           delete parsed.webSearch

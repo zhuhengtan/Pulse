@@ -23,6 +23,44 @@ function sourceFactory() {
 }
 
 describe('browser transport connection mark', () => {
+  it.each(['randomUUID', 'crypto'])('loads and sends chat when LAN HTTP has no %s', async missing => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto')
+    const original = globalThis.crypto
+    const frames: Array<{ id: string; path: string; method: string; body?: unknown }> = []
+    const socket = {
+      readyState: 0,
+      onopen: null as ((event: Event) => void) | null,
+      onmessage: null as ((event: MessageEvent) => void) | null,
+      onerror: null as ((event: Event) => void) | null,
+      onclose: null as ((event: CloseEvent) => void) | null,
+      send(text: string) { frames.push(JSON.parse(text)) },
+      close() { this.readyState = 3; this.onclose?.(new CloseEvent('close')) },
+    }
+    const channel = new ChatChannel('ws://192.168.1.2/api/chat/socket', () => socket as unknown as WebSocket)
+    try {
+      Object.defineProperty(globalThis, 'crypto', { configurable: true, value: missing === 'crypto' ? undefined : { getRandomValues: original.getRandomValues.bind(original) } })
+      const loaded = channel.request('/api/assistant')
+      // Attach rejection handling immediately, so the original regression fails cleanly.
+      const loadResult = loaded.then(response => response.json(), error => ({ error: error.message }))
+      socket.readyState = 1; socket.onopen?.(new Event('open'))
+      await waitFor(() => expect(frames).toHaveLength(1))
+      const payload = { text: 'hello', requestId: 'send-stable-id' }
+      const sent = channel.request('/api/assistant/messages', { method: 'POST', body: JSON.stringify(payload) })
+      const sendResult = sent.then(response => response.json(), error => ({ error: error.message }))
+      await waitFor(() => expect(frames).toHaveLength(2))
+      expect(frames[0]).toMatchObject({ path: '/api/assistant', method: 'GET' })
+      expect(frames[1]).toMatchObject({ path: '/api/assistant/messages', method: 'POST', body: payload })
+      expect(frames[0]!.id).not.toBe(frames[1]!.id)
+      for (const [index, frame] of frames.entries()) socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'response', id: frame.id, status: 200, body: { index } }) }))
+      expect(await loadResult).toEqual({ index: 0 })
+      expect(await sendResult).toEqual({ index: 1 })
+    } finally {
+      channel.close()
+      if (descriptor) Object.defineProperty(globalThis, 'crypto', descriptor)
+      else Reflect.deleteProperty(globalThis, 'crypto')
+    }
+  })
+
   it('updates the real browser transport connection mark on SSE disconnection', async () => {
     const base = sidebarFixture().transport
     const events = sourceFactory()

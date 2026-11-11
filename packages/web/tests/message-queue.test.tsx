@@ -21,9 +21,9 @@ function fixture() {
   return { store, sent, adapter, controller, state: (next: QueueRunState) => { state = next }, queue: () => store.values.get(controller.key('conversation'))! }
 }
 describe('durable frontend message queue', () => {
-  it('defaults to queue and saves a frontend-only preference', () => {
-    localStorage.clear(); expect(readFollowupBehavior()).toBe('queue')
-    saveFollowupBehavior('immediate'); expect(readFollowupBehavior()).toBe('immediate'); localStorage.clear()
+  it('defaults to immediate semantic routing and retains an explicit queue preference', () => {
+    localStorage.clear(); expect(readFollowupBehavior()).toBe('immediate')
+    saveFollowupBehavior('queue'); expect(readFollowupBehavior()).toBe('queue'); localStorage.clear()
   })
   it('preserves the complete payload and dispatches FIFO only after release and success', async () => {
     const f = fixture()
@@ -38,6 +38,18 @@ describe('durable frontend message queue', () => {
     await f.controller.tick(); expect(f.sent).toHaveLength(1)
     f.state({ state: 'succeeded', waiting: false }); await f.controller.tick()
     expect(f.sent.map(item => item.payload.text)).toEqual(['first', 'second'])
+  })
+  it('removes a queued explanation without replacing the previous work run', async () => {
+    const f = fixture()
+    const accepted: Array<[string, true | undefined]> = []
+    f.adapter.send = async () => ({ runId: 'explanation', replyOnly: true })
+    f.adapter.accepted = (_queue, _entry, runId, replyOnly) => accepted.push([runId, replyOnly])
+    await f.controller.enqueue('conversation', 'work', { text: '为啥又没完成' }, 'previous')
+    f.state({ state: 'succeeded', waiting: false })
+    await f.controller.tick()
+    expect(f.queue().entries).toEqual([])
+    expect(f.queue().awaitingRunId).toBe('previous')
+    expect(accepted).toEqual([['explanation', true]])
   })
   it('atomically takes an editable message out of the queue with all its content', async () => {
     const f = fixture(), payload = { text: '**内容**', skills: ['keep'], mentionedFiles: ['file.ts'] }

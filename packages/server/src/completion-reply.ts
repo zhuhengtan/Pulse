@@ -20,13 +20,21 @@ export interface CompletionReplyInput {
   pending: Array<{ description: string; reason: string }>
   checks: Array<{ status: string; description: string; reason: string }>
   files: string[]
+  /** Earlier failed methods that still concern an unmet original requirement. */
+  blockers?: string[]
   error?: string
   internalIds: string[]
 }
 
 /** Registered outputs, rehashed before linking. A check can refresh a registered path; an unread template is not a delivery. */
-export async function currentCompletionArtifacts(runtime: PulseRuntime, refs: string[], root: string): Promise<Array<{ path: string; hash: string }>> {
+export async function currentCompletionArtifacts(runtime: PulseRuntime, refs: string[], root: string, historicalRegistrations: string[] = []): Promise<Array<{ path: string; hash: string }>> {
   const outputs = new Map<string, string>()
+  const registeredPaths = new Set(historicalRegistrations.flatMap(ref => {
+    const result = runtime.state.results.get(ref), value = result?.value ?? result?.summary
+    const effect = result?.producer?.kind === 'effect' ? runtime.state.effects.get(result.producer.id) : undefined
+    const input = effect?.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input : {}
+    return result?.privacy === 'public' && !result.privacyTaints?.length && effect?.outcome?.status === 'succeeded' && input.name === 'artifact.record' && value && typeof value === 'object' && !Array.isArray(value) && typeof value.path === 'string' ? [resolve(root, value.path)] : []
+  }))
   for (const ref of [...new Set(refs)].sort((a, b) => Number(a.match(/(\d+)$/)?.[1] ?? 0) - Number(b.match(/(\d+)$/)?.[1] ?? 0))) {
     const result = runtime.state.results.get(ref), value = result?.value
     const effect = result?.producer?.kind === 'effect' ? runtime.state.effects.get(result.producer.id) : undefined
@@ -40,7 +48,7 @@ export async function currentCompletionArtifacts(runtime: PulseRuntime, refs: st
     for (const path of Array.isArray(receipt.readInputs) ? receipt.readInputs : []) {
       if (typeof path !== 'string' || !isDocumentArtifact(path) || typeof files[path] !== 'string') continue
       const key = resolve(root, path)
-      if (outputs.has(key)) outputs.set(key, files[path] as string)
+      if (outputs.has(key) || registeredPaths.has(key)) outputs.set(key, files[path] as string)
     }
   }
   const files = new FilesystemTool(root), current: Array<{ path: string; hash: string }> = []
@@ -130,11 +138,22 @@ export function fallbackCompletionReply(input: CompletionReplyInput): string {
       if (/REASONING_OUTPUT_EXHAUSTED/.test(value)) return zh ? '模型连续未产出可执行结果，已保留完成项。' : 'The model repeatedly produced no executable result; completed work was retained.'
       if (/PROVIDER_NETWORK_ERROR/.test(value)) return zh ? '模型连接中断，自动重试未恢复。' : 'The model connection failed after bounded retries.'
       if (/EVIDENCE_CHANGED|VERIFICATION_TARGET_MISMATCH/.test(value)) return zh ? '当前产物的验收证据仍需更新。' : 'Verification of the current artifact still needs updating.'
+      if (/CHECK_ENVIRONMENT_BLOCKED/.test(value)) {
+        if (/listener|local port/i.test(value)) return zh ? '测试环境拒绝监听本地端口或设置测试目录权限。' : 'The test environment blocked a local listener or required filesystem permissions.'
+        if (/browser/i.test(value)) return zh ? '测试环境无法启动浏览器，未取得测量结果。' : 'The verification environment could not start the browser to collect measurements.'
+        return zh ? '自动检查被执行环境阻塞。' : 'The execution environment blocked the automated check.'
+      }
+      if (/NATIVE_BROWSER_(?:REQUIRED|DISCONNECTED)|AUTOMATION_RECONNECT_REQUIRED|BROWSER_TOOL_UNAVAILABLE/.test(value)) return zh ? '自动验收所需的浏览器连接不可用。' : 'The browser connection required for verification is unavailable.'
+      if (/CHECK_FAILED/.test(value)) {
+        const exit = value.match(/\bexit (\d+)\b/)?.[1]
+        return zh ? (exit ? `自动测试失败（退出码 ${exit}）。` : '自动检查未通过。') : (exit ? `The automated check failed (exit ${exit}).` : 'The automated check failed.')
+      }
+      if (/CHECK_EVIDENCE_MISSING/.test(value)) return zh ? (/browser/i.test(value) ? '浏览器命令没有返回测试或测量结果。' : '未取得能证明本项通过的检查结果。') : (/browser/i.test(value) ? 'The browser command returned no test or measurement output.' : 'No successful receipt establishes this requirement.')
       if (/Verifier did not cite valid successful tool evidence/.test(value)) return zh ? '验收证据不足，尚不能确认完成。' : 'Verification evidence is insufficient to confirm completion.'
     }
     return publicText(value, input)
   }
-  const reasons = [...input.pending.map(item => item.reason), ...input.checks.filter(item => item.status !== 'passed').map(item => item.reason), input.error ?? ''].map(reasonText).filter(Boolean)
+  const reasons = [...input.checks.filter(item => item.status !== 'passed').map(item => item.reason), ...(input.blockers ?? []), ...input.pending.map(item => item.reason), input.error ?? ''].map(reasonText).filter(Boolean)
   const distinct = [...new Set(reasons)].filter((reason, i, all) => !all.some((other, j) => j !== i && other.length > reason.length && other.includes(reason)))
   const reason = distinct.join(zh ? '；' : '; ').slice(0, input.presentationVersion === 2 ? 500 : 1500)
   const pendingText = [...new Set(input.pending.map(item => publicText(item.description, input)).filter(Boolean))].slice(0, 2).join(zh ? '、' : '; ')

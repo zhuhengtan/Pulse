@@ -70,7 +70,7 @@ describe('local CLI application host', () => {
         : callTool ? { content: '', tool_calls: [{ id: 'call', function: { name: 'shell_exec', arguments: '{"command":"node","args":["--version"]}' } }] } : { content: safety ? 'DENY' : 'blocked' }
       return new Response(JSON.stringify({ choices: [{ message, finish_reason: callTool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } }), { headers: { 'content-type': 'application/json' } })
     }))
-    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', approvalReview: { provider: 'ollama', model: 'local-test-review', baseURL: 'http://127.0.0.1:11434', timeoutMs: 30000 }, provider: { provider: 'openai', defaultModel: 'test' } })
+    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', approvalReview: { provider: 'ollama', model: 'local-test-review', baseURL: 'http://127.0.0.1:11434', timeoutMs: 30000 }, provider: { provider: 'openai', defaultModel: 'test', maxContextTokens: 256000 }, maxModelCalls: 16 })
     try {
       const conversation = await host.createConversation()
       await writeConversationFixture(join(directory, 'data', 'conversations', conversation.id, 'messages.jsonl'), JSON.stringify({ id: 'prior-plan', role: 'assistant', text: '1. Add lint. 2. Check Node and pnpm versions before validation.', createdAt: new Date().toISOString() }) + '\n')
@@ -166,7 +166,7 @@ describe('local CLI application host', () => {
       await run.outcome()
       const runDir = join(directory, 'data', 'conversations', conversation.id, 'runs', run.id)
       const input = JSON.parse(await readFile(join(runDir, 'input.json'), 'utf8')) as { controllerVersion: string; maxTurns: number; maxModelCalls: number }
-      expect(input).toMatchObject({ controllerVersion: '56', maxTurns: 1, maxModelCalls: 4 })
+      expect(input).toMatchObject({ controllerVersion: '58', maxTurns: 1, maxModelCalls: 4 })
       const modelCalls = (await run.usage()).modelCalls
       expect(modelCalls).toBeGreaterThan(1)
       expect(modelCalls).toBeLessThanOrEqual(4)
@@ -222,10 +222,13 @@ describe('local CLI application host', () => {
       await run.submitHumanInput('please handle this urgently')
       const events = []
       for await (const event of run.events) events.push(event)
-      expect(events.some((event) => event.type === 'fact' && event.data && typeof event.data === 'object' && (event.data as Record<string, unknown>).inputId !== undefined)).toBe(true)
-      expect(events.some((event) => event.type === 'text' && event.data === 'main result')).toBe(true)
+      expect(events.some((event) => event.type === 'observation' && (event.data as Record<string, unknown> | undefined)?.kind === 'input_response')).toBe(true)
+      expect(events.some((event) => event.type === 'complete' && event.runId === run.id)).toBe(true)
       const messages = await host.getConversationMessages(conversation.id)
-      expect(messages.some((message) => message.role === 'assistant' && message.text === 'main result')).toBe(true)
+      expect(messages.filter((message) => message.role === 'user')).toEqual([
+        expect.objectContaining({ text: 'start the main task', runId: run.id }),
+        expect.objectContaining({ text: 'please handle this urgently', runId: run.id }),
+      ])
       await host.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
@@ -551,8 +554,7 @@ describe('local CLI application host', () => {
       const firstRunId = (await first.getConversation(conversation.id)).summary.activeRunId
       const firstRuntime = (first as unknown as { active: Map<string, { runtime: { flushPersistence: () => Promise<void>; cancelAgent: () => void } }> }).active.get(firstRunId!)?.runtime
       if (!firstRuntime) throw new Error('FIRST_RUNTIME_NOT_FOUND')
-      firstRuntime.cancelAgent = () => {}
-      await first.close()
+      await first.close({ preserveHumanWaits: true })
       const second = createLocalHost(options)
       const resumed = await second.resumeRun(conversation.id)
       for await (const event of resumed.events) {
@@ -714,6 +716,7 @@ describe('local CLI application host', () => {
       const host = createLocalHost({
         cwd: directory,
         dataDir,
+        taskController: false,
         autoCompactPercent: 95,
         provider: {
           provider: 'openai-compatible',
@@ -741,7 +744,7 @@ describe('local CLI application host', () => {
       const events = []
       for await (const event of run.events) events.push(event)
 
-      expect(events[0]).toMatchObject({
+      expect(events.find(event => event.type !== 'status')).toMatchObject({
         type: 'notice',
         data: { kind: 'context_compacted', text: expect.stringContaining('已达到 90%') },
       })
@@ -782,6 +785,7 @@ describe('local CLI application host', () => {
         cwd: directory,
         dataDir,
         autoCompactPercent: 90,
+        taskController: false,
         provider: { provider: 'openai-compatible', defaultModel: 'loopback-model', baseURL: `http://127.0.0.1:${address.port}/v1`, apiKey: 'test-key', maxContextTokens: 8_000 },
       })
       const conversation = await host.createConversation()
@@ -814,6 +818,7 @@ describe('local CLI application host', () => {
         cwd: directory,
         dataDir,
         autoCompactPercent: 90,
+        taskController: false,
         provider: {
           provider: 'openai-compatible',
           defaultModel: 'loopback-model',
@@ -851,7 +856,7 @@ describe('local CLI application host', () => {
     }
   }, 20_000)
 
-  it('sizes lane history limits from the model window', async () => {
+  it('sizes lane history limits from both the model window and storage capacity', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-history-budget-'))
     try {
       const dataDir = join(directory, 'data')
@@ -859,15 +864,15 @@ describe('local CLI application host', () => {
         cwd: directory,
         dataDir,
         mockResponse: 'window sized',
-        provider: { provider: 'mock', defaultModel: 'mock', maxContextTokens: 256_000, maxOutputTokens: 16_384 },
+        provider: { provider: 'mock', defaultModel: 'mock', maxContextTokens: 1_048_576, maxOutputTokens: 64_960 },
       })
       const conversation = await host.createConversation()
       const run = await host.sendMessage(conversation.id, { text: 'hello' })
       for await (const event of run.events) void event
       await run.outcome()
       const snapshot = JSON.parse(await readFile(join(dataDir, 'conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8'))
-      expect(snapshot.state.state.historySoftTokens).toBe(59_904)
-      expect(snapshot.state.state.historyHardTokens).toBe(119_808)
+      expect(snapshot.state.state.historySoftTokens).toBe(62_500)
+      expect(snapshot.state.state.historyHardTokens).toBe(125_000)
       await host.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
   })

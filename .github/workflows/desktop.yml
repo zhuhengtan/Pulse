@@ -37,6 +37,7 @@ jobs:
           node-version: 24
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.os == 'Windows'
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Install Electron for the runner architecture
         working-directory: packages/desktop
@@ -49,8 +50,6 @@ jobs:
           fi
       - run: pnpm native:prepare
       - run: pnpm desktop:build
-        env:
-          PULSE_DESKTOP_CARGO_TARGET_DIR: ${{ runner.temp }}/pulse-desktop-cargo
       - run: pnpm desktop:app:prepare
       - name: Verify runtime pruning and dependency resolution
         run: pnpm exec vitest run tests/desktop-runtime-optimization.test.ts

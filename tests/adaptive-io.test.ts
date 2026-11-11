@@ -94,9 +94,7 @@ describe('adaptive production file surface', () => {
       const conversation = await first.createConversation()
       const run = await first.sendMessage(conversation.id, { text: 'Hold primary task.' })
       for await (const event of run.events) if (event.type === 'waiting') break
-      const held = (first as unknown as { active: Map<string, { runtime: { cancelAgent: () => void } }> }).active.get(run.id)
-      if (held) held.runtime.cancelAgent = () => {}
-      await first.close()
+      await first.close({ preserveRuns: true })
       first = undefined
       const inputPath = join(root, 'data/conversations', conversation.id, 'runs', run.id, 'input.json')
       if (version !== 3) {

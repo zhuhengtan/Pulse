@@ -1,4 +1,4 @@
-import type { WorkCallback } from '../work-callback.js'
+import { routineApprovalCallback, type WorkCallback } from '../work-callback.js'
 import { parseRichContent, type RichContent } from '../rich-content.js'
 import { ConversationData } from '@hunterzhu/pulse-data'
 import { randomUUID } from 'node:crypto'
@@ -48,7 +48,7 @@ export class AssistantConversationStore {
     return this.state.conversationId
   }
 
-  async enqueue(input: { chatPreReply?: boolean; requestId: string; text: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; assistantContext?: AssistantContextReference }): Promise<{ message: QueuedAssistantMessage; duplicate: boolean }> {
+  async enqueue(input: { chatPreReply?: boolean; requestId: string; inputMode?: 'voice'; text: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; assistantContext?: AssistantContextReference }): Promise<{ message: QueuedAssistantMessage; duplicate: boolean }> {
     if (input.richContent) input = { ...input, richContent: parseRichContent(input.richContent)! }
     return this.serial(async () => {
       const state = this.requireState()
@@ -60,7 +60,7 @@ export class AssistantConversationStore {
       const now = new Date().toISOString()
       const message: QueuedAssistantMessage = {
         chatPreReply: input.chatPreReply !== false,
-        messageId: input.requestId,
+        messageId: input.requestId, ...(input.inputMode ? { inputMode: input.inputMode } : {}),
         runId: `run-${randomUUID()}`,
         text: input.text,
         state: 'queued',
@@ -76,12 +76,12 @@ export class AssistantConversationStore {
     })
   }
 
-  async acceptInput(input: { requestId: string; text: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; assistantContext?: AssistantContextReference }, runId: string, pendingInput = false): Promise<void> {
+  async acceptInput(input: { requestId: string; inputMode?: 'voice'; text: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; assistantContext?: AssistantContextReference }, runId: string, pendingInput = false): Promise<void> {
     await this.serial(async () => {
       const state = this.requireState()
       if (state.messages.some(message => message.messageId === input.requestId)) return
       const now = new Date().toISOString()
-      state.messages.push({ messageId: input.requestId, text: input.text, runId, ...(pendingInput ? { pendingInput: true } : {}), state: state.messages.find(message => message.runId === runId)?.state ?? 'replying', createdAt: now, updatedAt: now, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), ...(input.assistantContext ? { assistantContext: structuredClone(input.assistantContext) } : {}) })
+      state.messages.push({ messageId: input.requestId, ...(input.inputMode ? { inputMode: input.inputMode } : {}), text: input.text, runId, ...(pendingInput ? { pendingInput: true } : {}), state: state.messages.find(message => message.runId === runId)?.state ?? 'replying', createdAt: now, updatedAt: now, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), ...(input.assistantContext ? { assistantContext: structuredClone(input.assistantContext) } : {}) })
       await this.save()
     })
   }
@@ -182,7 +182,7 @@ export class AssistantConversationStore {
       if (callbacks.some(item => item.id === callback.id)) return
       // A terminal fact supersedes unprocessed non-terminal notices for this run.
       if (['succeeded', 'failed', 'cancelled', 'interrupted', 'pending', 'conflict'].includes(callback.kind)) for (const item of callbacks) if (item.runId === callback.runId && item.state === 'queued') item.state = 'completed'
-      callbacks.push(structuredClone(callback)); await this.save()
+      callbacks.push({ ...structuredClone(callback), ...(routineApprovalCallback(callback) ? { state: 'completed' as const } : {}) }); await this.save()
     })
   }
   async nextCallback(): Promise<WorkCallback | undefined> {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -39,6 +39,8 @@ describe('host shell network policy', () => {
       }
       expect(runShell).toHaveBeenCalledTimes(1)
       expect(vi.mocked(runShell).mock.calls[0]?.[2]?.allowedDomains).toEqual(allowNetwork ? ['github.com'] : [])
+      expect(vi.mocked(runShell).mock.calls[0]?.[2]?.workspaceRoot).toBe(await realpath(directory))
+      expect(vi.mocked(runShell).mock.calls[0]?.[2]?.allowLoopback).toBe(false)
     } finally { await host.close(); await rm(directory, { recursive: true, force: true }) }
   })
 })

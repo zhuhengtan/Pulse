@@ -4,6 +4,11 @@ import { isCascadeBlocked, rootBlockedDependency, type ControlledTask, type Task
 /** Keep criterion assessments intact; the human projection expands each cause once. */
 export function controllerReport(state: TaskControllerState, criteria: TaskOutcome['criteria'], accepted: boolean, zh: boolean, artifacts: (t: ControlledTask) => string[], candidate: (t: ControlledTask) => string | undefined, auditedCandidateOnly = false): string {
   const parts = [accepted ? (zh ? '任务逐项验收通过。' : 'All task stages accepted.') : (zh ? '任务尚未全部完成，已保留完成项与阻塞原因。' : 'Task incomplete; completed work and blockers retained.')]
+  if (!accepted && state.recoveryAttempts?.length) {
+    const methods = [...new Set(state.recoveryAttempts.flatMap(attempt => attempt.method ? [attempt.method] : []))].slice(-3)
+    const failures = [...new Set(state.recoveryAttempts.flatMap(attempt => attempt.failures.map(failure => `${failure.code}: ${failure.action}`)))].slice(0, 8)
+    parts.push(`${zh ? '已尝试恢复' : 'Recovery attempts'}: ${state.recoveryAttempts.length}${methods.length ? '\n' + methods.join('; ') : ''}${failures.length ? '\n' + failures.join('; ') : ''}`)
+  }
   const roots = state.tasks.filter(t => t.status === 'blocked' && !isCascadeBlocked(t, state.tasks))
   const expanded = new Set<string>()
   const normalize = (s: string) => s.replace(/\s+/g, ' ').trim()

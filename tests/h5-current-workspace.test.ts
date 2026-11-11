@@ -1,3 +1,4 @@
+import { acceptWorkRequests } from './helpers/work-intent.js'
 import { execFile } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, realpath, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -70,6 +71,7 @@ it.each([false, true])('writes directly through the real H5 project task route (
   const f = await fixture(gitProject)
   const host = createLocalHost({ cwd: f.project, dataDir: f.data, jarvis: { enabled: false }, approvalMode: 'auto', taskController: false,
     mockToolCalls: [{ name: 'fs.write', input: { path: 'result.txt', content: 'H5 direct result' } }], mockAfterToolResponse: 'Created result.txt.' })
+  acceptWorkRequests(host)
   const server = new H5Server(host, { dataDir: f.data, host: '127.0.0.1', port: 0 })
   try {
     const base = `http://127.0.0.1:${(await server.start()).port}`

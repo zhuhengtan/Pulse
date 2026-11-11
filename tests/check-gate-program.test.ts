@@ -71,7 +71,7 @@ async function runGate(executions: Execution[]) {
     if (effect.key?.startsWith('plan')) {
       // Inventory-style goal/check so the stage gate asks for tool evidence
       // rather than a file edit; the receipts below are the only evidence.
-      return { value: { tasks: [{ id: 'task-1', goal: 'Inspect current workspace state', check: 'Read enough evidence to report state', dependsOn: [], criterionIds: ['criterion-1'] }] } }
+      return { value: { tasks: [{ id: 'task-1', kind: 'verify', goal: 'Run the supplied verification commands', check: 'Report their actual results', dependsOn: [], criterionIds: ['criterion-1'] }] } }
     }
     if (effect.key?.startsWith('progress-review')) {
       const state = globalFor(runtime, agentId).taskController

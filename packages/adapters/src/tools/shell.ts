@@ -4,13 +4,14 @@ import { createRequire } from 'node:module'
 import { randomUUID, createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { basename, delimiter, dirname, isAbsolute, join, parse, posix, resolve, sep, win32 } from 'node:path'
-import { lstat, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
+import { basename, delimiter, dirname, isAbsolute, join, parse, posix, relative, resolve, sep, win32 } from 'node:path'
+import { chmod, lstat, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { windowsPtyCommand, type WindowsPty } from './windows-pty.js'
 import { windowsPtyProtocol } from './windows-pty-protocol.js'
+import { restrictLoopbackSandbox } from './loopback-sandbox.js'
 import { SandboxManager, checkWindowsDependenciesAsync, resolveSrtWin, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { resolveWindowsPackageManager } from './windows-package-manager.js'
 import { resolveHostPackageManager } from './host-package-manager.js'
@@ -450,7 +451,7 @@ function safeGitQuery(command: string, args: string[]): boolean {
   return false
 }
 
-async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolchainRoots: string[] = [], scratch?: string, dependencyRoots: string[] = [], gitMetadataRoots: string[] = [], readOnlyWorkspace = false): Promise<SandboxRuntimeConfig> {
+async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolchainRoots: string[] = [], scratch?: string, dependencyRoots: string[] = [], gitMetadataRoots: string[] = [], readOnlyWorkspace = false, sourceReadRoots: string[] = []): Promise<SandboxRuntimeConfig> {
   // Linux invokes this trusted helper *inside* the read-restricted namespace.
   // A user-local npm install otherwise hides it together with the home directory.
   const seccompPath = process.platform === 'linux'
@@ -467,15 +468,33 @@ async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolcha
   // profile recursively is both redundant and very expensive (registry/cache
   // trees); carve workspace and installation dependency boundaries instead.
   const denyRead = new Set(process.platform === 'win32' ? [] : [home])
-  // Close the common sibling-workspace and temporary-directory escape: deny
-  // the workspace's immediate container, then re-open only this invocation's
-  // cwd. Root workspaces cannot be carved this way and are rejected upstream.
-  if (parent !== parse(cwd).root && parent !== cwd) denyRead.add(parent)
+  // Deny each source root's container to close sibling/temporary-directory
+  // escapes, except containers already covered by another authorized source
+  // root. A deny nested inside an allow is an explicit restriction in srt, not
+  // a boundary with carve-outs: emitting one would hide legitimate nested
+  // sources (including installed hook snapshots inside the primary workspace).
+  // Only source reads are normalized; write grants and toolchain denies stay
+  // unchanged, and an outer root still seals its own parent and siblings.
+  const sources = [cwd, ...sourceReadRoots]
+  for (const source of sources) {
+    const container = dirname(source)
+    const alreadyReadable = sources.some(root => {
+      const rel = relative(root, container)
+      return rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel)
+    })
+    if (container !== parse(source).root && container !== source && !alreadyReadable) denyRead.add(container)
+  }
   if (process.platform === 'win32') for (const boundary of windowsReadDenyRoots(cwd, dependencyRoots)) denyRead.add(boundary)
   // Linked-worktree metadata arrives only for a confirmed read-only git
   // invocation (see approvedGitMetadataRoots), so no other program here gains
   // those reads and a plain git workspace keeps exactly the grants it had.
   const allowRead = [cwd, ...gitMetadataRoots, ...toolchainRoots, ...(scratch ? [scratch] : []), ...(seccompPath ? [seccompPath] : [])]
+  // These are concrete paths, but SRT's POSIX configuration interprets *, ?, [
+  // and ] as glob syntax. A root named "reference [a]" would grant the sibling
+  // file "reference a" instead. Until SRT supports literal path entries, fail
+  // closed for every computed allow/deny boundary, including home/toolchains.
+  // Windows treats brackets literally and cannot contain * or ? in filenames.
+  if (process.platform !== 'win32' && [...denyRead, ...allowRead].some(path => /[*?\[\]]/.test(path))) throw shellError('SANDBOX_PATH_GLOB_UNSUPPORTED')
   // Reads default to the system toolchain plus this workspace. Writes are
   // limited to the workspace; srt adds only its required stdio/temp paths.
   return {
@@ -563,7 +582,7 @@ export function validateShellInvocation(command: string, args: string[] = []): v
   encodeSandboxCommand(command, args)
 }
 
-export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void; onProcessResult?: (result: ShellResult) => void; spawnProcess?: ShellSpawn; windowsPty?: WindowsPty; readOnlyWorkspace?: boolean; isolatedHome?: boolean; stdioTarget?: boolean; readRoots?: string[]; stdinData?: string; sealedCallerEnv?: boolean } = {}): Promise<ShellResult> {
+export function runShell(command: string, args: string[] = [], options: { cwd?: string; workspaceRoot?: string; allowLoopback?: boolean; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void; onProcessResult?: (result: ShellResult) => void; spawnProcess?: ShellSpawn; windowsPty?: WindowsPty; readOnlyWorkspace?: boolean; isolatedHome?: boolean; stdioTarget?: boolean; readRoots?: string[]; canonicalReadRoots?: string[]; stdinData?: string; sealedCallerEnv?: boolean } = {}): Promise<ShellResult> {
   if (options.stdinData !== undefined && Buffer.byteLength(options.stdinData) > 65536) return Promise.reject(shellError('SHELL_STDIN_TOO_LARGE'))
   const max = options.maxOutputBytes ?? 256 * 1024
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
@@ -588,10 +607,21 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     const installation = basename(nodeBin) === 'bin' ? dirname(nodeBin) : nodeBin
     const toolchainRoots = installation !== homedir() && installation !== parse(installation).root ? [installation] : [nodeExecutable]
     const homePath = await realpath(homedir()).catch(() => homedir())
-    for (const raw of options.readRoots ?? []) {
+    // Canonical roots are pinned by the caller's authorization snapshot. Legacy
+    // readRoots still accept aliases, but neither form may change during setup.
+    const sourceReadRoots: string[] = []
+    const rootStamps: { path: string; dev: number; ino: number }[] = []
+    const pinRoot = async (path: string): Promise<void> => {
+      const info = await stat(path)
+      rootStamps.push({ path, dev: info.dev, ino: info.ino })
+    }
+    for (const raw of [...(options.readRoots ?? []), ...(options.canonicalReadRoots ?? [])]) {
       const root = await realpath(raw)
+      if (options.canonicalReadRoots?.includes(raw) && resolve(raw) !== root) throw shellError('SANDBOX_READ_ROOT_CHANGED')
       if (readRootTooBroad(root, homePath)) throw shellError('SANDBOX_READ_ROOT_TOO_BROAD')
+      sourceReadRoots.push(root)
       toolchainRoots.push(root)
+      await pinRoot(root)
     }
     const dependencyRoots = await installationDependencyRoots()
     if (process.platform !== 'win32' || await workspaceUsesInstallationDependencies(cwd, dependencyRoots)) toolchainRoots.push(...dependencyRoots)
@@ -627,7 +657,20 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       } catch { /* stale installation settings do not grant access */ }
     }
     const scratch = await realpath(await mkdtemp(join(tmpdir(), 'pulse-shell-')))
+    let ipcRoot: string | undefined
     try {
+    const workspaceRoot = await realpath(options.workspaceRoot ?? cwd)
+    const contains = (root: string): boolean => {
+      const rel = relative(root, cwd)
+      return rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel)
+    }
+    if (![workspaceRoot, ...sourceReadRoots].some(contains) || !(await stat(cwd)).isDirectory()) throw shellError('INVALID_SHELL_CWD')
+    await pinRoot(workspaceRoot)
+    await pinRoot(cwd)
+    if (process.platform !== 'win32') {
+      ipcRoot = await realpath(await mkdtemp(join('/tmp', `pulse-shell-ipc-${process.getuid?.() ?? 'user'}-`)))
+      await chmod(ipcRoot, 0o700)
+    }
     const baseEnv = shellEnvironment(options.env)
     const pathKey = Object.keys(baseEnv).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH'
     // An explicit record type keeps the computed PATH key and the
@@ -699,7 +742,13 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       }
     }
     if (options.isolatedHome) Object.assign(executionEnv, { HOME: scratch, USERPROFILE: scratch, APPDATA: scratch, LOCALAPPDATA: scratch, TMPDIR: scratch, TMP: scratch, TEMP: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch, XDG_DATA_HOME: scratch, XDG_STATE_HOME: scratch })
-    const policy = await sandboxConfig(cwd, options.allowedDomains ?? [], toolchainRoots, scratch, dependencyRoots, gitApproval.roots, options.readOnlyWorkspace === true)
+    // CWD controls command execution; source grants stay bound to the already
+    // authorized workspace. IPC grants are private to this invocation.
+    if (ipcRoot) executionEnv.PULSE_DATA_IPC_ROOT = ipcRoot
+    const policy = await sandboxConfig(workspaceRoot, options.allowedDomains ?? [], toolchainRoots, scratch, dependencyRoots, gitApproval.roots, options.readOnlyWorkspace === true, sourceReadRoots)
+    if (ipcRoot) { (policy.filesystem.allowRead ??= []).push(ipcRoot); policy.filesystem.allowWrite.push(ipcRoot) }
+    if (ipcRoot) policy.network.allowUnixSockets = [ipcRoot]
+    if (options.allowLoopback) policy.network.allowLocalBinding = true
     let child: ShellChild | undefined
     const archive = new ShellOutput(max, options.outputDirectory, options.maxArchiveBytes, options.outputDirectory !== undefined)
     const outputBytes = { stdout: 0, stderr: 0 }
@@ -765,6 +814,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       const descriptor = await manager.wrap(commandText, options.signal, cwd, { commandId: invocationId, commandText: 'shell.exec' })
       const generated = options.sealedCallerEnv ? sandboxRuntimeOverlay(descriptor.env) : undefined
       let sandboxArgv = process.platform === 'win32' ? windowsShellEnvironment(descriptor.argv, generated ? { ...generated, ...executionEnv } : executionEnv) : descriptor.argv
+      if (options.allowLoopback) sandboxArgv = restrictLoopbackSandbox(sandboxArgv)
       if (process.platform === 'win32' && options.stdioTarget) {
         const separator = sandboxArgv.indexOf('--')
         if (separator < 2 || separator + 1 >= sandboxArgv.length) throw shellError('INVALID_WINDOWS_SANDBOX_COMMAND')
@@ -785,7 +835,14 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         const fresh = await resolveShellIdentity(command, args, cwd, baseEnv)
         if (fresh.fingerprint !== launchIdentity.fingerprint || fresh.executable !== executable || JSON.stringify(fresh.prefixArgs) !== JSON.stringify(options.expectedIdentity?.prefixArgs ?? fresh.prefixArgs)) throw shellError('EXEC_POLICY_PROGRAM_CHANGED')
       }
-      // Cancellation during beforeLaunch or the identity read must not start a broker.
+      // Do not follow a root or cwd replaced while the sandbox was prepared or
+      // approval was refreshed. The compiled policy must retain its identity.
+      for (const pinned of rootStamps) {
+        const currentPath = await realpath(pinned.path)
+        const current = await stat(pinned.path)
+        if (currentPath !== pinned.path || current.dev !== pinned.dev || current.ino !== pinned.ino) throw shellError('SANDBOX_READ_ROOT_CHANGED')
+      }
+      // Cancellation during approval, identity, or root checks must not start a broker.
       if (options.signal?.aborted) {
         await manager.cleanup()
         await manager.reset()
@@ -919,6 +976,9 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         throw shellError('SANDBOX_CLEANUP_FAILED', false, cause)
       }
     })
-    } finally { await rm(scratch, { recursive: true, force: true }) }
+    } finally {
+      await rm(scratch, { recursive: true, force: true })
+      if (ipcRoot) await rm(ipcRoot, { recursive: true, force: true })
+    }
   })
 }
