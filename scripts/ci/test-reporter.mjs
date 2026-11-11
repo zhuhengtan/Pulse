@@ -1,4 +1,5 @@
-import { appendFileSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
+import { writeTestReceipt } from './test-receipt.mjs'
 export function verifyExecution(plan, files, collectedModes) {
   const actual = files.map(file => file.filepath.replaceAll('\\', '/')).sort()
   const expected = plan.files.map(file => `${plan.root.replaceAll('\\', '/')}/${file}`).sort()
@@ -37,11 +38,10 @@ export default class CIReporter {
     if (!planFile) return
     const plan = JSON.parse(readFileSync(planFile, 'utf8'))
     const failed = errors.length || files.some(file => file.result?.state === 'fail')
-    if (failed) { console.error('[ci:coverage] incomplete: test failure; no full-gate receipt'); return }
+    if (failed) { process.exitCode = 1; console.error('[ci:coverage] incomplete: test failure; no full-gate receipt'); return }
     try {
       const result = verifyExecution(plan, files, this.modes)
-      console.log('[ci:coverage] ' + JSON.stringify({ inventoryHash: plan.inventoryHash, shard: plan.shard, ...result }))
-      if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\nBackend ${plan.shard ? 'shard ' + plan.shard + '/4' : 'full'}: ${result.files} files, ${result.passed} passed, ${result.skipped} declared skipped. Inventory: ${plan.inventoryHash}\n`)
+      writeTestReceipt(process.env.PULSE_CI_TEST_RECEIPT, plan, result)
     } catch (error) { console.error(error.message); process.exitCode = 1 }
   }
 }

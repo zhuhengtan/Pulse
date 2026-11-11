@@ -8,7 +8,7 @@ it('runs all four real shard entrypoints with exact collection receipts from a t
   try {
     await mkdir(join(root, 'scripts/ci'), { recursive: true }); await mkdir(join(root, 'tests'))
     await symlink(join(process.cwd(), 'node_modules'), join(root, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
-    for (const name of ['test.mjs', 'test-plan.mjs', 'test-reporter.mjs', 'windows-test-timings.json', 'network-guard.mjs']) await copyFile(join(process.cwd(), 'scripts/ci', name), join(root, 'scripts/ci', name))
+    for (const name of ['test.mjs', 'test-plan.mjs', 'test-reporter.mjs', 'test-receipt.mjs', 'test-process.mjs', 'windows-test-timings.json', 'network-guard.mjs']) await copyFile(join(process.cwd(), 'scripts/ci', name), join(root, 'scripts/ci', name))
     await writeFile(join(root, 'vitest.config.ts'), 'export default {test:{pool:"forks",fileParallelism:false},css:{postcss:{plugins:[]}}}')
     for (let n = 1; n <= 4; n++) await writeFile(join(root, `tests/${n}.test.ts`), `import {it,expect} from 'vitest';it('fixture ${n}',()=>expect(${n}).toBe(${n}))`)
     for (let n = 1; n <= 4; n++) {

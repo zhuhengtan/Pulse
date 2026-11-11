@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
@@ -72,4 +72,37 @@ it('denies writes to shared read-only toolchains while retaining workspace and s
     // Users inherited write rights; scratch remains the only writable tree.
     expect(await windowsToolchainWriteDenies([workspace, deps], [scratch])).toEqual([workspace, deps])
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it('carves aliases by their targets without granting outside siblings or removing readonly writes', async () => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'pulse-policy-alias-')))
+  try {
+    const primary = join(base, 'primary'), container = join(base, 'other'), secondary = join(container, 'secondary')
+    const outside = join(container, 'outside'), nested = join(secondary, 'nested'), scratch = join(base, 'scratch')
+    for (const path of [primary, secondary, outside, nested, scratch]) await mkdir(path, { recursive: true })
+    const link = (target: string, name: string) => symlink(target, join(base, name), process.platform === 'win32' ? 'junction' : 'dir')
+    await link(secondary, 'alias')
+    await link(secondary, 'duplicate')
+    await link(nested, 'nested-alias')
+    await link(container, 'ancestor-alias')
+    await link(outside, 'outside-alias')
+    // Both a direct alias and an alias to its ancestor must preserve the same
+    // authorized target, while the sibling is still denied exactly once.
+    expect(await carveWindowsReadDenies([base, container], [primary, secondary, scratch])).toEqual([outside])
+    expect((await windowsToolchainWriteDenies([base, secondary, join(base, 'alias')], [primary, scratch])).sort()).toEqual([container, outside, secondary, nested].sort())
+    expect((await windowsToolchainWriteDenies([base, secondary], [scratch])).sort()).toEqual([primary, container, outside, secondary, nested].sort())
+  } finally { await rm(base, { recursive: true, force: true }) }
+})
+
+it('fails closed when a discovered alias target cannot be resolved', async () => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'pulse-policy-broken-alias-')))
+  try {
+    const workspace = join(base, 'workspace'), alias = join(base, 'alias')
+    await mkdir(workspace)
+    await symlink(join(base, 'missing'), alias, process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(carveWindowsReadDenies([base], [workspace])).rejects.toThrow()
+    await rm(alias)
+    await symlink(alias, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(carveWindowsReadDenies([base], [workspace])).rejects.toThrow()
+  } finally { await rm(base, { recursive: true, force: true }) }
 })

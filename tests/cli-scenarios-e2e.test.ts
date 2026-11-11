@@ -1,28 +1,19 @@
 import { readConversationFixture } from './conversation-fixtures.js'
-import { describe, expect, it, afterEach } from 'vitest'
-import { spawn } from 'node:child_process'
+import { describe, expect, it } from 'vitest'
+import { ScenarioProcesses, type ScenarioProcessResult } from './cli-scenario-process.js'
 import { mkdtempSync } from 'node:fs'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 const cliBinPath = resolve('packages/cli/dist/bin.js')
-const temporaryDirectories: string[] = []
-
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories.splice(0).map((directory) =>
-      rm(directory, { recursive: true, force: true }).catch(() => undefined)
-    )
-  )
-})
-
-interface RunResult {
-  code: number | null
-  signal: NodeJS.Signals | null
-  stdout: string
-  stderr: string
-}
+// Hosted Mac observations: 3–4 cold CLI invocations cost 7–10s;
+// the cascade's 15-effect process exceeded 10s under native CI load.
+// Provider time was only 162ms locally: this is persisted CLI work, not an API SLA.
+// Keep these fixture budgets local, with a deadline for EVERY child. Windows
+// keeps its existing 180s native allowance (doctor: 120s), not a global increase.
+const childBudget = (cascade = false) => process.platform === 'win32' ? 150_000 : cascade ? 20_000 : 10_000
+const scenarioBudget = (children: number, cascade = false) => process.platform === 'win32' ? 180_000 : children * childBudget(cascade) + 5_000
 
 async function persistedRunInputs(dataDir: string): Promise<string> {
   const conversations = await readdir(join(dataDir, 'conversations')).catch(() => [] as string[])
@@ -34,68 +25,98 @@ async function persistedRunInputs(dataDir: string): Promise<string> {
   return texts.join('\n')
 }
 
+async function runStates(dataDir: string): Promise<any[]> {
+  const states: any[] = []
+  for (const conversation of await readdir(join(dataDir, 'conversations'))) {
+    for (const run of await readdir(join(dataDir, 'conversations', conversation, 'runs'))) {
+      const directory = join(dataDir, 'conversations', conversation, 'runs', run)
+      const runtime = JSON.parse(await readFile(join(directory, 'runtime.json'), 'utf8')).state.state
+      const budget = JSON.parse(await readFile(join(directory, 'model-budget.json'), 'utf8'))
+      const task = JSON.parse(await readFile(join(directory, 'task-controller.json'), 'utf8').catch(error => { if (error.code === 'ENOENT') return '{}'; throw error }))
+      states.push({ runtime, budget, task, effects: runtime.effects.map((entry: any) => entry[1]) })
+    }
+  }
+  return states
+}
+
+async function assertBoundedWork(dataDir: string, modelCalls: number[], toolCalls = 0, humanCalls = 0) {
+  const states = await runStates(dataDir)
+  expect(states.map(state => state.budget.used).sort((a, b) => a - b)).toEqual([...modelCalls].sort((a, b) => a - b))
+  const effects = states.flatMap(state => state.effects)
+  expect(effects.filter(effect => effect.kind === 'llm')).toHaveLength(modelCalls.reduce((a, b) => a + b, 0))
+  expect(effects.filter(effect => effect.kind === 'tool')).toHaveLength(toolCalls)
+  expect(effects.filter(effect => effect.kind === 'human')).toHaveLength(humanCalls)
+  expect(effects.every(effect => ['succeeded', 'failed', 'cancelled'].includes(effect.state))).toBe(true)
+  console.info('[cli:work] ' + JSON.stringify(states.map(state => ({ calls: state.budget.used, purposes: state.budget.purposes, providerMs: state.budget.metrics?.latencyMs?.total, effects: state.effects.length, recoveries: state.task.recoveryAttempts?.length ?? 0 }))))
+  return states
+}
+
+function createFixture() {
+  const temporaryDirectories: string[] = []
+  const processes = new ScenarioProcesses()
+  let invocationCount = 0
+  let disposed = false
+  const pendingDirectories = new Set<Promise<string>>()
+  const createDirectory = (prefix: string) => {
+    if (disposed) return Promise.reject(new Error('CLI_SCENARIO_DISPOSED'))
+    const pending = mkdtemp(join(tmpdir(), prefix)).then(async directory => {
+      if (disposed) {
+        await rm(directory, { recursive: true, force: true })
+        throw new Error('CLI_SCENARIO_DISPOSED')
+      }
+      temporaryDirectories.push(directory)
+      return directory
+    })
+    pendingDirectories.add(pending)
+    void pending.finally(() => pendingDirectories.delete(pending)).catch(() => undefined)
+    return pending
+  }
 function runCli(
   args: string[],
-  options?: {
-    cwd?: string
-    env?: NodeJS.ProcessEnv
-    input?: string
-    timeout?: number
-  }
-): Promise<RunResult> {
+  options?: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; timeout?: number; interruptAfterMs?: number }
+): Promise<ScenarioProcessResult> {
+  if (disposed) return Promise.reject(new Error('CLI_SCENARIO_DISPOSED'))
+  invocationCount++
   const configHome = mkdtempSync(join(tmpdir(), 'pulse-e2e-config-'))
   temporaryDirectories.push(configHome)
-  return new Promise((resolveResult, reject) => {
-    const child = spawn(process.execPath, [cliBinPath, ...args], {
-      cwd: options?.cwd ?? process.cwd(),
-      env: {
-        ...process.env,
-        PULSE_HOME: configHome,
-        PULSE_JARVIS_ENABLED: '0',
-        ...(options?.env ?? {}),
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-
-    let stdout = ''
-    let stderr = ''
-
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString()
-    })
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString()
-    })
-
-    const timer = options?.timeout
-      ? setTimeout(() => {
-          child.kill('SIGTERM')
-        }, options.timeout)
-      : undefined
-
-    child.on('close', (code, signal) => {
-      if (timer) clearTimeout(timer)
-      resolveResult({ code, signal, stdout, stderr })
-    })
-
-    child.on('error', (err) => {
-      if (timer) clearTimeout(timer)
-      reject(err)
-    })
-
-    if (options?.input !== undefined) {
-      child.stdin.write(options.input)
-      child.stdin.end()
-    } else {
-      child.stdin.end()
-    }
+  let interrupt: ReturnType<typeof setTimeout> | undefined
+  return processes.run(process.execPath, [cliBinPath, ...args], {
+    cwd: options?.cwd ?? process.cwd(),
+    env: { ...process.env, PULSE_HOME: configHome, PULSE_JARVIS_ENABLED: '0', ...(options?.env ?? {}) },
+    input: options?.input,
+    timeoutMs: options?.timeout ?? childBudget(),
+    onSpawn: child => {
+      if (options?.interruptAfterMs !== undefined) interrupt = setTimeout(() => child.kill('SIGINT'), options.interruptAfterMs)
+    },
+    onClose: result => {
+      clearTimeout(interrupt)
+      console.info('[cli:phase] ' + JSON.stringify({ command: args[0], ...result, stdout: undefined, stderr: undefined }))
+    },
   })
 }
 
+  return { createDirectory, runCli, invocations: () => invocationCount, dispose: async () => {
+    disposed = true
+    const started = performance.now()
+    await processes.dispose()
+    await Promise.allSettled([...pendingDirectories])
+    expect(processes.activeCount).toBe(0)
+    await Promise.all(temporaryDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })))
+    console.info(`[cli:cleanup] elapsed=${Math.round(performance.now() - started)}ms active=${processes.activeCount}`)
+  } }
+}
+
+function scenario(name: string, run: (fixture: ReturnType<typeof createFixture>) => Promise<void>, timeout: number) {
+  it(name, async context => {
+    const fixture = createFixture()
+    context.onTestFinished(() => fixture.dispose())
+    await run(fixture)
+  }, timeout)
+}
+
 describe('AI CLI scenarios end-to-end tests', () => {
-  it('Scenario 1: pulse doctor diagnostics check with mock model and json format', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-doctor-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 1: pulse doctor diagnostics check with mock model and json format', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-doctor-')
 
     // 1. Text format
     const textRes = await runCli(['doctor', '--model', 'mock', '--cwd', directory], {
@@ -123,11 +144,11 @@ describe('AI CLI scenarios end-to-end tests', () => {
     })
     expect(errRes.code).not.toBe(0)
     expect(errRes.stderr).toContain('UNKNOWN_MODEL_DISPLAY_NAME')
-  }, process.platform === 'win32' ? 120_000 : 30_000)
+    expect(invocations()).toBe(3)
+  }, process.platform === 'win32' ? 120_000 : scenarioBudget(3))
 
-  it('Scenario 2: One-shot task execution with text and jsonl outputs', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-run-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 2: One-shot task execution with text and jsonl outputs', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-run-')
     const dataDir = join(directory, 'data')
 
     // 1. Standard text one-shot run
@@ -174,11 +195,11 @@ describe('AI CLI scenarios end-to-end tests', () => {
     const emptyRes = await runCli(['run', '--cwd', directory])
     expect(emptyRes.code).toBe(1)
     expect(emptyRes.stderr).toContain('TASK_REQUIRED')
-  })
+    expect(invocations()).toBe(3)
+  }, scenarioBudget(3))
 
-  it('Scenario 3: Tool execution safety and permission modes', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-safety-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 3: Tool execution safety and permission modes', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-safety-')
     const dataDir = join(directory, 'data')
     const blockedFile = join(directory, 'blocked.txt')
     const allowedFile = join(directory, 'allowed.txt')
@@ -239,12 +260,18 @@ describe('AI CLI scenarios end-to-end tests', () => {
     expect(readonlyRes.stdout).toContain('[复核暂不可用，已保留工作结果]')
     expect(readonlyRes.stderr).toContain('Read-only mode cannot execute fs.write.')
     await expect(readFile(readonlyFile, 'utf8')).rejects.toThrow()
-  // Three separate cold CLI processes; this verifies policy, not a 10-second SLA.
-  }, process.platform === 'win32' ? 180_000 : 30_000)
+    expect(invocations()).toBe(3)
+    const safetyStates = await assertBoundedWork(dataDir, [1, 3, 3], 2, 1)
+    const policyEffects = safetyStates.flatMap(state => state.effects).filter(effect => effect.kind !== 'llm')
+    expect(policyEffects).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'human', state: 'cancelled', outcome: expect.objectContaining({ reason: 'INTERACTION_REQUIRED' }) }),
+      expect.objectContaining({ kind: 'tool', state: 'succeeded', input: expect.objectContaining({ name: 'fs.write' }) }),
+      expect.objectContaining({ kind: 'tool', state: 'failed', outcome: expect.objectContaining({ error: expect.objectContaining({ code: 'READ_ONLY_TOOL_DENIED' }) }) }),
+    ]))
+  }, scenarioBudget(3))
 
-  it('Scenario 4: Sessions listing and resume workflow', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-sessions-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 4: Sessions listing and resume workflow', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-sessions-')
     const dataDir = join(directory, 'data')
 
     // 1. First run creates a session
@@ -267,6 +294,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
       .filter(Boolean)
       .map((l) => JSON.parse(l))
     const firstRunEvent = firstLines.find((l) => l.type === 'result')
+    expect(firstRunEvent).toMatchObject({ status: 'succeeded', taskOutcome: { status: 'accepted' } })
     const runId = firstRunEvent.runId
 
     // 2. List sessions
@@ -309,16 +337,16 @@ describe('AI CLI scenarios end-to-end tests', () => {
     const noIdRes = await runCli(['resume', '--data-dir', dataDir, '--cwd', directory])
     expect(noIdRes.code).toBe(1)
     expect(noIdRes.stderr).toContain('RESUME_REQUIRES_ID')
-  })
+    expect(invocations()).toBe(4)
+    await assertBoundedWork(dataDir, [2, 2])
+  }, scenarioBudget(4))
 
-  it('Scenario 5: Signal handling and graceful cancellation on SIGINT', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-signals-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 5: Signal handling and graceful cancellation on SIGINT', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-signals-')
     const dataDir = join(directory, 'data')
 
     // Start a run with a long shell task and send SIGINT to cancel
-    const child = spawn(process.execPath, [
-      cliBinPath,
+    const closeResult = await runCli([
       'run',
       'Long running task',
       '--data-dir',
@@ -328,27 +356,16 @@ describe('AI CLI scenarios end-to-end tests', () => {
       '--auto-approve',
       '--mock-tool-calls',
       JSON.stringify([{ name: 'shell.exec', input: { argv: ['node', '-e', 'setTimeout(()=>{}, 4000)'] } }]),
-    ], {
-      cwd: directory,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-
-    // Give it a moment to enter active tool execution
-    await new Promise((resolve) => setTimeout(resolve, 600))
-    child.kill('SIGINT')
-
-    const closeResult = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-      child.on('close', (code, signal) => resolve({ code, signal }))
-    })
+    ], { cwd: directory, interruptAfterMs: 600 })
 
     // Cancellation should result in code 3 or 130, or SIGINT signal
     const isCancelled = closeResult.code === 3 || closeResult.code === 130 || closeResult.signal === 'SIGINT'
     expect(isCancelled).toBe(true)
-  })
+    expect(invocations()).toBe(1)
+  }, scenarioBudget(1))
 
-  it('Scenario 6: Non-TTY interactive guard prevents unhandled Ink crashes', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-nontty-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 6: Non-TTY interactive guard prevents unhandled Ink crashes', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-nontty-')
 
     // Running pulse without TTY and without task should output friendly error instead of crashing
     const res = await runCli(['--cwd', directory], {
@@ -356,11 +373,11 @@ describe('AI CLI scenarios end-to-end tests', () => {
     })
     expect(res.code).toBe(1)
     expect(res.stderr).toContain('交互模式需要 TTY 终端')
-  })
+    expect(invocations()).toBe(1)
+  }, scenarioBudget(1))
 
-  it('Scenario 7: Piped stdin task input supports single and combined tasks', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-stdin-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 7: Piped stdin task input supports single and combined tasks', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-stdin-')
     const dataDir = join(directory, 'data')
 
     // 1. Task solely provided via stdin pipe
@@ -432,11 +449,12 @@ describe('AI CLI scenarios end-to-end tests', () => {
     expect(claimedRes.stdout).toContain('[复核暂不可用，已保留工作结果]')
     expect(claimedRes.stdout).not.toContain('[任务验收通过]')
     await expect(readFile(join(directory, 'out.txt'), 'utf8')).rejects.toThrow()
-  }, 30_000)
+    expect(invocations()).toBe(4)
+    await assertBoundedWork(dataDir, [2, 2, 2, 2])
+  }, process.platform === 'win32' ? 30_000 : scenarioBudget(4))
 
-  it('Scenario 8: Staged multi-chunk file operations provide durable writing', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-stage-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 8: Staged multi-chunk file operations provide durable writing', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-stage-')
     const dataDir = join(directory, 'data')
     const targetFile = join(directory, 'staged-sample.txt')
 
@@ -454,11 +472,11 @@ describe('AI CLI scenarios end-to-end tests', () => {
     ])
     expect(stageRes.code).toBe(0)
     await expect(readFile(targetFile, 'utf8')).resolves.toBe('Durable staged content line 1\nLine 2\n')
-  })
+    expect(invocations()).toBe(1)
+  }, scenarioBudget(1))
 
-  it('Scenario 9: Multi-stage complex task with TaskController progress and final review', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-multistage-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 9: Multi-stage complex task with TaskController progress and final review', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-multistage-')
     const dataDir = join(directory, 'data')
 
     // Text-only mock responses prove writing stages, not filesystem mutations.
@@ -517,11 +535,11 @@ describe('AI CLI scenarios end-to-end tests', () => {
     expect(resultEvent.taskOutcome?.status).toBe('accepted')
     expect(resultEvent.text).toContain('项目用途：演示多阶段流程。')
     expect(resultEvent.text).not.toMatch(/stage-1|stage-2|criterion-1|逐项验收/)
-  })
+    expect(invocations()).toBe(1)
+  }, scenarioBudget(1))
 
-  it('Scenario 10: Multi-stage task checkpointing and continuation across sessions', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-checkpoint-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 10: Multi-stage task checkpointing and continuation across sessions', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-checkpoint-')
     const dataDir = join(directory, 'data')
 
     // 1. Initial run creates task records and session
@@ -545,11 +563,12 @@ describe('AI CLI scenarios end-to-end tests', () => {
       .filter(Boolean)
       .map((l) => JSON.parse(l))
     const firstResult = firstLines.find((l) => l.type === 'result')
+    expect(firstResult).toMatchObject({ status: 'succeeded', taskOutcome: { status: 'accepted' } })
     const runId = firstResult.runId
 
-    // Verify task-record.json was persisted
-    const sessionDir = join(dataDir, 'conversations')
+    // Find the durable conversation for the checkpoint and resume it.
     const sessionsRes = await runCli(['sessions', '--data-dir', dataDir, '--cwd', directory, '--format', 'jsonl'])
+    expect(sessionsRes.code).toBe(0)
     const sessions = sessionsRes.stdout
       .split('\n')
       .map((l) => l.trim())
@@ -581,12 +600,15 @@ describe('AI CLI scenarios end-to-end tests', () => {
       .map((l) => JSON.parse(l))
     const resumeResult = resumeLines.find((l) => l.type === 'result')
     expect(resumeResult.status).toBe('succeeded')
+    expect(resumeResult.taskOutcome.status).toBe('accepted')
+    expect(resumeResult.runId).not.toBe(runId)
     expect(resumeResult.text).toContain('后续阶段调度执行成功')
-  })
+    expect(invocations()).toBe(3)
+    await assertBoundedWork(dataDir, [2, 2])
+  }, scenarioBudget(3))
 
-  it('Scenario 11: Auto context compaction threshold under heavy conversational output', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-compact-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 11: Auto context compaction threshold under heavy conversational output', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-compact-')
     const dataDir = join(directory, 'data')
 
     // Run with auto-compact-percent specified
@@ -605,11 +627,11 @@ describe('AI CLI scenarios end-to-end tests', () => {
     expect(compactRun.code).toBe(0)
     expect(compactRun.stdout).toContain('已生成紧凑摘要')
     expect(compactRun.stdout).toContain('[任务验收通过]')
-  })
+    expect(invocations()).toBe(1)
+  }, scenarioBudget(1))
 
-  it('Scenario 12: Complex long task with cascade blocker and stage failure isolation', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-cascade-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 12: Complex long task with cascade blocker and stage failure isolation', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-cascade-')
     const dataDir = join(directory, 'data')
 
     const parallelPlan = {
@@ -640,7 +662,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
       JSON.stringify(stageAssessments),
       '--mock-response',
       '执行阶段检查中...',
-    ])
+    ], { timeout: childBudget(true) })
 
     // Should return exit code 1 because stage-1 is blocked and task is incomplete
     expect(cascadeRes.code).toBe(1)
@@ -653,8 +675,8 @@ describe('AI CLI scenarios end-to-end tests', () => {
     // Check notice task_progress
     const progressNotices = lines.filter((l) => l.type === 'notice' && l.data?.kind === 'task_progress')
     expect(progressNotices.length).toBeGreaterThan(0)
-    const lastProgress = progressNotices[progressNotices.length - 1]
     const initialBlocked = [...progressNotices].reverse().find((notice: any) => notice.data.tasks.some((task: any) => task.id === 'stage-1' && task.status === 'blocked'))
+    expect(initialBlocked).toBeDefined()
     const tasks = initialBlocked.data.tasks
     const stage1 = tasks.find((t: any) => t.id === 'stage-1')
     const stage2 = tasks.find((t: any) => t.id === 'stage-2')
@@ -668,11 +690,22 @@ describe('AI CLI scenarios end-to-end tests', () => {
     const resultEvent = lines.find((l) => l.type === 'result')
     expect(resultEvent).toBeDefined()
     expect(resultEvent.taskOutcome?.status).toBe('incomplete')
-  })
+    expect(invocations()).toBe(1)
+    const [state] = await assertBoundedWork(dataDir, [15])
+    expect(state.budget).toMatchObject({ limit: 16, used: 15, purposes: { planning: 10, work: 2, verification: 3 } })
+    expect(state.task.recoveryAttempts).toHaveLength(2)
+    expect(state.task.recoveryAttempts[0].failures).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'DELIVERY_UNMET' })]))
+    const original = state.task.priorTasks.filter((task: any) => ['stage-1', 'stage-2'].includes(task.id))
+    expect(original).toEqual([
+      expect.objectContaining({ id: 'stage-1', status: 'blocked', attempts: 1, modelCalls: 1 }),
+      expect.objectContaining({ id: 'stage-2', status: 'blocked', attempts: 0, modelCalls: 0 }),
+    ])
+    expect(resultEvent.taskOutcome.criteria).toHaveLength(2)
+    expect(resultEvent.taskOutcome.criteria.every((criterion: any) => criterion.status !== 'passed')).toBe(true)
+  }, scenarioBudget(1, true))
 
-  it('Scenario 13: Multi-turn long-lived session lifecycle and conversation transcript persistence', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-multiturn-'))
-    temporaryDirectories.push(directory)
+  scenario('Scenario 13: Multi-turn long-lived session lifecycle and conversation transcript persistence', async ({ createDirectory, runCli, invocations }) => {
+    const directory = await createDirectory('pulse-e2e-multiturn-')
     const dataDir = join(directory, 'data')
 
     // Turn 1: create initial project scaffold
@@ -739,7 +772,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
 
     // Verify session record file and manifest on disk
     const messagesFile = join(dataDir, 'conversations', convId, 'messages.jsonl')
-    const messagesContent = await readConversationFixture(messagesFile, 'utf8')
+    const messagesContent: string = await readConversationFixture(messagesFile, 'utf8')
     const messages = messagesContent
       .split('\n')
       .filter(Boolean)
@@ -757,6 +790,29 @@ describe('AI CLI scenarios end-to-end tests', () => {
     const manifest = JSON.parse(await readConversationFixture(manifestFile, 'utf8'))
     expect(manifest.id).toBe(convId)
     expect(manifest.runs.length).toBe(3)
-  })
+    expect(invocations()).toBe(3)
+    await assertBoundedWork(dataDir, [2, 2, 2])
+  }, scenarioBudget(3))
 })
 
+
+it('keeps a late case callback bound to its disposed fixture', async () => {
+  const previous = createFixture()
+  await previous.dispose()
+  const next = createFixture()
+  try {
+    await expect(previous.runCli(['--version'])).rejects.toThrow('CLI_SCENARIO_DISPOSED')
+    expect(previous.invocations()).toBe(0)
+    expect(next.invocations()).toBe(0)
+  } finally { await next.dispose() }
+})
+
+it('removes a directory whose creation completes after fixture disposal', async () => {
+  const fixture = createFixture()
+  const prefix = `pulse-late-fixture-${process.pid}-${Date.now()}-`
+  const pending = fixture.createDirectory(prefix)
+  const rejected = expect(pending).rejects.toThrow('CLI_SCENARIO_DISPOSED')
+  await fixture.dispose()
+  await rejected
+  expect((await readdir(tmpdir())).filter(name => name.startsWith(prefix))).toEqual([])
+})

@@ -15,13 +15,15 @@ export async function fixtureNodeChecks(directory: string, argv: readonly (reado
   const root = await realpath(directory), node = await realpath(process.execPath), rootStamp = await stat(root)
   const allowed = new Set(argv.map(args => JSON.stringify(args)))
   const definitions = Object.entries(files).map(([name, contents]) => {
-    if (name !== basename(name) || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*\.mjs$/.test(name) || !contents.length) throw denied()
+    if (name !== basename(name) || !/^[a-zA-Z0-9][a-zA-Z0-9._ -]*\.mjs$/.test(name) || !contents.length) throw denied()
     return { name, contents: [...contents] }
   })
   for (const args of argv) {
-    const name = args.at(-1)
-    if (!name || !Object.hasOwn(files, name) || !(args.length === 1 || args.length === 2 && args[0] === '--test'
-      || args.length === 3 && args[0] === '--test' && args[1]!.startsWith('--test-name-pattern='))) throw denied()
+    // Only explicit owned files, never shell text, globs or arbitrary Node flags.
+    const names = args.length === 1 ? args : args[0] === '--test'
+      ? args.length === 3 && args[1]!.startsWith('--test-name-pattern=') ? args.slice(2) : args.slice(1)
+      : []
+    if (!names.length || names.some(name => !Object.hasOwn(files, name))) throw denied()
   }
   const calls: Array<{ args: string[]; pid: number | undefined; result?: ShellResult }> = []
   const validate = async () => {

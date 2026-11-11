@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm, symlink, rename, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { resolveShellIdentity } from '../packages/adapters/src/tools/shell.js'
@@ -135,4 +135,51 @@ it('does not treat a parent-exit race as proof that its descendants were cleaned
       await expect(readFile(join(f.root, 'leaked.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
     }
   } finally { await releaseDescendant(f.root, descendant) }
+})
+
+// A display collision must not affect process argv or the exact allowlist.
+it('keeps a space-containing file distinct from two explicit test files', async () => {
+  const first = ['--test', 'a.test.mjs b.test.mjs'], second = ['--test', 'a.test.mjs', 'b.test.mjs']
+  const script = (name: string, ok: boolean) => `import test from 'node:test'; import assert from 'node:assert/strict'; test('${name}', () => assert.equal(${ok}, true))`
+  const files = { 'a.test.mjs b.test.mjs': [script('single owned file', false)], 'a.test.mjs': [script('first split file', true)], 'b.test.mjs': [script('second split file', true)] }
+  const f = await fixture(files, [first, second])
+  expect(first.join(' ')).toBe(second.join(' '))
+  const one = await f.executor.execute('node', first, f.options)
+  const two = await f.executor.execute('node', second, f.options)
+  expect(one).toMatchObject({ code: 1, timedOut: false, aborted: false, truncated: false })
+  expect(one.stdout).toContain('single owned file'); expect(one.stdout).not.toContain('first split file')
+  expect(two).toMatchObject({ code: 0, timedOut: false, aborted: false, truncated: false })
+  expect(two.stdout).toContain('first split file'); expect(two.stdout).toContain('second split file')
+  expect(f.executor.calls.map(call => call.args)).toEqual([first, second])
+  expect(f.executor.calls.every(call => Number(call.pid) > 0)).toBe(true)
+  const onlyOne = await fixtureNodeChecks(f.root, [first], files)
+  await expect(onlyOne.execute('node', second, f.options)).rejects.toThrow('NOT_ALLOWED')
+  expect(onlyOne.calls).toHaveLength(0)
+})
+
+it('rejects escaping names, flags, globs, unknown file lists and command shapes', async () => {
+  const files = { 'check.mjs': ['console.log("fixed")'] }
+  const f = await fixture(files, [['check.mjs']])
+  for (const name of ['../check.mjs', 'nested/check.mjs', String.raw`nested\check.mjs`, '/check.mjs', 'C:check.mjs', '--eval.mjs', '*.mjs', 'a?.mjs', 'a\tb.mjs', 'a\nb.mjs', 'a;echo.mjs', 'a$(whoami).mjs', 'a"b.mjs', "a'b.mjs"]) {
+    await expect(fixtureNodeChecks(f.root, [['--test', name]], { [name]: ['known'] })).rejects.toThrow('NOT_ALLOWED')
+  }
+  for (const argv of [[], ['--test'], ['--test', 'check.mjs', 'missing.mjs'], ['--test', '--import=check.mjs', 'check.mjs'], ['--test', '--test-name-pattern=x', 'check.mjs', 'check.mjs'], ['--eval', 'check.mjs'], ['--check', 'check.mjs'], ['check.mjs', 'check.mjs']]) {
+    await expect(fixtureNodeChecks(f.root, [argv], files)).rejects.toThrow('NOT_ALLOWED')
+  }
+  expect(f.executor.calls).toHaveLength(0)
+})
+
+it('rejects symlinked owned files and a replaced root before process launch', async () => {
+  const argv = ['--test', 'a.test.mjs', 'b.test.mjs']
+  const f = await fixture({ 'a.test.mjs': ['console.log("a")'], 'b.test.mjs': ['console.log("b")'] }, [argv])
+  await rm(join(f.root, 'b.test.mjs'))
+  await symlink(join(f.root, 'a.test.mjs'), join(f.root, 'b.test.mjs'))
+  await expect(f.executor.execute('node', argv, f.options)).rejects.toThrow('NOT_ALLOWED')
+  expect(f.executor.calls).toHaveLength(0)
+  const g = await fixture({ 'check.mjs': ['console.log("fixed")'] }, [['check.mjs']])
+  const moved = g.root + '-moved'; roots.push(moved)
+  await rename(g.root, moved)
+  await symlink(moved, g.root, 'dir')
+  await expect(g.executor.execute('node', ['check.mjs'], g.options)).rejects.toThrow('NOT_ALLOWED')
+  expect(g.executor.calls).toHaveLength(0)
 })

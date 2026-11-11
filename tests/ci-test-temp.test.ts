@@ -19,6 +19,7 @@ it('isolates real fixture tmpdir from runner tool caches without opening private
     expect(await realpath(child.stdout)).toBe(await realpath(environment.TEMP))
     const workspace = join(environment.TEMP, 'workspace'), scratch = join(environment.TEMP, 'scratch'), privateFile = join(environment.TEMP, 'private.json')
     await mkdir(workspace); await mkdir(scratch); await writeFile(privateFile, 'private')
+    await mkdir(join(root, 'workspace'))
     const previous = await carveWindowsReadDenies(windowsReadDenyRoots(join(root, 'workspace'), []), [join(root, 'workspace')])
     expect(previous).toContain(runnerCache)
     expect(previous).toContain(cargoCache)

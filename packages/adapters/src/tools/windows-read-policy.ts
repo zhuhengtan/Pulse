@@ -1,4 +1,4 @@
-import { readdir } from 'node:fs/promises'
+import { readdir, realpath } from 'node:fs/promises'
 import { dirname, join, relative, isAbsolute, sep } from 'node:path'
 
 /** Dependency reads do not authorize adjacent installation source or secrets. */
@@ -11,14 +11,22 @@ function within(path: string, root: string): boolean {
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
 }
 
-/** Keep denied subtrees off the ancestors Git must stat to reach an allowed workspace. */
+/** Carve generated container boundaries, never user-specified explicit denies.
+ * Compare filesystem targets just as the native ACL helper does: stamping a
+ * junction stamps its target, not the lexical sibling discovered by readdir.
+ * This does not add grants; explicit denies remain the native runtime's job.
+ */
 export async function carveWindowsReadDenies(denied: string[], allowed: string[]): Promise<string[]> {
+  const roots = await Promise.all(allowed.map(path => realpath(path)))
   const result = new Set<string>()
   const visited = new Set<string>()
-  const visit = async (path: string): Promise<void> => {
-    if (visited.has(path) || allowed.some(root => within(path, root))) return
+  const visit = async (input: string): Promise<void> => {
+    // Resolve before both containment and deduplication. Missing, cyclic or
+    // inaccessible targets abort setup rather than silently dropping a deny.
+    const path = await realpath(input)
+    if (visited.has(path) || roots.some(root => within(path, root))) return
     visited.add(path)
-    if (!allowed.some(root => within(root, path))) { result.add(path); return }
+    if (!roots.some(root => within(root, path))) { result.add(path); return }
     // Windows inherited DENY ACEs are not POSIX allow-within-deny rules.
     // Deny siblings along the allowed path, keeping only ancestor metadata
     // accessible. An enumeration failure aborts setup rather than dropping a deny.
@@ -30,7 +38,8 @@ export async function carveWindowsReadDenies(denied: string[], allowed: string[]
 
 /** Read grants are additive; inherited Users/Everyone write rights need a deny. */
 export async function windowsToolchainWriteDenies(readRoots: string[], writeRoots: string[]): Promise<string[]> {
-  const unique = readRoots.filter((path, index) => !readRoots.slice(0, index).some(other => relative(path, other) === ''))
+  const canonical = await Promise.all(readRoots.map(path => realpath(path)))
+  const unique = canonical.filter((path, index) => !canonical.slice(0, index).some(other => relative(path, other) === ''))
   const roots = unique.filter(path => !unique.some(other => other !== path && within(path, other)))
   return carveWindowsReadDenies(roots, writeRoots)
 }

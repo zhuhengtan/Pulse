@@ -5,3 +5,6 @@ native/srt-win-patch/*.patch text eol=lf
 
 # Patch content and pnpm hashes must be identical on all release runners.
 patches/*.patch text eol=lf
+
+# The legacy handler is verified by its exact frozen source SHA-256.
+packages/server/src/task-controller/program-v57.ts text eol=lf

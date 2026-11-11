@@ -11,6 +11,7 @@ export interface PulseSessionSnapshot { schemaVersion: 1; agentId: string; now: 
 
 export class PulseSession {
   private readonly execution: Promise<Outcome>
+  private executionFailure: { reason: unknown } | undefined
   /** Stable session handle used by the explicit warm-start API. */
   readonly sessionId: string
   constructor(private readonly runtime: PulseRuntime, readonly agentId: string) {
@@ -24,6 +25,12 @@ export class PulseSession {
         ...(result.status === 'cancelled' && result.reason === undefined && root?.cancelReason !== undefined ? { reason: root.cancelReason } : {}),
       }
     })
+    // Observe immediately even when a host consumes the stream before outcome.
+    // Keep the original promise rejecting for explicit outcome callers.
+    void this.execution.catch(reason => { this.executionFailure = { reason } })
+  }
+  private throwIfExecutionFailed(): void {
+    if (this.executionFailure) throw this.executionFailure.reason
   }
   private ownsAgent(agentId: string): boolean {
     let current = this.runtime.state.agents.get(agentId)
@@ -48,6 +55,7 @@ export class PulseSession {
     let cursor = fromSeq
     let observationCursor = 0
     while (true) {
+      this.throwIfExecutionFailed()
       const oldest = this.runtime.state.events[0]?.seq
       const compactedThrough = this.runtime.state.eventsCompactedThrough ?? 0
       const gapEnd = oldest === undefined ? compactedThrough : oldest - 1
@@ -69,10 +77,18 @@ export class PulseSession {
         observationCursor = Math.max(observationCursor, observation.seq)
         yield { kind: 'observation', type: 'observation', seq: observation.seq, observation: observation as unknown as JsonValue }
       }
+      this.throwIfExecutionFailed()
       const root = [...this.runtime.state.lanes.values()].find((lane) => lane.agentId === this.agentId && lane.ownerLaneId === undefined)
-      if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status) && !this.hasActiveDescendant() && (this.runtime.state.events.at(-1)?.seq ?? compactedThrough) === cursor) return
+      if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status) && !this.hasActiveDescendant() && (this.runtime.state.events.at(-1)?.seq ?? compactedThrough) === cursor) {
+        // A terminal lane can precede its final persistence flush. Do not end
+        // the stream successfully if that flush rejects; drain any final facts.
+        await this.execution
+        if (!this.hasActiveDescendant() && (this.runtime.state.events.at(-1)?.seq ?? this.runtime.state.eventsCompactedThrough ?? 0) === cursor) return
+        continue
+      }
       // Wait for runtime activity instead of polling with setImmediate while
-      // an external effect is still in flight.
+      // an external effect is still in flight. Its bounded wait also lets an
+      // execution failure terminate the stream without adding orphan waiters.
       await this.runtime.waitForActivity()
     }
   }

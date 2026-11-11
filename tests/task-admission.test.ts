@@ -17,6 +17,102 @@ const input = (jobId: string, projectKey = 'a', ownerToken = 'owner') => ({ jobI
 const release = (store: HostTaskAdmissionStore, id: string) => store.release(id, 'owner', { confirmed: true, outcome: 'completed' })
 afterEach(() => { for (const store of stores.splice(0)) { try { store.close() } catch {} } for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }) })
 
+type AdmissionReply = { id: number; result: ReturnType<HostTaskAdmissionStore['claim']>; snapshot: ReturnType<HostTaskAdmissionStore['snapshot']> }
+/** Keep null claimants alive: FIFO can reject an attempt while capacity is free. */
+async function withAdmissionProcesses(store: HostTaskAdmissionStore, run: (workers: Array<{ request(action: 'enqueue' | 'claim'): Promise<AdmissionReply> }>) => Promise<void>) {
+  const { readFileSync } = await import('node:fs')
+  const ts = await import('typescript')
+  const source = ts.transpileModule(readFileSync(new URL('../packages/server/src/task-admission.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText.replace('createRequire(import.meta.url)', `createRequire(${JSON.stringify(new URL('../package.json', import.meta.url).href)})`)
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
+  // Leave time inside the existing test deadline for unconditional owned cleanup.
+  const deadline = Date.now() + (process.platform === 'win32' ? 150_000 : 6500)
+  const trace: unknown[] = []
+  const record = (event: unknown) => { trace.push(event); if (trace.length > 32) trace.shift() }
+  const workers: Array<ReturnType<typeof start>> = []
+  function start(index: number) {
+    const script = `import {HostTaskAdmissionStore} from ${JSON.stringify(moduleUrl)};
+      const s = new HostTaskAdmissionStore({directory:${JSON.stringify(store.directory)}});
+      process.on('message', ({id,action}) => {
+        if (action === 'stop') { s.close(); process.exit(0); }
+        const result = action === 'enqueue' ? s.enqueue(${JSON.stringify(input(String(index)))}) : s.claim(${JSON.stringify(String(index))},'owner');
+        process.send({id,result,snapshot:s.snapshot()});
+      });
+      process.on('disconnect', () => { s.close(); process.exit(0); });`
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
+    let stdout = '', stderr = '', sequence = 0, stopping = false, failure: Error | undefined
+    let pending: { id: number; resolve(reply: AdmissionReply): void; reject(error: Error): void } | undefined
+    const fail = (error: Error) => { failure ??= error; pending?.reject(error) }
+    child.stdout!.on('data', chunk => { stdout = (stdout + chunk).slice(-2048) })
+    child.stderr!.on('data', chunk => { stderr = (stderr + chunk).slice(-2048) })
+    child.on('error', fail)
+    child.on('message', (message: AdmissionReply) => {
+      record({ worker: index, reply: message })
+      if (!message || !pending || message.id !== pending.id) { fail(new Error(`Unexpected admission child reply ${index}`)); return }
+      pending.resolve(message)
+    })
+    // Observe lifecycle immediately, including exits before the first request.
+    const closed = new Promise<void>(resolve => child.once('close', (code, signal) => {
+      record({ worker: index, code, signal })
+      if (!stopping || code !== 0 || signal !== null) fail(new Error(`Admission child ${index} closed: ${code}/${signal}`))
+      resolve()
+    }))
+    return {
+      async request(action: 'enqueue' | 'claim'): Promise<AdmissionReply> {
+        if (failure) throw failure
+        if (stopping) throw new Error('Admission child is stopping')
+        if (pending) throw new Error('Overlapping admission child requests')
+        const id = ++sequence
+        record({ worker: index, id, action })
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          return await new Promise<AdmissionReply>((resolve, reject) => {
+            pending = { id, resolve, reject: error => { clearTimeout(timer); reject(error) } }
+            timer = setTimeout(() => reject(new Error(`Admission child ${index} timed out during ${action}`)), Math.max(1, deadline - Date.now()))
+            child.send({ id, action }, error => { if (error) fail(error) })
+          })
+        } finally { clearTimeout(timer); pending = undefined }
+      },
+      async stop() {
+        stopping = true
+        // A sibling may have failed while this child still owes an ACK.
+        // Settle that request even when graceful stop subsequently exits zero.
+        pending?.reject(new Error(`Admission child ${index} stopped before its reply`))
+        pending = undefined
+        const wait = async (milliseconds: number) => {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          try { return await Promise.race([closed.then(() => true), new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), milliseconds) })]) }
+          finally { clearTimeout(timer) }
+        }
+        if (child.exitCode === null && child.signalCode === null) {
+          if (child.connected) child.send({ action: 'stop' }, error => { if (error) fail(error) })
+          if (!await wait(500)) {
+            fail(new Error(`Admission child ${index} required forced cleanup`))
+            child.kill('SIGKILL')
+          }
+        }
+        if (!await wait(1000)) throw new Error(`Admission child ${index} did not close after cleanup`)
+        if (failure) throw failure
+      },
+      diagnostics: () => ({ worker: index, pid: child.pid, stdout, stderr }),
+    }
+  }
+  let failure: unknown
+  try {
+    for (let index = 0; index < 6; index++) workers.push(start(index))
+    await run(workers)
+  } catch (error) { failure = error }
+  finally {
+    const cleanup = await Promise.allSettled(workers.map(worker => worker.stop()))
+    failure ??= cleanup.find(result => result.status === 'rejected')?.reason
+  }
+  if (failure) {
+    let snapshot: unknown
+    try { snapshot = store.snapshot() } catch (error) { snapshot = String(error) }
+    throw new Error(`${String(failure)}\nAdmission diagnostics: ${JSON.stringify({ trace, snapshot, children: workers.map(worker => worker.diagnostics()) })}`, { cause: failure })
+  }
+}
+
+
 describe('host task admission', () => {
   it('uses the same host path regardless of PULSE_HOME, without opening that path', () => {
     const before = defaultHostTaskAdmissionDirectory(), old = process.env.PULSE_HOME
@@ -148,19 +244,54 @@ describe('host task admission', () => {
       }
     } finally { db.close() }
   })
+  it('keeps independent FIFO claimants waiting when their first attempt is out of order', async () => {
+    const { store, directory } = setup({ maxQueued: 32 })
+    await withAdmissionProcesses(store, async workers => {
+      for (const [index, worker] of workers.entries()) {
+        const reply = await worker.request('enqueue')
+        expect(reply.result).toMatchObject({ jobId: String(index), sequence: index + 1, status: 'queued' })
+      }
+      // Reproduce the legal interleaving that broke the old one-shot fixture.
+      for (const worker of workers.slice(1)) expect((await worker.request('claim')).result).toBeNull()
+      expect((await workers[0]!.request('claim')).result?.jobId).toBe('0')
+      expect(store.snapshot()).toMatchObject({ occupied: 1, queued: 5 })
+      expect((await workers[1]!.request('claim')).result?.jobId).toBe('1')
+      const repeated = await Promise.all(workers.map(worker => worker.request('claim')))
+      expect(repeated.every(reply => reply.result === null)).toBe(true)
+      expect(store.snapshot()).toMatchObject({ occupied: 2, queued: 4 })
+    })
+    const reopened = new HostTaskAdmissionStore({ directory }); stores.push(reopened)
+    expect(reopened.snapshot()).toEqual(store.snapshot())
+    expect(reopened.snapshot()).toMatchObject({ occupied: 2, queued: 4 })
+  })
   it('serializes admissions from real independent processes', async () => {
     const { store, directory } = setup({ maxQueued: 32 })
-    // Transform only this standalone module with the already-installed compiler.
-    // Child processes simulate workers; no model/provider is invoked.
-    const { readFileSync } = await import('node:fs')
-    const ts = await import('typescript')
-    const source = ts.transpileModule(readFileSync(new URL('../packages/server/src/task-admission.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText.replace('createRequire(import.meta.url)', `createRequire(${JSON.stringify(new URL('../package.json', import.meta.url).href)})`)
-    const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
-    const results = await Promise.all(Array.from({ length: 6 }, (_, i) => new Promise<number>((resolve, reject) => {
-      const script = `import {HostTaskAdmissionStore} from ${JSON.stringify(moduleUrl)}; const s = new HostTaskAdmissionStore({directory:${JSON.stringify(directory)}}); s.enqueue(${JSON.stringify(input(String(i)))}); console.log(s.claim(${JSON.stringify(String(i))},'owner') ? '1':'0'); s.close();`
-      const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'] }); let out = '', err = ''
-      child.stdout.on('data', chunk => out += chunk); child.stderr.on('data', chunk => err += chunk); child.on('error', reject); child.on('close', code => code === 0 ? resolve(Number(out.trim())) : reject(new Error(err)))
-    })))
-    expect(results.reduce((sum, value) => sum + value, 0)).toBe(2); expect(store.snapshot()).toMatchObject({ occupied: 2, queued: 4 })
+    await withAdmissionProcesses(store, async workers => {
+      await Promise.all(workers.map(worker => worker.request('enqueue')))
+      const queued = store.list().sort((a, b) => a.sequence - b.sequence)
+      expect(queued).toHaveLength(6)
+      const claimed = new Set<string>()
+      // Broadcast genuine concurrent claims. In each completed round at least
+      // the FIFO head can advance; two rounds suffice to fill two slots.
+      for (let round = 0; round < 2; round++) {
+        const replies = await Promise.all(workers.filter((_, index) => !claimed.has(String(index))).map(worker => worker.request('claim')))
+        for (const reply of replies) {
+          expect(reply.snapshot.occupied).toBeLessThanOrEqual(2)
+          expect(reply.snapshot.occupied + reply.snapshot.queued).toBe(6)
+          if (reply.result) {
+            expect(reply.result.status).toBe('starting')
+            expect(claimed.has(reply.result.jobId)).toBe(false)
+            claimed.add(reply.result.jobId)
+          }
+        }
+      }
+      expect([...claimed].sort()).toEqual(queued.slice(0, 2).map(job => job.jobId).sort())
+      expect(claimed.size).toBe(2)
+      expect(store.snapshot()).toMatchObject({ occupied: 2, queued: 4 })
+      expect((await Promise.all(workers.map(worker => worker.request('claim')))).every(reply => reply.result === null)).toBe(true)
+    })
+    const reopened = new HostTaskAdmissionStore({ directory }); stores.push(reopened)
+    expect(reopened.snapshot()).toEqual(store.snapshot())
+    expect(reopened.snapshot()).toMatchObject({ occupied: 2, queued: 4 })
   })
 })

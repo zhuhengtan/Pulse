@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { PulseRuntime, FileRuntimePersistenceBackend } from '@hunterzhu/pulse-runtime'
 import { buildTaskControllerProgram } from '../packages/server/src/task-controller/program.js'
@@ -126,6 +127,36 @@ describe('actual controller execution and persistence',()=>{
         expect(controllerFromGlobal(global)?.reliability).toEqual(state.reliability)
       }finally{await restored.shutdown()}
     }finally{await runtime.shutdown();await rm(root,{recursive:true,force:true})}
+  })
+  it('preserves frozen source bytes in a real Git autocrlf checkout',async()=>{
+    const path='packages/server/src/task-controller/program-v57.ts'
+    const source=await readFile(path)
+    const attributes=await readFile('.gitattributes')
+    const root=await mkdtemp(join(tmpdir(),'pulse-frozen-checkout-'))
+    const env={...process.env}
+    for(const key of Object.keys(env))if(key.toUpperCase().startsWith('GIT_'))delete env[key]
+    env.GIT_CONFIG_NOSYSTEM='1';env.GIT_ATTR_NOSYSTEM='1'
+    env.GIT_CONFIG_GLOBAL=join(root,'empty-config')
+    const git=(...args:string[])=>execFileSync('git',args,{cwd:root,env,stdio:'pipe'})
+    try{
+      await writeFile(env.GIT_CONFIG_GLOBAL,'')
+      await mkdir(join(root,dirname(path)),{recursive:true})
+      await writeFile(join(root,'.gitattributes'),attributes)
+      await writeFile(join(root,path),source)
+      await writeFile(join(root,'control.ts'),source)
+      git('init','--quiet')
+      git('config','--local','core.autocrlf','true')
+      git('config','--local','core.safecrlf','false')
+      git('config','--local','core.attributesFile',env.GIT_CONFIG_GLOBAL)
+      git('add','--','.gitattributes',path,'control.ts')
+      await rm(join(root,path));await rm(join(root,'control.ts'))
+      git('checkout-index','--all','--force')
+      // The unpinned control proves Git really performed Windows-style conversion.
+      expect(await readFile(join(root,'control.ts'),'utf8')).toBe(source.toString('utf8').replaceAll('\n','\r\n'))
+      expect(await readFile(join(root,path))).toEqual(source)
+      const frozen=await readFile(join(root,path),'utf8')
+      expect(createHash('sha256').update(frozen.replace("'./stage-checks-v57.js'","'./stage-checks.js'")).digest('hex')).toBe('ae5ab459c6ef69cedeeb01f775560c6ce058783018749686128dc0e0baf1dced')
+    }finally{await rm(root,{recursive:true,force:true})}
   })
   it('freezes the exact v57 handler source instead of relabeling the v58 implementation',async()=>{
     const frozen=await readFile('packages/server/src/task-controller/program-v57.ts','utf8')

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { expect, it, vi } from 'vitest'
-import type { ResultMeta } from '@hunterzhu/pulse-runtime'
+import type { EffectRecord, ResultMeta, RuntimePersistenceSnapshot } from '@hunterzhu/pulse-runtime'
 import { createLocalHost, H5Server } from '../packages/server/src/index.js'
 import { durableFileWrite } from '../packages/server/src/review-verdict.js'
 import { acceptWorkRequests } from './helpers/work-intent.js'
@@ -32,27 +32,20 @@ it('accepts a successful new or replacement file receipt and rejects everything 
 
 const exec = promisify(execFile)
 
-async function taskOutcome(dataDir: string): Promise<{ status?: string }> {
-  const conversations = await readdir(join(dataDir, 'conversations')).catch(() => [] as string[])
-  for (const conversation of conversations) {
-    const runs = await readdir(join(dataDir, 'conversations', conversation, 'runs')).catch(() => [] as string[])
-    for (const run of runs) {
-      const text = await readFile(join(dataDir, 'conversations', conversation, 'runs', run, 'task-outcome.json'), 'utf8').catch(() => '')
-      if (text) return JSON.parse(text) as { status?: string }
-    }
-  }
-  return {}
-}
-
-async function collectText(directory: string): Promise<string> {
-  const entries = await readdir(directory, { withFileTypes: true }).catch(() => [])
-  const parts: string[] = []
+async function persistedReceipts(runDir: string): Promise<Array<{ ref: string; value: unknown }>> {
+  const directory = join(runDir, 'runtime-results')
+  const entries = await readdir(directory, { withFileTypes: true })
+  const receipts: Array<{ ref: string; value: unknown }> = []
   for (const entry of entries) {
-    const path = join(directory, entry.name)
-    if (entry.isDirectory()) parts.push(await collectText(path))
-    else if (entry.name.endsWith('.json') || entry.name.endsWith('.jsonl')) parts.push(await readFile(path, 'utf8').catch(() => ''))
+    // Result bodies are immutable once published. Do not open mutable runtime
+    // sidecars or temporary/lock files while the scheduler is replacing them.
+    if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/.test(entry.name)) continue
+    const envelope = JSON.parse(await readFile(join(directory, entry.name), 'utf8'))
+    expect(envelope.schemaVersion).toBe(1)
+    expect(entry.name).toBe(`${createHash('sha256').update(envelope.ref).digest('hex')}.json`)
+    receipts.push(envelope)
   }
-  return parts.join('\n')
+  return receipts
 }
 
 it.each([false, true])('non-controller acceptance ignores an unchanged overwrite and keeps a real change (changed: %s)', async changed => {
@@ -84,12 +77,33 @@ it.each([false, true])('non-controller acceptance ignores an unchanged overwrite
     const headers = { Cookie: session.headers.get('set-cookie')!, Origin: base, 'Content-Type': 'application/json' }
     const project = await fetch(`${base}/api/projects`, { method: 'POST', headers, body: JSON.stringify({ cwd: projectRoot, name: 'Fixture project' }) }).then(response => response.json()) as { id: string }
     const conversation = await host.createConversation({ title: 'Update notes', cwd: projectRoot, projectId: project.id })
-    await fetch(`${base}/api/conversations/${conversation.id}/messages`, { method: 'POST', headers, body: JSON.stringify({ text: `Update notes.txt so it contains the exact content ${next}.` }) })
+    const response = await fetch(`${base}/api/conversations/${conversation.id}/messages`, { method: 'POST', headers, body: JSON.stringify({ text: `Update notes.txt so it contains the exact content ${next}.` }) })
+    expect(response.ok).toBe(true)
+    const { runId } = await response.json() as { runId: string }
+    expect(runId).toMatch(/^run-/)
+    const runDir = join(dataDir, 'conversations', conversation.id, 'runs', runId)
     await vi.waitFor(async () => {
-      const dumped = await collectText(join(dataDir, 'conversations'))
-      expect(dumped).toContain('"beforeHash"')
-      expect((await taskOutcome(dataDir)).status).toBe(changed ? 'accepted' : 'unverifiable')
+      const receipts = await persistedReceipts(runDir)
+      expect(receipts.map(receipt => receipt.value)).toContainEqual({
+        path: 'notes.txt', beforeHash: expectedHash,
+        hash: createHash('sha256').update(next).digest('hex'), bytes: Buffer.byteLength(next),
+      })
+      const outcome = JSON.parse(await readFile(join(runDir, 'task-outcome.json'), 'utf8'))
+      expect(outcome.status).toBe(changed ? 'accepted' : 'unverifiable')
     }, { timeout: 20_000, interval: 40 })
+    // Once the business outcome is durable, bind the immutable receipt to the
+    // successful overwrite effect rather than accepting a matching unrelated body.
+    const snapshot = JSON.parse(await readFile(join(runDir, 'runtime.json'), 'utf8')) as RuntimePersistenceSnapshot
+    const overwrite = snapshot.state.state.effects.map(([, effect]) => effect).find((effect: EffectRecord) => {
+      const input = effect.input as { name?: string }
+      return effect.kind === 'tool' && input.name === 'fs.overwrite'
+    })
+    expect(overwrite?.outcome?.status).toBe('succeeded')
+    const receipts = await persistedReceipts(runDir)
+    expect(receipts.find(receipt => receipt.ref === overwrite?.outcome?.resultRef)?.value).toEqual({
+      path: 'notes.txt', beforeHash: expectedHash,
+      hash: createHash('sha256').update(next).digest('hex'), bytes: Buffer.byteLength(next),
+    })
     expect(await readFile(join(projectRoot, 'notes.txt'), 'utf8')).toBe(next)
     await vi.waitFor(async () => {
       const record = JSON.parse(await readFile(join(dataDir, 'workspaces', 'records', `${conversation.id}.json`), 'utf8'))

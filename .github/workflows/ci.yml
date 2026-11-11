@@ -51,12 +51,14 @@ jobs:
           fi
       - name: Run shared local and cloud checks
         timeout-minutes: 30
+        env:
+          PULSE_CI_COLLECT_FAILURES: '1'
         run: pnpm ci:local
 
   windows:
     name: windows-${{ matrix.profile }}
     strategy:
-      # Keep first-failure evidence from every independent VM. Each VM still bails on its first failed test.
+      # Keep failure evidence from every independent native VM.
       fail-fast: false
       max-parallel: 4
       matrix:
@@ -97,6 +99,7 @@ jobs:
           if ($env:CI_PROFILE -eq 'common') {
             node scripts/ci/local.mjs --windows-common
           } else {
+            $env:PULSE_CI_COLLECT_FAILURES = '1'
             $shard = $env:CI_PROFILE.Substring(6)
             node scripts/ci/windows-shard.mjs $shard
           }
