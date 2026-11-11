@@ -3,6 +3,7 @@ import { lstat, readdir, readFile, realpath } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { LocalHost, LocalHostOptions } from '../index.js'
 import { H5Server } from '../h5/server.js'
+import { validateIsolatedRuntimeEnvironment } from './runtime-env.js'
 
 const protocol = 'pulse-self-host-runtime'
 type Identity = { instanceId: string; nonce: string; pid: number; digest: string; dataDir: string }
@@ -12,15 +13,6 @@ const sameIdentity = (a: Identity, b: Identity) => ['instanceId', 'nonce', 'pid'
 /** Validation does not initialize a host. The controller must exclusively create this root. */
 export async function validateIsolatedH5Root(root: string, identity: Identity): Promise<void> {
   if (!isAbsolute(root) || resolve(root) !== root || await realpath(root) !== root) throw new Error('ISOLATED_ROOT_INVALID')
-  for (const [key, value] of Object.entries({ HOME: join(root, 'home'), USERPROFILE: join(root, 'home'), XDG_CONFIG_HOME: join(root, 'home'), PULSE_DATA_DIR: join(root, 'data'), PULSE_DATA_IPC_ROOT: join(root, 'ipc'), PULSE_MANAGED: '0', PULSE_SELF_HOST_RUNTIME_V1: '1' })) {
-    if (process.env[key] !== value) throw new Error(`ISOLATED_ENV_INVALID:${key}`)
-  }
-  const allowed = new Set(['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'PULSE_DATA_DIR', 'PULSE_DATA_IPC_ROOT', 'PULSE_MANAGED', 'PULSE_SELF_HOST_RUNTIME_V1'])
-  // CoreFoundation injects this locale marker into clean macOS child environments
-  // before JavaScript starts. Accept only its OS-owned shape and current UID.
-  const cfEncoding = process.env.__CF_USER_TEXT_ENCODING
-  if (process.platform === 'darwin' && cfEncoding !== undefined && /^0x[0-9a-f]{1,8}:0x[0-9a-f]{1,8}:0x[0-9a-f]{1,8}$/i.test(cfEncoding) && Number(cfEncoding.split(':')[0]) === process.getuid?.()) allowed.add('__CF_USER_TEXT_ENCODING')
-  if (Object.keys(process.env).some(key => !allowed.has(key))) throw new Error('ISOLATED_ENV_NOT_CLEAN')
   if (!identity || identity.pid !== process.pid || identity.dataDir !== join(root, 'data') || !/^[a-f0-9]{64}$/.test(identity.digest) || !identity.instanceId || !identity.nonce) throw new Error('ISOLATED_IDENTITY_INVALID')
   const endpoint = dataEndpoint(identity.dataDir)
   async function noLinks(directory: string): Promise<void> {
@@ -34,6 +26,9 @@ export async function validateIsolatedH5Root(root: string, identity: Identity): 
   if (!(await lstat(join(root, 'ipc'))).isDirectory()) throw new Error('ISOLATED_IPC_ROOT_REQUIRED')
   const owner = JSON.parse(await readFile(join(root, 'owner.json'), 'utf8'))
   const journal = JSON.parse(await readFile(join(root, 'state', 'journal.json'), 'utf8'))
+  // Bind the one inherited OS directory to the controller-owned journal rather
+  // than trusting a changed value supplied by the child environment itself.
+  validateIsolatedRuntimeEnvironment(root, process.env, process.platform, journal.systemRoot)
   if (owner.protocol !== protocol || !owner.owner || journal.owner !== owner.owner || journal.phase !== 'launching' || !journal.identity || !sameIdentity(identity, journal.identity)) throw new Error('ISOLATED_OWNER_INVALID')
   if (!(await lstat(join(root, 'state', 'lock'))).isDirectory()) throw new Error('ISOLATED_LOCK_REQUIRED')
   // An existing service is never adopted, even when its PID appears dead.

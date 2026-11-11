@@ -9,6 +9,22 @@ import { spawn } from 'node:child_process'
 import { verifySnapshot } from './self-host-snapshot.mjs'
 
 export const PROTOCOL = 'pulse-self-host-runtime'
+// Mirror packages/server/src/self-host/runtime-env.ts. Contract tests require
+// parity; the standalone capsule controller cannot import an npm server path.
+export function isolatedRuntimeEnvironment(root, platform = process.platform, source = process.env) {
+  const paths = platform === 'win32' ? path.win32 : path.posix
+  const home = paths.join(root, 'home')
+  const env = { HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: home, PULSE_DATA_DIR: paths.join(root, 'data'), PULSE_DATA_IPC_ROOT: paths.join(root, 'ipc'), PULSE_MANAGED: '0', PULSE_SELF_HOST_RUNTIME_V1: '1' }
+  if (platform === 'win32') {
+    const keys = Object.keys(source).filter(key => key.toUpperCase() === 'SYSTEMROOT')
+    const systemRoot = keys.length === 1 ? source[keys[0]] : undefined
+    if (!systemRoot || !/^[A-Za-z]:\\[^\\/:*?"<>|\x00-\x1f]+(?:\\[^\\/:*?"<>|\x00-\x1f]+)*$/.test(systemRoot) || paths.normalize(systemRoot) !== systemRoot || systemRoot.split('\\').some(part => /[ .]$/.test(part))) throw new Error('ISOLATED_SYSTEM_ROOT_INVALID')
+    // Explicitly supply every libuv Windows required_var so spawn cannot fill
+    // it from the parent's PATH, profile, temporary directory or user identity.
+    Object.assign(env, { HOMEDRIVE: home.slice(0, 2), HOMEPATH: home.slice(2), LOGONSERVER: '', PATH: '', SYSTEMDRIVE: systemRoot.slice(0, 2), SYSTEMROOT: systemRoot, TEMP: home, TMP: home, USERDOMAIN: '', USERNAME: '', WINDIR: systemRoot })
+  }
+  return env
+}
 export class SelfHostRuntime {
   constructor({ controlRoot, timeoutMs = 3000 } = {}) {
     if (!path.isAbsolute(controlRoot ?? '')) throw new Error('controlRoot must be absolute')
@@ -113,10 +129,11 @@ export class SelfHostRuntime {
     verified = await this.verify(verified.spec)
     const dataDir = path.join(this.root, 'data')
     const plannedIdentity = { instanceId: randomUUID(), nonce: randomUUID(), digest: verified.spec.expectedDigest, dataDir }
-    await this.journal('launch_planned', { spec: verified.spec, plannedIdentity })
+    const env = isolatedRuntimeEnvironment(this.root)
+    await this.journal('launch_planned', { spec: verified.spec, plannedIdentity, systemRoot: env.SYSTEMROOT })
     const child = spawn(process.execPath, [verified.cli, 'self-host-runtime', '--control-root', this.root], {
       cwd: this.root, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], shell: false,
-      env: { HOME: path.join(this.root, 'home'), USERPROFILE: path.join(this.root, 'home'), XDG_CONFIG_HOME: path.join(this.root, 'home'), PULSE_DATA_DIR: dataDir, PULSE_DATA_IPC_ROOT: path.join(this.root, 'ipc'), PULSE_MANAGED: '0', PULSE_SELF_HOST_RUNTIME_V1: '1' },
+      env,
     })
     const slot = { process: child, version: verified.version, spec: verified.spec, exited: false, identity: { ...plannedIdentity, pid: child.pid } }
     this.child = slot

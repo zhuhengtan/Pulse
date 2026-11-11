@@ -53,26 +53,44 @@ it('retains a concrete failed-check diagnosis and never accepts the failed run',
   const status = 'unverifiable'
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-v56-failure-'))
   await writeFile(join(cwd, 'broken.test.cjs'), 'require("node:assert/strict").equal(1, 2)\n')
-  let work = 0, finalReviews = 0
+  let work = 0, plans = 0, stageReviews = 0, finalReviews = 0, finalReplies = 0
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
     const request = JSON.parse(String(init.body)), text = currentRequestText(request.messages)
     const refs = suppliedRequestResults(request.messages).map(r => r.id)
-    if (text.includes("You write Pulse's final user-facing reply")) return chat('The routing check failed with unequal values.')
-    if (text.includes('Create an executable plan')) return chat(JSON.stringify({ tasks: [{ id: 'check', kind: 'verify', goal: 'Run the existing routing test', check: 'node --test broken.test.cjs', criterionIds: ['criterion-1'], dependsOn: [] }] }))
-    if (text.includes('Verify ONLY the active taskController stage')) return chat(JSON.stringify({ status: 'blocked', evidenceRefs: refs, note: 'The routing check failed with unequal values.' }))
+    if (text.includes("You write Pulse's final user-facing reply")) { finalReplies++; return chat('The routing check failed with unequal values.') }
+    if (text.includes('Create an executable plan')) { plans++; return chat(JSON.stringify({ tasks: [{ id: 'check', kind: 'verify', goal: 'Run the existing routing test', check: 'node --test broken.test.cjs', criterionIds: ['criterion-1'], dependsOn: [] }] })) }
+    if (text.includes('Verify ONLY the active taskController stage')) { stageReviews++; return chat(JSON.stringify({ status: 'blocked', evidenceRefs: refs, note: 'The routing check failed with unequal values.' })) }
     if (text.includes('Independently verify every ORIGINAL')) {
       finalReviews++
       return chat(JSON.stringify({ criteria: [{ criterionId: 'criterion-1', status, evidenceRefs: refs, rationale: 'The check failed with unequal values.' }] }))
     }
     return ++work === 1 ? call('shell_exec', { command: 'node', args: ['--test', 'broken.test.cjs'] }) : chat('The check failed.')
   }))
-  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, taskController: true, jarvis: { enabled: false }, approvalMode: 'auto', maxModelCalls: 16 })
+  // One failed native check, one recovery, then final review and reply are enough
+  // to test diagnosis retention. Do not spend extra persisted turns repeating the
+  // identical fixture plan; broader recovery policies have controller coverage.
+  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, taskController: true, jarvis: { enabled: false }, approvalMode: 'auto', maxModelCalls: 9 })
   try {
     const conv = await host.createConversation(), run = await host.sendMessage(conv.id, { text: 'Run the existing routing test and report its result.' })
     const outcome = await run.outcome()
     expect(await run.taskOutcome(), outcome.text).toMatchObject({ status: 'incomplete' })
     const state = JSON.parse(await readFile(join(cwd, 'data/conversations', conv.id, 'runs', run.id, 'task-controller.json'), 'utf8'))
-    expect(finalReviews).toBeLessThanOrEqual(16)
+    expect({ plans, work, stageReviews, finalReviews, finalReplies }).toEqual({ plans: 2, work: 3, stageReviews: 2, finalReviews: 1, finalReplies: 1 })
+    expect(state.budgetStopped).toContain('MODEL_BUDGET_CHECKPOINT:')
+    expect(state.actualBudget).toMatchObject({ limit: 9, used: 8, workAllowed: false, verificationAllowed: true, finalAllowed: true })
+    expect(state.finalReviewStatus).toBe('needs_work')
+    expect(state.finalReview).toEqual([expect.objectContaining({ criterionId: 'criterion-1', status: 'unverifiable' })])
+    expect(state.recoveryAttempts).toHaveLength(1)
+    expect(state.recoveryAttempts[0].failures).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'CHECK_FAILED' })]))
+    const runtime = JSON.parse(await readFile(join(cwd, 'data/conversations', conv.id, 'runs', run.id, 'runtime.json'), 'utf8')).state.state
+    const checks = runtime.effects.map((entry: any) => entry[1]).filter((effect: any) => effect.kind === 'tool')
+    expect(checks).toHaveLength(1)
+    expect(checks[0]).toMatchObject({ input: { name: 'shell.exec', arguments: { command: 'node', args: ['--test', 'broken.test.cjs'] } }, state: 'succeeded' })
+    const result = runtime.results.find((entry: any) => entry[0] === checks[0].outcome.resultRef)?.[1]
+    expect(result).toMatchObject({ storageState: 'persisted', summary: { code: 1, truncated: false } })
+    expect(result.summary.stdout + result.summary.stderr).toContain('ERR_ASSERTION')
+    expect(state.priorTasks[0].evidenceRefs).toContain(result.id)
+    expect(state.tasks[0]).toMatchObject({ status: 'blocked', evidenceRefs: expect.arrayContaining([result.id]) })
     expect(state.finalReviewErrors?.length ?? 0).toBe(0)
     const failedNotes = [...state.priorTasks, ...state.tasks].map((task: any) => task.note ?? '').join('\n')
     expect(failedNotes).toContain('CHECK_FAILED: node: exit 1.')

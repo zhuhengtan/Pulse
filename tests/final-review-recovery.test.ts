@@ -4,10 +4,13 @@ import { buildTaskControllerProgram } from '../packages/server/src/task-controll
 
 async function runReview(options: { version?: '18' | '19'; verdict?: 'passed' | 'not_met' | 'unverifiable'; repeated?: boolean; changing?: boolean; reason?: string; exhausted?: boolean; frozen?: boolean } = {}) {
   let agentId = '', plans = 0, finals = 0, calls = 0
+  // Repeated failures retry the same settled correction, rather than inventing
+  // a new artifact/hash on each plan. Changing rationale alone is not progress.
+  const correctionPath = () => `correction-${options.repeated || options.changing ? 2 : plans}.mjs`
   const writes: string[] = [], turns = new Map<string, number>()
   const program = buildTaskControllerProgram({ version: options.version ?? '19', system: 'offline fixture', approvalMode: 'auto', maxTurns: 96, toolNames: ['fs.write', 'fs.read', 'host.check'], modelBudgetView: () => ({ limit: 96, used: calls, workAllowed: calls < 92 && !(options.exhausted && finals > 0), verificationAllowed: calls < 94, finalAllowed: calls < 96 }) })
   const global = (): any => { const agent = runtime.state.agents.get(agentId)!; return agent.globalVersions.get(agent.latestGlobalVersion) }
-  const runtime = new PulseRuntime({ effectExecutor: async effect => {
+  const runtime: PulseRuntime = new PulseRuntime({ effectExecutor: async effect => {
     if (effect.kind === 'tool') {
       const input = effect.input as any
       if (input.name === 'host.check') return { value: { checks: [{ id: 'reject-invalid', passed: writes.includes('correction-2.mjs'), detail: 'Validation must reject invalid input' }] } }
@@ -19,7 +22,7 @@ async function runReview(options: { version?: '18' | '19'; verdict?: 'passed' | 
     calls++
     if (effect.key?.startsWith('plan')) {
       plans++
-      return { value: { tasks: [{ id: `delivery-${plans}`, kind: 'edit', goal: `Create ${plans === 1 ? 'module.mjs' : `correction-${plans}.mjs`}`, check: 'File saved', dependsOn: [], criterionIds: ['c1'] }] } }
+      return { value: { tasks: [{ id: `delivery-${plans}`, kind: 'edit', goal: `Create ${plans === 1 ? 'module.mjs' : correctionPath()}`, check: 'File saved', dependsOn: [], criterionIds: ['c1'] }] } }
     }
     const lane = runtime.state.lanes.get(effect.ownerLaneId)!
     const state = (lane.context.state as any)?.taskControllerChain ?? global().taskController
@@ -34,7 +37,7 @@ async function runReview(options: { version?: '18' | '19'; verdict?: 'passed' | 
     }
     const taskId = (lane.resume.locals as any).taskControllerTaskId ?? state.activeId
     const turn = (turns.get(taskId) ?? 0) + 1; turns.set(taskId, turn)
-    return { value: turn === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: plans > 1 && options.reason?.startsWith('EVIDENCE_CHANGED') ? 'fs.read' : 'fs.write', input: { path: plans === 1 || options.reason?.startsWith('EVIDENCE_CHANGED') ? 'module.mjs' : `correction-${plans}.mjs`, content: 'export const validation = true\n' } }] } : { text: 'Stage done', finishReason: 'stop' } }
+    return { value: turn === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: plans > 1 && options.reason?.startsWith('EVIDENCE_CHANGED') ? 'fs.read' : 'fs.write', input: { path: plans === 1 || options.reason?.startsWith('EVIDENCE_CHANGED') ? 'module.mjs' : correctionPath(), content: 'export const validation = true\n' } }] } : { text: 'Stage done', finishReason: 'stop' } }
   } })
   const record: JsonValue = { schemaVersion: 1, runId: 'review', objective: 'Create module and reject invalid input', acceptanceCriteria: [{ id: 'c1', description: 'Invalid input is rejected' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [], ...(options.frozen ? { acceptanceChecks: [{ id: 'validation', description: 'Caller-owned invalid-input check', criterionIds: ['c1'], toolName: 'host.check', input: {}, expectedChecks: ['reject-invalid'], covers: [] }] } : {}) }
   agentId = runtime.createAgent({ goal: 'Create module and reject invalid input', program, initialGlobal: { taskRecord: record } }).agentId
@@ -64,16 +67,33 @@ it('runs an old caller label through the current recovery policy', async () => {
 it('stops a repeated final failure instead of indefinitely adding correction plans', async () => {
   const result = await runReview({ repeated: true })
   expect(result.outcome.status).toBe('incomplete')
-  expect(result.plans).toBeGreaterThan(2)
-  expect(result.calls).toBeLessThanOrEqual(96)
+  expect(result.plans).toBe(8)
+  expect(result.finals).toBe(7)
+  expect(result.calls).toBe(40)
+  expect(result.controller.goalRecoveries).toBe(7)
+  expect(result.controller.budgetStopped).toBeUndefined()
+  expect(result.controller.actualBudget).toMatchObject({ limit: 96, used: 40, workAllowed: true })
+  expect(result.controller.reliability.cycles.c1).toMatchObject({ noProgress: 12, phase: 'blocked' })
+  expect(result.controller.reliability.cycles.c1.seen).toHaveLength(2)
+  expect(result.controller.tasks.at(-1)).toMatchObject({ status: 'blocked', stopReason: 'NO_PROGRESS' })
+  expect(result.writes).toEqual(['module.mjs', ...Array<string>(7).fill('correction-2.mjs')])
+  expect(result.controller.recoveryAttempts.map((attempt: any) => attempt.failures[0].reason)).toEqual(Array<string>(7).fill('Missing input validation'))
 })
 
 it('continues changing final failures beyond three attempts within the durable budget', async () => {
   const result = await runReview({ changing: true })
   expect(result.outcome.status).toBe('incomplete')
   expect(result.controller.goalRecoveries, JSON.stringify(result)).toBeGreaterThan(3)
-  expect(result.calls).toBeLessThanOrEqual(96)
-  expect(result.writes.filter(path => path === 'module.mjs')).toHaveLength(1)
+  expect(result.plans).toBe(8)
+  expect(result.finals).toBe(7)
+  expect(result.calls).toBe(40)
+  expect(result.controller.budgetStopped).toBeUndefined()
+  expect(result.controller.actualBudget).toMatchObject({ limit: 96, used: 40, workAllowed: true })
+  expect(result.controller.reliability.cycles.c1).toMatchObject({ noProgress: 12, phase: 'blocked' })
+  expect(result.controller.reliability.cycles.c1.seen).toHaveLength(2)
+  expect(result.controller.tasks.at(-1)).toMatchObject({ status: 'blocked', stopReason: 'NO_PROGRESS' })
+  expect(result.writes).toEqual(['module.mjs', ...Array<string>(7).fill('correction-2.mjs')])
+  expect(result.controller.recoveryAttempts.map((attempt: any) => attempt.failures[0].reason)).toEqual(Array.from({ length: 7 }, (_, i) => `Missing input validation ${i + 1}`))
 })
 
 it.each([

@@ -10,6 +10,9 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createLocalHost, H5Server } from '../packages/server/src/index.js'
 import { runIsolatedH5Runtime, validateIsolatedH5Root } from '../packages/server/src/self-host/runtime-h5.js'
+import { isolatedRuntimeEnvironment, validateIsolatedRuntimeEnvironment } from '../packages/server/src/self-host/runtime-env.js'
+// @ts-expect-error standalone capsule controller
+import { isolatedRuntimeEnvironment as controllerEnvironment } from '../scripts/self-host-runtime.mjs'
 
 const roots: string[] = []
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -55,14 +58,15 @@ describe('isolated real H5 maintenance bridge', () => {
   it('validates controller ownership and refuses symlinks and stale services before initialization', async () => {
     const root = await realpath(await mkdtemp(join(process.platform === 'win32' ? tmpdir() : '/tmp', 'phr-'))); roots.push(root)
     const saved = { ...process.env }
+    const env = isolatedRuntimeEnvironment(root)
     const identity = { instanceId: 'instance', nonce: 'nonce', pid: process.pid, digest: 'a'.repeat(64), dataDir: join(root, 'data') }
     try {
       for (const name of ['home', 'data', 'state', 'ipc']) await mkdir(join(root, name))
       await mkdir(join(root, 'state', 'lock'))
       await writeFile(join(root, 'owner.json'), JSON.stringify({ protocol: 'pulse-self-host-runtime', owner: 'owner' }))
-      await writeFile(join(root, 'state', 'journal.json'), JSON.stringify({ owner: 'owner', phase: 'launching', identity }))
+      await writeFile(join(root, 'state', 'journal.json'), JSON.stringify({ owner: 'owner', phase: 'launching', identity, systemRoot: env.SYSTEMROOT }))
       for (const key of Object.keys(process.env)) delete process.env[key]
-      Object.assign(process.env, { HOME: join(root, 'home'), USERPROFILE: join(root, 'home'), XDG_CONFIG_HOME: join(root, 'home'), PULSE_DATA_DIR: identity.dataDir, PULSE_DATA_IPC_ROOT: join(root, 'ipc'), PULSE_MANAGED: '0', PULSE_SELF_HOST_RUNTIME_V1: '1' })
+      Object.assign(process.env, env)
       await expect(validateIsolatedH5Root(root, identity)).resolves.toBeUndefined()
       process.env.UNEXPECTED_RUNTIME_ENV = 'not-allowed'
       await expect(validateIsolatedH5Root(root, identity)).rejects.toThrow('ISOLATED_ENV_NOT_CLEAN')
@@ -107,29 +111,39 @@ describe('isolated real H5 maintenance bridge', () => {
     for (const name of ['home', 'data', 'state', 'ipc']) await mkdir(join(root, name))
     await mkdir(join(root, 'state', 'lock'))
     const owner = randomUUID()
+    const env = controllerEnvironment(root)
     await writeFile(join(root, 'owner.json'), JSON.stringify({ protocol: 'pulse-self-host-runtime', owner }))
     const child = spawn(process.execPath, [process.env.PULSE_ISOLATED_RUNTIME_TEST_CLI ?? fileURLToPath(new URL('../packages/cli/dist/bin.js', import.meta.url)), 'self-host-runtime', '--control-root', root], {
       cwd: root, stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
-      env: { HOME: join(root, 'home'), USERPROFILE: join(root, 'home'), XDG_CONFIG_HOME: join(root, 'home'), PULSE_DATA_DIR: join(root, 'data'), PULSE_DATA_IPC_ROOT: join(root, 'ipc'), PULSE_MANAGED: '0', PULSE_SELF_HOST_RUNTIME_V1: '1' },
+      env,
     })
     let stderr = ''
     child.stderr?.on('data', chunk => { stderr += String(chunk) })
-    const exited = new Promise<number | null>(resolveExit => child.once('exit', resolveExit))
+    const exited = new Promise<number | null>(resolveExit => {
+      child.once('exit', resolveExit)
+      child.once('error', () => { if (!child.pid) resolveExit(null) })
+    })
     const identity = { instanceId: randomUUID(), nonce: randomUUID(), pid: child.pid, digest: 'a'.repeat(64), dataDir: join(root, 'data') }
-    await writeFile(join(root, 'state', 'journal.json'), JSON.stringify({ owner, phase: 'launching', identity }))
     function request(type: string, fields: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
       const requestId = randomUUID()
       return new Promise((resolveReply, reject) => {
+        if (!child.connected) { reject(new Error(`CLI unavailable during ${type}`)); return }
         const timer = setTimeout(() => { cleanup(); reject(new Error(`CLI ${type} timeout: ${stderr}`)) }, 10_000)
         const receive = (message: unknown) => { const response = message as Record<string, unknown>; if (response.requestId === requestId) { cleanup(); resolveReply(response) } }
         const failed = () => { cleanup(); reject(new Error(`CLI exited during ${type}: ${stderr}`)) }
-        function cleanup() { clearTimeout(timer); child.off('message', receive); child.off('exit', failed) }
-        child.on('message', receive); child.once('exit', failed)
-        child.send({ protocol: 'pulse-self-host-runtime', version: 1, type, requestId, identity, ...fields })
+        function cleanup() { clearTimeout(timer); child.off('message', receive); child.off('exit', failed); child.off('disconnect', failed); child.off('error', failed) }
+        child.on('message', receive); child.once('exit', failed); child.once('disconnect', failed); child.once('error', failed)
+        child.send({ protocol: 'pulse-self-host-runtime', version: 1, type, requestId, identity, ...fields }, error => { if (error) failed() })
       })
     }
     try {
+      await writeFile(join(root, 'state', 'journal.json'), JSON.stringify({ owner, phase: 'launching', identity, systemRoot: env.SYSTEMROOT }))
       const initialized = await request('initialize', { mode: 'maintenance' })
+      // Keep unexpected child text private: only known protocol error codes
+      // belong in CI output, never arbitrary environment values or paths.
+      const knownErrors = new Set(['ISOLATED_ROOT_INVALID', 'ISOLATED_SYSTEM_ROOT_INVALID', 'ISOLATED_ENV_NOT_CLEAN', 'ISOLATED_ENV_INVALID', 'ISOLATED_IDENTITY_INVALID', 'ISOLATED_UNSAFE_FILE', 'ISOLATED_IPC_ROOT_REQUIRED', 'ISOLATED_OWNER_INVALID', 'ISOLATED_LOCK_REQUIRED', 'ISOLATED_SERVICE_EXISTS', 'ISOLATED_INITIALIZE_REJECTED'])
+      const errorCode = typeof initialized.error === 'string' && knownErrors.has(initialized.error) ? initialized.error : 'CHILD_ERROR_REDACTED'
+      expect(initialized.error === undefined, `CLI initialize failed: ${errorCode}`).toBe(true)
       expect(initialized).toMatchObject({ ok: true, idle: true, mode: 'maintenance', identity, serverPid: child.pid })
       const leaseId = initialized.leaseId
       expect(await request('probe', { leaseId })).toMatchObject({ ok: true, idle: true, mode: 'maintenance', leaseId })
@@ -143,6 +157,32 @@ describe('isolated real H5 maintenance bridge', () => {
       await exited
     }
   }, 30_000)
+  it('keeps controller and packaged validator environment contracts in parity', () => {
+    const source = { SystemRoot: 'C:\\Windows', PATH: 'parent-tools', USERNAME: 'parent-user', USERDOMAIN: 'parent-domain', TEMP: 'parent-temp', SECRET: 'parent-secret' }
+    for (const platform of ['win32', 'darwin', 'linux'] as const) {
+      const root = platform === 'win32' ? 'D:\\isolated' : '/isolated'
+      const env = isolatedRuntimeEnvironment(root, platform, source)
+      expect(controllerEnvironment(root, platform, source)).toEqual(env)
+      expect(() => validateIsolatedRuntimeEnvironment(root, env, platform, env.SYSTEMROOT)).not.toThrow()
+      expect(Object.values(env)).not.toContain('parent-secret')
+      if (platform === 'win32') {
+        expect(env).toMatchObject({ HOMEDRIVE: 'D:', HOMEPATH: '\\isolated\\home', PATH: '', TEMP: 'D:\\isolated\\home', TMP: 'D:\\isolated\\home', LOGONSERVER: '', USERNAME: '', USERDOMAIN: '', SYSTEMROOT: 'C:\\Windows', WINDIR: 'C:\\Windows', SYSTEMDRIVE: 'C:' })
+        const lower = Object.fromEntries(Object.entries(env).map(([key, value]) => [key.toLowerCase(), value]))
+        expect(() => validateIsolatedRuntimeEnvironment(root, lower, platform, 'C:\\Windows')).not.toThrow()
+        expect(() => validateIsolatedRuntimeEnvironment(root, { ...env, Path: '' }, platform, 'C:\\Windows')).toThrow('ISOLATED_ENV_NOT_CLEAN')
+      } else expect(Object.keys(env)).toHaveLength(7)
+      for (const key of Object.keys(env)) {
+        expect(() => validateIsolatedRuntimeEnvironment(root, { ...env, [key]: 'changed' }, platform, env.SYSTEMROOT)).toThrow('ISOLATED_ENV_INVALID')
+        const missing = { ...env }; delete missing[key]
+        expect(() => validateIsolatedRuntimeEnvironment(root, missing, platform, env.SYSTEMROOT)).toThrow('ISOLATED_ENV_INVALID')
+      }
+      expect(() => validateIsolatedRuntimeEnvironment(root, { ...env, SECRET: 'extra' }, platform, env.SYSTEMROOT)).toThrow('ISOLATED_ENV_NOT_CLEAN')
+    }
+    for (const source of [{}, { SYSTEMROOT: 'C:\\Windows', SystemRoot: 'C:\\Windows' }, ...['Windows', 'C:Windows', '\\\\server\\Windows', 'C:/Windows', 'C:\\Windows\\..\\other', 'C:\\Windows\\', 'C:\\Windows ', 'C:\\Windows\n'].map(SYSTEMROOT => ({ SYSTEMROOT }))]) {
+      expect(() => isolatedRuntimeEnvironment('D:\\isolated', 'win32', source)).toThrow('ISOLATED_SYSTEM_ROOT_INVALID')
+      expect(() => controllerEnvironment('D:\\isolated', 'win32', source)).toThrow('ISOLATED_SYSTEM_ROOT_INVALID')
+    }
+  })
   it('requires explicitly isolated listener options', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-isolated-options-')); roots.push(root)
     vi.stubEnv('HOME', root); vi.stubEnv('USERPROFILE', root); vi.stubEnv('XDG_CONFIG_HOME', root)

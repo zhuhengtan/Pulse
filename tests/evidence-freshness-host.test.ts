@@ -88,9 +88,11 @@ it.each(['unchanged', 'before-stage', 'during-stage', 'during-final'])('verifies
   const objective = 'Write greeting.txt and confirm it contains ready.'
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)
   let work = 0, plans = 0, stageReviews = 0
+  const phases: string[] = []
   const chat = (message: any) => new Response(JSON.stringify({ choices: [{ message: typeof message === 'string' ? { content: message } : message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }] }), { headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
     const request = JSON.parse(String(init.body)), blob = currentRequestText(request.messages)
+    phases.push(blob.includes("You write Pulse's final user-facing reply") ? 'reply' : blob.includes('Create an executable plan') ? 'plan' : blob.includes('Verify ONLY the active taskController stage') ? 'stage' : blob.includes('Independently verify every ORIGINAL') ? 'final' : 'work')
     if (blob.includes("You write Pulse's final user-facing reply")) return chat('Greeting saved.')
     const results = request.messages.filter((m: any) => m.name === 'results').flatMap((m: any) => JSON.parse(m.content))
     if (blob.includes('Create an executable plan')) { plans++; return chat(JSON.stringify({ tasks: [{ id: 's', goal: 'Write greeting.txt', check: 'The file contains ready', dependsOn: [], criterionIds: ids }] })) }
@@ -108,23 +110,60 @@ it.each(['unchanged', 'before-stage', 'during-stage', 'during-final'])('verifies
     if (change === 'before-stage') await writeFile(join(cwd, 'greeting.txt'), 'external change before stage verifier')
     return chat('Greeting saved.')
   }))
-  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), logDir: join(cwd, 'logs'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, jarvis: { enabled: false }, approvalMode: 'auto', maxModelCalls: 16 })
+  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), logDir: join(cwd, 'logs'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, jarvis: { enabled: false }, approvalMode: 'auto', maxModelCalls: 10 })
   try {
     const conversation = await host.createConversation(), run = await host.sendMessage(conversation.id, { text: objective })
-    expect(await run.outcome()).toMatchObject({ status: 'succeeded' })
-    expect((await run.taskOutcome())?.status === 'accepted').toBe(change === 'unchanged')
-    const state = JSON.parse(await readFile(join(cwd, 'data/conversations', conversation.id, 'runs', run.id, 'task-controller.json'), 'utf8'))
-    if (change !== 'unchanged') expect(JSON.stringify(state)).toContain('EVIDENCE_CHANGED')
-    expect(plans).toBeGreaterThanOrEqual(1); expect(plans).toBeLessThanOrEqual(9)
-    if (change === 'unchanged') { expect(work).toBe(2); expect(stageReviews).toBe(1) }
-    else {
-      // v58 refreshes each unchanged stale-version set once. Repeated
-      // external mutation still cannot pass or authorize replaying the edit.
-      expect([...state.priorTasks, ...state.tasks].some((task: any) => task.freshnessRecoveries === 1)).toBe(true)
-      expect(work).toBeGreaterThan(2); expect(work).toBeLessThanOrEqual(16)
-      expect(stageReviews).toBeGreaterThanOrEqual(change === 'before-stage' ? 0 : 1); expect(stageReviews).toBeLessThanOrEqual(8)
-      const snapshot = JSON.parse(await readFile(join(cwd, 'data/conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8'))
-      expect(snapshot.state.state.effects.filter(([, e]: any) => e.kind === 'tool' && e.input.name === 'fs.write')).toHaveLength(1)
+    const outcome = await run.outcome()
+    expect(outcome).toMatchObject({ status: 'succeeded' })
+    expect(await run.taskOutcome()).toMatchObject({ status: change === 'unchanged' ? 'accepted' : 'incomplete' })
+    const root = join(cwd, 'data/conversations', conversation.id, 'runs', run.id)
+    const state = JSON.parse(await readFile(join(root, 'task-controller.json'), 'utf8'))
+    const snapshot = JSON.parse(await readFile(join(root, 'runtime.json'), 'utf8'))
+    const writes = snapshot.state.state.effects.filter(([, e]: any) => e.kind === 'tool' && e.input.name === 'fs.write')
+    expect(writes).toHaveLength(1)
+    expect(writes[0][1].outcome).toMatchObject({ status: 'succeeded', resultRef: expect.any(String) })
+    const writeRef = writes[0][1].outcome.resultRef
+    // Exercise the whole freshness recovery, then stop repeated unrelated goal
+    // retries at the same model-budget checkpoint. Keep each verifier boundary
+    // and the original model-reply versus fallback presentation path.
+    const expectedPhases = {
+      unchanged: ['plan', 'work', 'work', 'stage', 'final', 'reply'],
+      'before-stage': ['plan', 'work', 'work', 'work', 'stage', 'plan', 'work', 'stage', 'final', 'reply'],
+      'during-stage': ['plan', 'work', 'work', 'stage', 'work', 'stage', 'plan', 'work', 'stage', 'final'],
+      'during-final': ['plan', 'work', 'work', 'stage', 'final', 'work', 'stage', 'plan', 'final', 'reply'],
+    }[change]!
+    expect(phases).toEqual(expectedPhases)
+    expect(plans).toBe(change === 'unchanged' ? 1 : 2)
+    expect(stageReviews).toBe(expectedPhases.filter(phase => phase === 'stage').length)
+    expect((await run.usage()).modelCalls).toBeLessThanOrEqual(10)
+    if (change === 'unchanged') {
+      expect(work).toBe(2)
+      expect(state.goalRecoveries).toBe(0)
+      expect(state.reliability.invalidations).toEqual([])
+      expect(state.reliability.excludedRefs).toEqual([])
+      expect(state.budgetStopped).toBeUndefined()
+      expect(outcome.text).toContain('Greeting saved.')
+    } else {
+      expect(state.reliability.invalidations).toEqual([
+        expect.objectContaining({ code: 'EVIDENCE_CHANGED', refs: [writeRef] }),
+      ])
+      expect(state.reliability.excludedRefs).toEqual([writeRef])
+      expect(Object.values(state.reliability.freshness)).toEqual([1])
+      expect(state.priorTasks).toHaveLength(1)
+      expect(state.priorTasks[0]).toMatchObject({ freshnessRecoveries: 1, attempts: 2, status: 'blocked', candidateRef: expect.any(String) })
+      expect(state.priorTasks[0].note).toContain('CHECK_EVIDENCE_MISSING')
+      expect(state.goalRecoveries).toBe(1)
+      expect(state.recoveryAttempts).toHaveLength(1)
+      expect(state.recoveryAttempts[0]).toMatchObject({ result: 'pending' })
+      expect(state.budgetStopped).toContain('MODEL_BUDGET_CHECKPOINT')
+      expect(state.actualBudget.workAllowed).toBe(false)
+      expect(outcome.text).not.toBe('Greeting saved.')
+      if (change === 'during-final') {
+        // The native freshness work and stage review finished before the goal
+        // replan. Its next stage must not dispatch before the checkpoint.
+        expect(state.tasks[0].candidateRef).toBeUndefined()
+        expect(state.tasks[0].note).toContain('MODEL_BUDGET_CHECKPOINT')
+      }
     }
     expect(await readFile(join(cwd, 'greeting.txt'), 'utf8')).toBe(change === 'unchanged' ? 'ready' : `external change ${change === 'before-stage' ? 'before stage' : change === 'during-stage' ? 'during stage' : 'during final'} verifier`)
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }

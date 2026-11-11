@@ -1,5 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -20,7 +20,11 @@ afterEach(() => { for (const store of stores.splice(0)) { try { store.close() } 
 describe('host task admission', () => {
   it('uses the same host path regardless of PULSE_HOME, without opening that path', () => {
     const before = defaultHostTaskAdmissionDirectory(), old = process.env.PULSE_HOME
-    try { process.env.PULSE_HOME = '/different-project'; expect(defaultHostTaskAdmissionDirectory()).toBe(before); expect(before.endsWith('/.pulse/host-admission')).toBe(true) }
+    expect(before).toBe(join(homedir(), '.pulse', 'host-admission'))
+    try {
+      process.env.PULSE_HOME = join(tmpdir(), 'different-project')
+      expect(defaultHostTaskAdmissionDirectory()).toBe(before)
+    }
     finally { if (old === undefined) delete process.env.PULSE_HOME; else process.env.PULSE_HOME = old }
   })
   it('enforces defaults and persisted limits across independent connections', () => {

@@ -10,6 +10,13 @@ import { currentRequestText } from './helpers/provider-request.js'
 
 afterEach(() => vi.unstubAllGlobals())
 
+function waitingEffectId(data: unknown): string {
+  if (data === null || typeof data !== 'object' || !('effectId' in data) || typeof data.effectId !== 'string' || data.effectId.length === 0) {
+    throw new Error('Expected waiting event data with a nonempty effectId')
+  }
+  return data.effectId
+}
+
 it('explains the permitted hash read without opening the implementation gate', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-plan-inspection-'))
   await writeFile(join(cwd, 'input.txt'), 'caller-owned input\n')
@@ -77,7 +84,7 @@ it('reviews the entire revised plan and repairs a prerequisite cycle before offe
       offered++
       try { expect(reviews).toBe(2); expect(turns).toBe(4) }
       catch (error) { await run.cancel('TEST_CLEANUP'); throw error }
-      await run.reply(String(event.data!.effectId), { value: 'hold' })
+      await run.reply(waitingEffectId(event.data), { value: 'hold' })
     }
     const outcome = await run.outcome()
     expect(outcome, JSON.stringify({ outcome, turns, reviews, offered })).toMatchObject({ status: 'succeeded' })
@@ -146,7 +153,7 @@ it('rechecks a patched plan, revokes its earlier approval, and blocks a new cont
   try {
     const conversation = await host.createConversation(), run = await host.sendMessage(conversation.id, { text: '/grill-and-plan 完整核对计划，确认后再实施。' })
     for await (const event of run.events) if (event.type === 'waiting') {
-      offered++; expect(turns).toBe(2); await run.reply(String(event.data!.effectId), { value: 'execute' })
+      offered++; expect(turns).toBe(2); await run.reply(waitingEffectId(event.data), { value: 'execute' })
     }
     expect(await run.outcome()).toMatchObject({ status: 'succeeded' })
     expect(offered).toBe(1); expect(reviews).toBe(2)
@@ -173,7 +180,7 @@ it('refuses legacy unreviewed approval after cold restore without replaying a wr
   try {
     const conversation = await first.createConversation(), run = await first.sendMessage(conversation.id, { text: '/grill-and-plan 保存计划，确认后再实现。' })
     let effectId = ''
-    for await (const event of run.events) if (event.type === 'waiting') { effectId = String(event.data!.effectId); break }
+    for await (const event of run.events) if (event.type === 'waiting') { effectId = waitingEffectId(event.data); break }
     expect(effectId).not.toBe('')
     // Simulate a pre-review checkpoint without changing its original file or human effect.
     await rm(join(cwd, 'data/conversations', conversation.id, 'runs', run.id, 'plan-reviews'), { recursive: true })
@@ -192,9 +199,10 @@ it('reports a blocked controller plan without entering an approval or dispatch l
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-controller-plan-review-'))
   const objective = '先把方案写到 docs/plans/feature.md，确认后再实现 feature.txt。'
   const ids = acceptanceCriteriaFromObjective(objective).map(item => item.id)
-  let work = 0, reviewed = 0
+  let work = 0, reviewed = 0, providerCalls = 0
   const reply = (message: any) => new Response(JSON.stringify({ choices: [{ message: typeof message === 'string' ? { content: message } : message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }] }), { headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+    providerCalls++
     const body = String(init.body), review = consistentPlanReview(body)
     if (review) {
       reviewed++
@@ -224,6 +232,30 @@ it('reports a blocked controller plan without entering an approval or dispatch l
     expect(outcome.text).not.toContain('NO_PROGRESS')
     expect(await run.taskOutcome()).toMatchObject({ status: 'incomplete' })
     expect(reviewed).toBe(1)
+    expect(providerCalls).toBe(14)
+    expect(work).toBe(4)
+    expect(await run.pendingInteractions()).toEqual([])
+    const root = join(cwd, 'data/conversations', conversation.id, 'runs', run.id)
+    const state = JSON.parse(await readFile(join(root, 'task-controller.json'), 'utf8'))
+    // Stop at the real eight-stagnant-recovery guard, not an earlier budget
+    // checkpoint. The eighth attempt is pending after seven no-progress results.
+    expect(state.goalRecoveries).toBe(8)
+    expect(state.recoveryNoProgress).toBe(7)
+    expect(state.recoveryAttempts.map((attempt: any) => attempt.result)).toEqual([
+      ...Array<string>(7).fill('no-progress'), 'pending',
+    ])
+    expect(state.budgetStopped).toBeUndefined()
+    expect(state.actualBudget).toMatchObject({ limit: 16, used: 13, workAllowed: true })
+    const snapshot = JSON.parse(await readFile(join(root, 'runtime.json'), 'utf8'))
+    const effects = snapshot.state.state.effects.map(([, effect]: any) => effect)
+    expect(effects.filter((effect: any) => effect.kind === 'human')).toEqual([])
+    const tools = effects.filter((effect: any) => effect.kind === 'tool')
+    expect(tools.map((effect: any) => effect.input.name)).toEqual(['plan.write'])
+    expect(tools[0].outcome).toMatchObject({ status: 'succeeded', resultRef: expect.any(String) })
+    expect(await readFile(join(cwd, 'docs/plans/feature.md'), 'utf8')).toBe('# Plan\nP1: no authorized mechanism exists.')
     await expect(readFile(join(cwd, 'feature.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
-})
+// Native Ubuntu took 9.823s with real durable checkpoints and all eight
+// recovery attempts. Give this bounded fixture about twice that observation;
+// Windows continues to inherit its existing native setup/cleanup envelope.
+}, process.platform === 'win32' ? undefined : 20_000)

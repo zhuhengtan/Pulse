@@ -16,7 +16,23 @@ const manifestPath = (root: string) => path.join(root, MANIFEST_DIR, MANIFEST_NA
 const kinds = (result: any) => result.violations.map((v: any) => v.kind)
 async function variant(tag: string, edit: (m: any, root: string) => unknown) {
   const root = path.join(tmp, tag)
-  await fs.cp(created.snapshot, root, { recursive: true, verbatimSymlinks: true })
+  // fs.cp does not preserve the Windows directory-link type. Its inferred type
+  // can become 'file' if a relative target has not been copied yet. Copy the
+  // physical entries first, then preserve the source links as directory links,
+  // matching createSnapshot rather than depending on directory iteration order.
+  const links: Array<{ source: string; destination: string }> = []
+  await fs.cp(created.snapshot, root, {
+    recursive: true,
+    filter: async (source, destination) => {
+      if (!(await fs.lstat(source)).isSymbolicLink()) return true
+      links.push({ source, destination })
+      return false
+    },
+  })
+  for (const { source, destination } of links) {
+    expect((await fs.stat(source)).isDirectory()).toBe(true)
+    await fs.symlink(await fs.readlink(source), destination, 'dir')
+  }
   const m = clone(manifest)
   await edit(m, root)
   await fs.writeFile(manifestPath(root), JSON.stringify(m))
@@ -40,6 +56,24 @@ beforeAll(async () => {
 afterAll(async () => { if (tmp) await fs.rm(tmp, { recursive: true, force: true }) })
 
 describe('snapshot runtime identity', () => {
+  it('preserves a relocated clone with relative directory links and the original identity', async () => {
+    const root = await variant('unchanged', () => {})
+    const result = await verifySnapshot({ snapshot: root, expectedDigest: created.runtimeDigest })
+    expect(result.violations).toEqual([])
+    expect(result.ok).toBe(true)
+    expect(result.runtimeDigest).toBe(created.runtimeDigest)
+    expect(manifest.links.length).toBeGreaterThan(0)
+    for (const link of manifest.links) {
+      const copied = path.join(root, link.path)
+      const target = await fs.readlink(copied)
+      expect(path.isAbsolute(target)).toBe(false)
+      expect(target.replaceAll('\\', '/')).toBe(link.target)
+      expect((await fs.stat(copied)).isDirectory()).toBe(true)
+      expect(await fs.realpath(copied)).toBe(await fs.realpath(path.resolve(path.dirname(copied), link.target)))
+      expect(await fs.realpath(copied)).not.toBe(await fs.realpath(path.join(created.snapshot, link.path)))
+    }
+  })
+
   it('includes the isolated runtime controller and binds its bytes into the capsule digest', async () => {
     expect(manifest.entries.runtimeController).toBe('code/supervisor/self-host-runtime.mjs')
     expect(manifest.files.some((file: any) => file.path === manifest.entries.runtimeController)).toBe(true)
@@ -98,10 +132,13 @@ describe('snapshot runtime identity', () => {
       record.sha256 = crypto.createHash('sha256').update(body).digest('hex')
       m.runtimeIdentity.digest = snapshotRuntimeDigest(m)
     })
-    expect((await verifySnapshot({ snapshot: root })).ok).toBe(true)
+    const unbound = await verifySnapshot({ snapshot: root })
+    expect(unbound.violations).toEqual([])
+    expect(unbound.ok).toBe(true)
+    expect(unbound.runtimeDigest).not.toBe(created.runtimeDigest)
     const bound = await verifySnapshot({ snapshot: root, expectedDigest: created.runtimeDigest })
     expect(bound.ok).toBe(false)
-    expect(kinds(bound)).toContain('expected-digest-mismatch')
+    expect(kinds(bound)).toEqual(['expected-digest-mismatch'])
   })
 
   it.each([null, [], {}, { schema: 2, algorithm: 'sha256', digest: '0'.repeat(64) }, { schema: 1, algorithm: 'md5', digest: '0'.repeat(64) }, { schema: 1, algorithm: 'sha256', digest: 'bad' }])('rejects malformed identity %j', async (identity) => {
@@ -127,6 +164,7 @@ describe('snapshot runtime identity', () => {
   it('verifies legacy v1 without identity and still enforces external anchors', async () => {
     const root = await variant('legacy', m => { delete m.runtimeIdentity })
     const result = await verifySnapshot({ snapshot: root, expectedDigest: created.runtimeDigest })
+    expect(result.violations).toEqual([])
     expect(result.ok).toBe(true)
     expect(result.runtimeDigest).toBe(created.runtimeDigest)
     expect(kinds(await verifySnapshot({ snapshot: root, expectedDigest: '0'.repeat(64) }))).toContain('expected-digest-mismatch')
