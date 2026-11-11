@@ -58,7 +58,7 @@ export async function ownSmokeFixture(root, directory, userData) {
     if (!inside || inside.startsWith('..') || isAbsolute(inside)) throw new Error('DESKTOP_FIXTURE_DATA_OUTSIDE_ROOT');
     const profile = relative(root, userData);
     if (!profile || profile.startsWith('..') || isAbsolute(profile)) throw new Error('DESKTOP_FIXTURE_PROFILE_OUTSIDE_ROOT');
-    const data = join(canonical, inside), desktops = [], identities = new Map();
+    const data = join(canonical, inside), desktops = [], identities = new Map(), uncertainties = new Map();
     const ownership = join(canonical, profile, `owned-service-${createHash('sha256').update(directory).digest('hex').slice(0, 24)}.json`);
     console.log(`[desktop:cleanup] fixture ${canonical}`);
     const normalize = value => process.platform === 'win32' ? value.replaceAll('\\', '/').toLowerCase() : value;
@@ -80,15 +80,28 @@ export async function ownSmokeFixture(root, directory, userData) {
     async function inspect() {
         await verifyRoot();
         const rows = await processTable(), scoped = rows.filter(row => roots.some(path => contains(row.command, path)));
+        const unresolved = [];
         for (const [pid, identity] of identities) {
             const current = rows.find(row => row.pid === pid);
-            if (current && (current.born !== identity.born || current.command !== identity.command)) throw new Error(`DESKTOP_PROCESS_IDENTITY_CHANGED:${pid}`);
+            if (!current) {
+                // A query snapshot can miss a still-live process. Only explicit
+                // ESRCH retires the observed instance; no PID reuse inherits it.
+                if (!alive(pid)) { identities.delete(pid); uncertainties.delete(pid); continue; }
+                uncertainties.set(pid, { pid, sameBirth: null, command: 'unavailable', query: 'row-missing-pid-alive' });
+            } else if (current.born !== identity.born || current.command !== identity.command) {
+                // Normal exit can degrade argv before reaping. Neither a changed
+                // birth nor empty/defunct text authorizes a signal or deletion.
+                uncertainties.set(pid, { pid, sameBirth: current.born === identity.born, command: !current.command ? 'empty' : current.command.includes('<defunct>') ? 'defunct-text' : 'changed', query: 'row-present' });
+            }
+            // Uncertainty is sticky even if argv later looks familiar again.
+            if (uncertainties.has(pid)) unresolved.push(uncertainties.get(pid));
         }
         for (const row of scoped) {
+            if (identities.has(row.pid)) continue; // Existing owners remain governed by sticky uncertainty.
             if (!Number.isSafeInteger(row.pid) || row.pid < 1 || !row.born || !row.command) throw new Error('DESKTOP_PROCESS_IDENTITY_UNKNOWN');
-            if (row.pid !== process.pid) identities.set(row.pid, row);
+            if (row.pid !== process.pid && !identities.has(row.pid)) identities.set(row.pid, row);
         }
-        return { rows, scoped: scoped.filter(row => row.pid !== process.pid), service: await read('service.json'), writer: await read('.writer.lock') };
+        return { rows, unresolved, scoped: scoped.filter(row => row.pid !== process.pid), service: await read('service.json'), writer: await read('.writer.lock') };
     }
     async function stopDesktops() {
         const errors = [];
@@ -130,11 +143,13 @@ export async function ownSmokeFixture(root, directory, userData) {
                 if (!Number.isSafeInteger(descriptor.pid) || descriptor.pid < 1 || descriptor.pid === process.pid) throw new Error('DESKTOP_SERVICE_OWNER_UNKNOWN');
                 const owner = state.rows.find(row => row.pid === descriptor.pid);
                 if (owner && !signalled.has(owner.pid)) {
+                    const uncertain = state.unresolved.find(row => row.pid === owner.pid);
+                    if (uncertain) throw new Error(`DESKTOP_SERVICE_IDENTITY_UNCONFIRMED:${JSON.stringify(uncertain)}`);
                     // Authorization comes from the desktop's ownership receipt and a
                     // live authenticated instance, NOT text in ps or a stale PID file.
                     const identity = await serviceIdentity(descriptor);
                     const fresh = await inspect(), latest = fresh.service, current = fresh.rows.find(row => row.pid === owner.pid);
-                    if (JSON.stringify(latest) !== JSON.stringify(descriptor) || !current || current.born !== owner.born || current.command !== owner.command) throw new Error('DESKTOP_SERVICE_IDENTITY_CHANGED');
+                    if (fresh.unresolved.some(row => row.pid === owner.pid) || JSON.stringify(latest) !== JSON.stringify(descriptor) || !current || current.born !== owner.born || current.command !== owner.command) throw new Error('DESKTOP_SERVICE_IDENTITY_CHANGED');
                     const confirmed = await serviceIdentity(latest);
                     if (JSON.stringify(confirmed) !== JSON.stringify(identity) || JSON.stringify(await read('service.json')) !== JSON.stringify(latest) || JSON.stringify(JSON.parse(await readFile(ownership, 'utf8'))) !== JSON.stringify(confirmed.receipt)) throw new Error('DESKTOP_SERVICE_IDENTITY_CHANGED');
                     // Node's PID signal API is not atomic with these checks; native
@@ -147,7 +162,7 @@ export async function ownSmokeFixture(root, directory, userData) {
             }
             const backends = state.scoped.filter(row => /\bh5\s+start\b/.test(row.command));
             if (!backends.length && (!descriptor || !alive(descriptor.pid))) return;
-            if (Date.now() >= until) throw new Error('DESKTOP_BACKEND_EXIT_UNCONFIRMED');
+            if (Date.now() >= until) throw new Error(`DESKTOP_BACKEND_EXIT_UNCONFIRMED:${JSON.stringify(state.unresolved)}`);
             await pause(100);
         } while (true);
     }
@@ -159,11 +174,14 @@ export async function ownSmokeFixture(root, directory, userData) {
                 const pid = state.writer.pid;
                 if (!Number.isSafeInteger(pid) || pid < 1 || pid === process.pid) throw new Error('DESKTOP_WRITER_OWNER_UNKNOWN');
                 const owner = state.rows.find(row => row.pid === pid);
-                if (owner && (!/service\.mjs/.test(owner.command ?? '') || !contains(owner.command, directory) && !contains(owner.command, data))) throw new Error('DESKTOP_WRITER_PROCESS_MISMATCH');
+                if (owner && !state.unresolved.some(row => row.pid === pid) && (!/service\.mjs/.test(owner.command ?? '') || !contains(owner.command, directory) && !contains(owner.command, data))) throw new Error('DESKTOP_WRITER_PROCESS_MISMATCH');
                 if (!owner && alive(pid)) throw new Error('DESKTOP_WRITER_IDENTITY_UNAVAILABLE');
             }
-            if (!state.scoped.length && (!state.writer || !alive(state.writer.pid))) return;
-            if (Date.now() >= until) throw new Error(`DESKTOP_RESOURCES_STILL_LIVE:${state.scoped.map(row => row.pid).join(',')}`);
+            if (!state.scoped.length && !state.unresolved.length && (!state.writer || !alive(state.writer.pid))) return;
+            if (Date.now() >= until) {
+                if (state.unresolved.length) throw new Error(`DESKTOP_RESOURCE_IDENTITY_UNCONFIRMED:${JSON.stringify(state.unresolved)}`);
+                throw new Error(`DESKTOP_RESOURCES_STILL_LIVE:${state.scoped.map(row => row.pid).join(',')}`);
+            }
             await pause(100);
         } while (true);
     }
