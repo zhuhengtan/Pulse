@@ -1,6 +1,8 @@
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { join, parse } from 'node:path'
+import { dirname, join, parse } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { runShell } from '../packages/adapters/src/tools/shell.js'
 
@@ -125,16 +127,52 @@ describe('shell explicit read roots', () => {
     } finally { await rm(f.base, { recursive: true, force: true }) }
   }, 180_000)
 
-  it('keeps primary writes when a readonly root contains the primary', async () => {
+  it.each([false, true])('keeps primary writes when a readonly root contains the primary (deep: %s)', async (deep) => {
     const f = await fixture()
     try {
+      const primary = deep ? join(f.primary, 'middle', 'writable') : f.primary
+      await mkdir(primary, { recursive: true })
+      if (deep && process.platform === 'win32') {
+        await promisify(execFile)('icacls.exe', [dirname(primary), '/grant', '*S-1-5-32-545:(M)'], { timeout: 10_000, killSignal: 'SIGKILL' })
+        await promisify(execFile)('icacls.exe', [dirname(primary), '/inheritance:d'], { timeout: 10_000, killSignal: 'SIGKILL' })
+      }
+      await writeFile(join(f.base, 'existing.txt'), 'unchanged')
+      for (const name of ['explicit.txt', 'protected.txt']) {
+        const path = join(f.base, name)
+        await writeFile(path, 'unchanged')
+        if (process.platform === 'win32') {
+          // An inherited parent deny alone cannot override an explicit Users
+          // allow or reach a protected child DACL. Keep direct sibling denies.
+          await promisify(execFile)('icacls.exe', [path, '/grant', '*S-1-5-32-545:(M)'], { timeout: 10_000, killSignal: 'SIGKILL' })
+          if (name === 'protected.txt') await promisify(execFile)('icacls.exe', [path, '/inheritance:d'], { timeout: 10_000, killSignal: 'SIGKILL' })
+        }
+      }
       const result = await runShell('node', ['-e', `
         const fs = require('node:fs');
-        fs.writeFileSync(process.argv[1] + '/allowed.txt', 'yes');
-        try { fs.writeFileSync('denied.txt', 'bad'); process.exit(3) } catch {}
-      `, f.primary], { cwd: f.base, workspaceRoot: f.primary, canonicalReadRoots: [f.base, f.primary], timeoutMs: 120_000 })
+        const [primary, base] = process.argv.slice(1);
+        fs.mkdirSync(primary + '/new-dir');
+        fs.writeFileSync(primary + '/allowed.txt', 'yes');
+        fs.writeFileSync(primary + '/new-dir/nested.txt', 'nested');
+        fs.renameSync(primary + '/new-dir/nested.txt', primary + '/new-dir/renamed.txt');
+        fs.unlinkSync(primary + '/new-dir/renamed.txt');
+        const denied = action => { try { action(); return false } catch { return true } };
+        console.log(JSON.stringify({
+          createFile: denied(() => fs.writeFileSync(base + '/denied.txt', 'bad')),
+          createDir: denied(() => fs.mkdirSync(base + '/denied-dir')),
+          overwrite: denied(() => fs.writeFileSync(base + '/existing.txt', 'bad')),
+          remove: denied(() => fs.unlinkSync(base + '/existing.txt')),
+          explicitWrite: denied(() => fs.writeFileSync(base + '/explicit.txt', 'bad')),
+          explicitDelete: denied(() => fs.unlinkSync(base + '/explicit.txt')),
+          protectedWrite: denied(() => fs.writeFileSync(base + '/protected.txt', 'bad')),
+          protectedDelete: denied(() => fs.unlinkSync(base + '/protected.txt')),
+          intermediate: denied(() => fs.writeFileSync(require('node:path').dirname(primary) + '/denied-parent.txt', 'bad')),
+          intermediateDir: denied(() => fs.mkdirSync(require('node:path').dirname(primary) + '/denied-parent-dir')),
+        }));
+      `, primary, f.base], { cwd: f.base, workspaceRoot: primary, canonicalReadRoots: [f.base, primary], timeoutMs: 120_000 })
       expect(result.code, result.stderr).toBe(0)
-      expect(await readFile(join(f.primary, 'allowed.txt'), 'utf8')).toBe('yes')
+      expect(JSON.parse(result.stdout)).toEqual({ createFile: true, createDir: true, overwrite: true, remove: true, explicitWrite: true, explicitDelete: true, protectedWrite: true, protectedDelete: true, intermediate: true, intermediateDir: true })
+      expect(await readFile(join(primary, 'allowed.txt'), 'utf8')).toBe('yes')
+      for (const name of ['existing.txt', 'explicit.txt', 'protected.txt']) expect(await readFile(join(f.base, name), 'utf8')).toBe('unchanged')
     } finally { await rm(f.base, { recursive: true, force: true }) }
   }, 180_000)
 

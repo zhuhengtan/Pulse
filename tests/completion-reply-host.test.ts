@@ -6,7 +6,12 @@ import { createLocalHost, H5Server } from '../packages/server/src/index.js'
 import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 
-afterEach(()=>vi.unstubAllGlobals())
+const hostCleanups=new Set<()=>Promise<void>>()
+afterEach(async()=>{
+  // A timed-out body keeps running: close its Host before replacing fetch.
+  try {for(const close of hostCleanups)await close()}
+  finally {hostCleanups.clear();vi.unstubAllGlobals()}
+})
 const message=(content:any)=>Response.json({choices:[{message:typeof content==='string'?{content}:content,finish_reason:content.tool_calls?'tool_calls':'stop'}],usage:{prompt_tokens:10,completion_tokens:2}})
 async function fixture(mode:'success'|'failure'|'incomplete'|'cancelled'|'tools'='success', maxModelCalls=32) {
   const root=await mkdtemp(join(tmpdir(),'pulse-final-reply-host-')),request='1. 起草项目介绍\n2. 起草配置说明',ids=acceptanceCriteriaFromObjective(request).map(c=>c.id)
@@ -31,8 +36,11 @@ async function fixture(mode:'success'|'failure'|'incomplete'|'cancelled'|'tools'
     return message(primaryTexts.join('\n'))
   }))
   const host=createLocalHost({cwd:root,dataDir:join(root,'data'),provider:{provider:'openai-compatible',baseURL:'http://127.0.0.1:12345/v1',defaultModel:'fixture'},taskController:true,approvalMode:'ask',jarvis:{enabled:false},maxModelCalls})
+  let closing:Promise<void>|undefined
+  const close=()=>closing??=(async()=>{await host.close();await rm(root,{recursive:true,force:true});hostCleanups.delete(close)})()
+  hostCleanups.add(close)
   const c=await host.createConversation(),run=await host.sendMessage(c.id,{text:request})
-  return{host,root,c,run,count:()=>({summaries,calls}),directory:join(root,'data','conversations',c.id,'runs',run.id),close:async()=>{await host.close();await rm(root,{recursive:true,force:true})}}
+  return{host,root,c,run,count:()=>({summaries,calls}),directory:join(root,'data','conversations',c.id,'runs',run.id),close}
 }
 const nativeFetch=globalThis.fetch
 it('publishes one natural reply to the event stream, saved history and outcome while retaining the audit',async()=>{
@@ -73,8 +81,15 @@ it('preserves an incomplete verdict and its concrete blocker',async()=>{
     const outcome=await f.run.outcome();expect(outcome.text).toContain('配置验证受环境限制')
     expect(outcome.text).not.toMatch(/stage-hidden|criterion-|逐项验收/);expect((await f.run.taskOutcome())?.status).not.toBe('accepted')
     expect(JSON.parse(await readFile(join(f.directory,'completion-report.json'),'utf8')).text).toContain('stage-hidden')
+    const usage=await f.run.usage(),state=JSON.parse(await readFile(join(f.directory,'task-controller.json'),'utf8'))
+    expect(usage.modelCalls).toBeLessThanOrEqual(32);expect(usage.modelCalls).toBe(f.count().calls)
+    expect(f.count().summaries).toBe(1)
+    expect(state.goalRecoveries).toBeGreaterThan(0);expect(state.recoveryNoProgress).toBeGreaterThan(0)
+    expect((await f.run.taskOutcome())?.blockers).toContainEqual(expect.objectContaining({code:'REVIEW_ATTEMPTS_EXHAUSTED'}))
   }finally{await f.close()}
-}, 30_000)
+// Incomplete verification retains repeated recovery and the 32-call budget.
+// Hosted Mac exceeded 30s; this is a whole-Host envelope, not a provider limit.
+}, 60_000)
 it('does not start the optional presentation model after cancellation',async()=>{
   const f=await fixture('cancelled')
   try {

@@ -50,7 +50,9 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - name: Run shared local and cloud checks
-        timeout-minutes: 30
+        # The complete Linux gate reached 30 minutes; macOS needs additional
+        # native runtime/persistence time. Keep every check and worker unchanged.
+        timeout-minutes: 60
         env:
           PULSE_CI_COLLECT_FAILURES: '1'
         run: pnpm ci:local

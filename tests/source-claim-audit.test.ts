@@ -12,7 +12,13 @@ import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 import { sourceClaimHostTimeout } from './helpers/source-claim-timeouts.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+const hostCleanups = new Set<() => Promise<void>>()
+afterEach(async () => {
+  // Vitest deadlines do not stop the async test body. Retire its Host before
+  // restoring provider/DNS mocks or starting the next fixture.
+  try { for (const close of hostCleanups) await close() }
+  finally { hostCleanups.clear(); vi.restoreAllMocks(); vi.unstubAllGlobals() }
+})
 
 it('covers assertions in summaries/tables and Chinese prose with stable IDs, excluding code', () => {
   const { targets, error } = sourceClaims([{ ref: 'delivery', path: 'report.md', text: '# Notes\nMy own summary: the flag never writes anything.\n| scope | all requests |\n它不会产生任何副作用。\n```js\nconst any = 1\n```\nA bounded ordinary description.' }])
@@ -26,7 +32,7 @@ for (const mode of ['current', 'external', 'paged'] as const) it(`checks actual 
   vi.spyOn(fixtureDns, 'lookup').mockImplementation((async (host: string) => {
     if (host !== 'example.com') throw new Error('UNEXPECTED_FIXTURE_DNS:' + host)
     return [{ address: '93.184.216.34', family: 4 }]
-  }) as typeof fixtureDns.lookup)
+  }) as unknown as typeof fixtureDns.lookup)
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-claim-host-'))
   const objective = 'Use https://example.com/docs to write report.md accurately explaining the documented flag.'
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)
@@ -70,12 +76,17 @@ for (const mode of ['current', 'external', 'paged'] as const) it(`checks actual 
     return call ? reply({ content: '', tool_calls: [{ id: 'fixture-' + work, function: { name: call.name, arguments: JSON.stringify(call.args) } }] }) : reply('Report saved.')
   }))
   const host = createLocalHost({ cwd, dataDir: join(cwd, '.host'), provider: { provider: 'openai-compatible', defaultModel: 'fixture', ...(paged || external ? { maxContextTokens: 128_000 } : {}) }, approvalMode: 'auto', taskController: true, jarvis: { enabled: false }, allowNetwork: true, networkHosts: ['example.com'], maxModelCalls: 40 })
+  let closing: Promise<void> | undefined
+  const close = () => closing ??= (async () => { phase('close'); await host.close(); await rm(cwd, { recursive: true, force: true }); phase('cleaned') })()
+  hostCleanups.add(close)
   try {
     const c = await host.createConversation(), run = await host.sendMessage(c.id, { text: objective })
     for await (const event of run.events) if (event.type === 'waiting') {
       waits++
       if (paged) throw new Error(JSON.stringify({ unexpectedWait: event.data, work, claims, modelRequests }))
-      await run.reply(String(event.data!.effectId), { approved: true })
+      const data = event.data
+      if (!data || typeof data !== 'object' || Array.isArray(data) || typeof data.effectId !== 'string') throw new Error('INVALID_FIXTURE_WAIT')
+      await run.reply(data.effectId, { approved: true })
     }
     await run.outcome()
     const outcome = await run.taskOutcome()
@@ -110,9 +121,9 @@ for (const mode of ['current', 'external', 'paged'] as const) it(`checks actual 
     else {
       expect(state.sourceClaimAudit.assessments[0]).toMatchObject({ status: 'supported', quote: 'The flag suppresses rendered output.' })
     }
-  } finally { phase('close'); await host.close(); await rm(cwd, { recursive: true, force: true }); phase('cleaned') }
+  } finally { await close(); hostCleanups.delete(close) }
 // External mutation intentionally exercises unchanged replans through review exhaustion.
-// It already took 29.6s on Mac and exceeded 30s on Windows; retain that real Host work.
+// Native Mac reached its ninth plan at 44.6s; retain the whole recovery graph.
 }, sourceClaimHostTimeout(process.platform, mode))
 it('does not silently accept partial assertion coverage', () => {
   expect(sourceClaims([{ ref: 'a', text: 'All ' + 'x'.repeat(1800) }]).error).toContain('COVERAGE_INSUFFICIENT')

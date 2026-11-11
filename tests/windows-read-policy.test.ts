@@ -64,7 +64,7 @@ it('denies writes to shared read-only toolchains while retaining workspace and s
     const toolchain = join(root, 'installed'), workspace = join(toolchain, 'workspace'), deps = join(toolchain, 'node_modules'), scratch = join(root, 'scratch')
     for (const path of [workspace, deps, scratch]) await mkdir(path, { recursive: true })
     await writeFile(join(toolchain, 'node.exe'), 'fixture')
-    expect((await windowsToolchainWriteDenies([toolchain, deps, deps, scratch], [workspace, scratch])).sort()).toEqual([deps, join(toolchain, 'node.exe')].sort())
+    expect((await windowsToolchainWriteDenies([toolchain, deps, deps, scratch], [workspace, scratch])).sort()).toEqual([toolchain, deps, join(toolchain, 'node.exe')].sort())
     expect(await windowsToolchainWriteDenies([deps], [workspace, scratch])).toEqual([deps])
     if (process.platform === 'win32') expect(await windowsToolchainWriteDenies([deps, deps.toUpperCase()], [workspace, scratch])).toEqual([deps])
     expect(await windowsToolchainWriteDenies([workspace], [workspace, scratch])).toEqual([])
@@ -89,8 +89,8 @@ it('carves aliases by their targets without granting outside siblings or removin
     // Both a direct alias and an alias to its ancestor must preserve the same
     // authorized target, while the sibling is still denied exactly once.
     expect(await carveWindowsReadDenies([base, container], [primary, secondary, scratch])).toEqual([outside])
-    expect((await windowsToolchainWriteDenies([base, secondary, join(base, 'alias')], [primary, scratch])).sort()).toEqual([container, outside, secondary, nested].sort())
-    expect((await windowsToolchainWriteDenies([base, secondary], [scratch])).sort()).toEqual([primary, container, outside, secondary, nested].sort())
+    expect((await windowsToolchainWriteDenies([base, secondary, join(base, 'alias')], [primary, scratch])).sort()).toEqual([base, container, outside, secondary, nested].sort())
+    expect((await windowsToolchainWriteDenies([base, secondary], [scratch])).sort()).toEqual([base, primary, container, outside, secondary, nested].sort())
   } finally { await rm(base, { recursive: true, force: true }) }
 })
 
@@ -104,5 +104,22 @@ it('fails closed when a discovered alias target cannot be resolved', async () =>
     await rm(alias)
     await symlink(alias, alias, process.platform === 'win32' ? 'junction' : 'dir')
     await expect(carveWindowsReadDenies([base], [workspace])).rejects.toThrow()
+  } finally { await rm(base, { recursive: true, force: true }) }
+})
+
+it('seals readonly ancestors themselves, including empty ancestors and deep writable carve-outs', async () => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'pulse-write-ancestor-')))
+  try {
+    const primary = join(base, 'middle', 'primary'), scratch = join(base, 'scratch')
+    await mkdir(primary, { recursive: true })
+    await mkdir(scratch)
+    // Both ancestor objects need inherited write protection, not a snapshot of
+    // their existing children. The writable roots receive explicit SDK grants.
+    expect(await windowsToolchainWriteDenies([base, primary], [primary, scratch])).toEqual([base, join(base, 'middle')])
+    await writeFile(join(base, 'later.txt'), 'outside')
+    await mkdir(join(base, 'later-dir'))
+    expect((await windowsToolchainWriteDenies([base, primary], [primary, scratch])).sort()).toEqual([base, join(base, 'middle'), join(base, 'later.txt'), join(base, 'later-dir')].sort())
+    expect(await windowsToolchainWriteDenies([primary], [primary])).toEqual([])
+    expect((await windowsToolchainWriteDenies([base, primary], [scratch])).sort()).toEqual([base, join(base, 'middle'), join(base, 'later.txt'), join(base, 'later-dir')].sort())
   } finally { await rm(base, { recursive: true, force: true }) }
 })

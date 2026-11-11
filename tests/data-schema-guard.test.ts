@@ -89,7 +89,7 @@ it('keeps the offline migration script compatible with guarded initialization an
 
 for (const journal of ['WAL', 'DELETE']) for (const readOnly of [false, true]) {
     it(`preserves main and recovery bytes for interrupted ${journal} schema99 readOnly=${readOnly}`, () => {
-        const dir = temporary(), file = join(dir, 'pulse.sqlite');
+        const dir = temporary(), file = join(dir, 'pulse.sqlite'), ready = join(dir, 'interruption-ready');
         const seed = new DatabaseSync(file);
         seed.exec("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('committed'); PRAGMA user_version=99;");
         seed.close();
@@ -98,11 +98,22 @@ for (const journal of ['WAL', 'DELETE']) for (const readOnly of [false, true]) {
             : "BEGIN IMMEDIATE; UPDATE sentinel SET value='uncommitted'; CREATE TABLE spill(x); INSERT INTO spill SELECT randomblob(4096) FROM json_each('[1,2,3,4,5,6,7,8]');";
         const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
             import { DatabaseSync } from 'node:sqlite';
-            const db = new DatabaseSync(${JSON.stringify(file)});
-            db.exec(${JSON.stringify(`PRAGMA journal_mode=${journal}; PRAGMA cache_size=1; ${sql}`)});
-            process.kill(process.pid, 'SIGKILL');
+            import { writeFileSync } from 'node:fs';
+            try {
+                const db = new DatabaseSync(${JSON.stringify(file)});
+                db.exec(${JSON.stringify(`PRAGMA journal_mode=${journal}; PRAGMA cache_size=1; ${sql}`)});
+                writeFileSync(${JSON.stringify(ready)}, ${JSON.stringify(journal)}, { flag: 'wx' });
+                process.kill(process.pid, 'SIGKILL');
+            } catch (error) { console.error(error); process.exit(77); }
+            process.exit(78); // Self-termination must not return or close SQLite cleanly.
         `], { encoding: 'utf8', timeout: 10000 });
-        expect(child.signal).toBe('SIGKILL');
+        expect(child.error, child.stderr).toBeUndefined();
+        expect(readFileSync(ready, 'utf8')).toBe(journal);
+        // Windows uv_kill uses TerminateProcess(..., 1). A self-kill does not set
+        // the parent's uv_process_t.exit_signal, unlike child.kill('SIGKILL').
+        // The post-SQL marker and distinct failure exits rule out loader/SQL errors.
+        expect({ status: child.status, signal: child.signal }, child.stderr).toEqual(process.platform === 'win32'
+            ? { status: 1, signal: null } : { status: null, signal: 'SIGKILL' });
         const recovery = file + (journal === 'WAL' ? '-wal' : '-journal');
         const before = { main: readFileSync(file), recovery: readFileSync(recovery) };
         const close = vi.spyOn(DatabaseSync.prototype, 'close');

@@ -16,7 +16,7 @@ function within(path: string, root: string): boolean {
  * junction stamps its target, not the lexical sibling discovered by readdir.
  * This does not add grants; explicit denies remain the native runtime's job.
  */
-export async function carveWindowsReadDenies(denied: string[], allowed: string[]): Promise<string[]> {
+async function carveWindowsDenies(denied: string[], allowed: string[], sealAncestors: boolean): Promise<string[]> {
   const roots = await Promise.all(allowed.map(path => realpath(path)))
   const result = new Set<string>()
   const visited = new Set<string>()
@@ -27,19 +27,34 @@ export async function carveWindowsReadDenies(denied: string[], allowed: string[]
     if (visited.has(path) || roots.some(root => within(path, root))) return
     visited.add(path)
     if (!roots.some(root => within(root, path))) { result.add(path); return }
-    // Windows inherited DENY ACEs are not POSIX allow-within-deny rules.
-    // Deny siblings along the allowed path, keeping only ancestor metadata
-    // accessible. An enumeration failure aborts setup rather than dropping a deny.
+    // Ancestors must reject creation even when their own DACL has an explicit
+    // Users write grant or disables inheritance. Descendant grants stay intact.
+    if (sealAncestors) result.add(path)
+    // Retain direct denies on existing siblings along the allowed path.
+    // Read boundaries leave ancestor metadata accessible; write boundaries
+    // seal ancestors too. Enumeration failure aborts rather than dropping a deny.
     for (const entry of await readdir(path)) await visit(join(path, entry))
   }
   for (const path of denied) await visit(path)
   return [...result]
 }
 
-/** Read grants are additive; inherited Users/Everyone write rights need a deny. */
+export function carveWindowsReadDenies(denied: string[], allowed: string[]): Promise<string[]> {
+  return carveWindowsDenies(denied, allowed, false)
+}
+
+/** Read grants are additive; inherited Users/Everyone write rights need a deny.
+ * Unlike read-boundary carving, keep read-only ancestors themselves denied:
+ * enumerating existing siblings leaves new files/directories writable there.
+ * SRT grants the writable descendant an explicit Modify ACE. Windows orders
+ * that (and its nearer inherited grants) before the ancestor's inherited deny.
+ * Retain explicit sibling denies too: an existing sibling can have its own
+ * Users write ALLOW or protected DACL, which an inherited deny cannot seal.
+ * A read root at/below a write root must not receive an explicit deny, however.
+ */
 export async function windowsToolchainWriteDenies(readRoots: string[], writeRoots: string[]): Promise<string[]> {
   const canonical = await Promise.all(readRoots.map(path => realpath(path)))
   const unique = canonical.filter((path, index) => !canonical.slice(0, index).some(other => relative(path, other) === ''))
   const roots = unique.filter(path => !unique.some(other => other !== path && within(path, other)))
-  return carveWindowsReadDenies(roots, writeRoots)
+  return carveWindowsDenies(roots, writeRoots, true)
 }
