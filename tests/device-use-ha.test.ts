@@ -7,7 +7,7 @@ import { HomeAssistantAdapter, type HomeAssistantOptions } from '../packages/ser
 import { DeviceEventGateway } from '../packages/server/src/device-use/event-gateway.js'
 import { DeviceBroker } from '../packages/server/src/device-use/broker.js'
 import { DeviceRegistry } from '../packages/server/src/device-use/registry.js'
-import { DeviceStore } from '../packages/server/src/device-use/store.js'
+import { TestDeviceStore } from './helpers/device-store.js'
 import type { DeviceObservation } from '../packages/server/src/device-use/types.js'
 
 const at = 1_800_000_000_000
@@ -298,7 +298,7 @@ describe('restricted HA adapter', () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-ha-')); directories.push(directory)
     const f = fixture({ now: Date.now })
     f.setRaw(lamp('off', Date.now()))
-    const registry = new DeviceRegistry(new DeviceStore(join(directory, 'devices.json')))
+    const registry = new DeviceRegistry(new TestDeviceStore(join(directory, 'devices.json')))
     const broker = new DeviceBroker(registry, [f.adapter], { confirmationWindowMs: 5, pollIntervalMs: 1 })
     await broker.discover()
     const device = (await registry.list())[0]!

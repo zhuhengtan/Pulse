@@ -6,7 +6,7 @@ import { deviceCommandSchema, deviceRecordSchema, commandRequestSchema, deviceGr
 
 export interface DeviceScene { sceneId: string; steps: Omit<DeviceCommandRequest, 'requestId' | 'deadline'>[] }
 export interface DeviceLedger { version: 1; devices: DeviceRecord[]; enrolled: string[]; grants: DeviceGrant[]; commands: DeviceCommand[]; scenes: DeviceScene[]; permissionEvents?: DevicePermissionEvent[] }
-const ledgerSchema = z.object({ version: z.literal(1), devices: z.array(deviceRecordSchema), enrolled: z.array(z.string()), grants: z.array(deviceGrantSchema), commands: z.array(deviceCommandSchema), permissionEvents: z.array(devicePermissionEventSchema).optional(), scenes: z.array(z.object({ sceneId: z.string(), steps: z.array(commandRequestSchema.omit({ requestId: true, deadline: true })) })) })
+export const deviceLedgerSchema = z.object({ version: z.literal(1), devices: z.array(deviceRecordSchema), enrolled: z.array(z.string()), grants: z.array(deviceGrantSchema), commands: z.array(deviceCommandSchema), permissionEvents: z.array(devicePermissionEventSchema).optional(), scenes: z.array(z.object({ sceneId: z.string(), steps: z.array(commandRequestSchema.omit({ requestId: true, deadline: true })) })) })
 const tails = new Map<string, Promise<unknown>>()
 const ownerToken = randomUUID()
 const ownedPaths = new Set<string>()
@@ -39,6 +39,9 @@ export class DeviceStore {
   readonly path: string
   constructor(path: string) { this.path = resolve(path) }
   async transaction<T>(change: (ledger: DeviceLedger) => T, write = true): Promise<T> {
+    // POSIX mode bits cannot establish private Windows ACLs. Reject before even
+    // a read claims ownership or a write replaces the ledger.
+    if (process.platform === 'win32') throw new Error('DEVICE_STORE_PRIVATE_STORAGE_UNSUPPORTED')
     const previous = tails.get(this.path) ?? Promise.resolve()
     const operation = previous.catch(() => {}).then(async () => {
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 })
@@ -47,11 +50,11 @@ export class DeviceStore {
       }
       await claimOwner(this.path)
       let ledger: DeviceLedger
-      try { ledger = ledgerSchema.parse(JSON.parse(await readFile(this.path, 'utf8'))) as DeviceLedger }
+      try { ledger = deviceLedgerSchema.parse(JSON.parse(await readFile(this.path, 'utf8'))) as DeviceLedger }
       catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; ledger = { version: 1, devices: [], enrolled: [], grants: [], commands: [], scenes: [] } }
       const result = change(ledger)
       if (write) {
-        ledgerSchema.parse(ledger)
+        deviceLedgerSchema.parse(ledger)
         const temporary = `${this.path}.${randomUUID()}.tmp`
         try {
           const file = await open(temporary, 'wx', 0o600)

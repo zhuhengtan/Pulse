@@ -1,8 +1,12 @@
+import { mockSceneSandboxStorage } from './helpers/device-store.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it } from 'vitest'
 import { createLocalHost, H5Server } from '../packages/server/src/index.js'
+let restoreStorage: (() => void) | undefined
+beforeEach(() => { restoreStorage = mockSceneSandboxStorage() })
+afterEach(() => { restoreStorage?.() })
 it('keeps scene sandbox isolated behind local-admin same-origin control, with preview-bound idempotent runs', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-scene-sandbox-http-'))
   const host = createLocalHost({ cwd: dir, dataDir: dir, jarvis: { enabled: false } })

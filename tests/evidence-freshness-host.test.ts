@@ -1,4 +1,5 @@
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
+import { evidenceFreshnessTimeouts } from './helpers/evidence-freshness-timeouts.js'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -6,6 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createLocalHost } from '@hunterzhu/pulse-server'
 import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
+
+const fixtureTimeouts = evidenceFreshnessTimeouts(process.platform)
 
 afterEach(() => vi.unstubAllGlobals())
 it.each([false, true])('retains the latest dependency patch at final freshness verification (external change=%s)', async external => {
@@ -57,10 +60,29 @@ it.each([false, true])('retains the latest dependency patch at final freshness v
     else expect(stage).toBe(2)
     const snapshot = JSON.parse(await readFile(join(cwd, 'data/conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8'))
     expect(snapshot.state.state.effects.filter(([,e]:any)=>e.kind==='tool' && e.input.name==='fs.write')).toHaveLength(1)
-    expect(snapshot.state.state.effects.filter(([,e]:any)=>e.kind==='tool' && e.input.name==='fs.apply_patch')).toHaveLength(1)
+    const patches = snapshot.state.state.effects.filter(([, e]: any) => e.kind === 'tool' && e.input.name === 'fs.apply_patch')
+    expect(patches).toHaveLength(1)
+    expect(patches[0][1].outcome).toMatchObject({ status: 'succeeded', resultRef: expect.any(String) })
+    const patchRef = patches[0][1].outcome.resultRef
+    const state = JSON.parse(await readFile(join(cwd, 'data/conversations', conversation.id, 'runs', run.id, 'task-controller.json'), 'utf8'))
+    if (external) {
+      expect(state.reliability.invalidations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'EVIDENCE_CHANGED', refs: expect.arrayContaining([patchRef]) }),
+      ]))
+      expect(state.reliability.excludedRefs).toContain(patchRef)
+      expect(Object.values(state.reliability.freshness)).toEqual([1])
+    } else {
+      const update = state.tasks.find((task: any) => task.id === 'update')
+      expect(update.contextRefs).toContain(patchRef)
+      expect(update.evidenceRefs).not.toContain(patchRef)
+      expect(state.reliability.invalidations).toEqual([])
+    }
+    expect((await run.usage()).modelCalls).toBeLessThanOrEqual(24)
+    expect(await readFile(join(cwd, 'greeting.txt'), 'utf8')).toBe(external ? 'external mutation' : 'ready now')
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
-// The external case measured 10.4s on macOS (sandbox cold start plus bounded recovery); only that platform gets the longer cap.
-}, process.platform === 'darwin' ? 30_000 : undefined)
+// Bounded 24-call invalidation recovery and durable checkpoints need a
+// whole-fixture envelope; model/tool budgets and Windows defaults are unchanged.
+}, fixtureTimeouts.retainedPatch)
 it.each(['unchanged', 'before-stage', 'during-stage', 'during-final'])('verifies current file evidence outside pure steps (%s)', async change => {
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-fresh-evidence-'))
   const objective = 'Write greeting.txt and confirm it contains ready.'
@@ -160,5 +182,5 @@ it.each([
     expect((await readFile(join(cwd, 'feature.test.mjs'), 'utf8')).startsWith(original)).toBe(true)
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
 // Three actual cold launches plus durable receipts and sandbox cleanup.
-// macOS must not use the generic 10s unit-test cap for this integration.
-}, process.platform === 'win32' ? 720_000 : process.platform === 'darwin' ? 45_000 : 10_000)
+// The POSIX envelope covers the whole fixture, not each command's deadline.
+}, fixtureTimeouts.testAdditions)

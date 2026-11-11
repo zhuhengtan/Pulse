@@ -20,7 +20,7 @@ it('enforces filesystem sandbox and runs bounded shell output', async () => {
       expect(unicode.stdout).toBe('雪')
       expect(Buffer.byteLength(unicode.stdout, 'utf8')).toBeLessThanOrEqual(4)
       expect(unicode.truncated).toBe(true)
-      const argv = ['', 'two words', `quote'" ; $(touch ${join(root, 'injected')})`, 'line\nbreak', '雪']
+      const argv = ['', 'two words', `quote'" ; $(touch ${join(root, 'injected')})`, 'line\nbreak', '雪', `value 0|${'x'.repeat(1300)}`]
       const echoed = await runShell(process.execPath, ['-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))', ...argv], { cwd: root })
       expect(echoed.code, echoed.stderr).toBe(0)
       expect(JSON.parse(echoed.stdout)).toEqual(argv)

@@ -15,6 +15,19 @@ export interface SelfHostFileHistoryBinding {
 function invalid(): Error { return Object.assign(new Error('SELF_HOST_FILE_HISTORY_INVALID'), { code: 'SELF_HOST_FILE_HISTORY_INVALID', retryable: false }) }
 function inside(root: string, target: string): boolean { const rel = relative(root, target); return rel === '' || (!rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && rel !== '..' && !isAbsolute(rel)) }
 
+/** File contents must already be synced. Windows cannot fsync a directory
+ * through Node's read-only handle; keep validation and all other I/O failures. */
+export async function syncFileHistoryDirectory(path: string): Promise<void> {
+  const info = await lstat(path)
+  if (!info.isDirectory() || info.isSymbolicLink()) throw invalid()
+  const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0))
+  try {
+    const opened = await handle.stat()
+    if (!opened.isDirectory() || opened.dev !== info.dev || opened.ino !== info.ino) throw invalid()
+    if (process.platform !== 'win32') await handle.sync()
+  } finally { await handle.close() }
+}
+
 /** Deliberately does not canonicalize away symlink components before checking them. */
 export async function assertRealHistoryDirectory(path: string, create = false): Promise<void> {
   const absolute = resolve(path)
@@ -81,8 +94,7 @@ export async function createSelfHostFileHistoryBinding(dataDir: string, conversa
   // Never overwrite/rebind a store.
   const handle = await open(join(storageRoot, 'binding.json'), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
   try { await handle.writeFile(JSON.stringify(binding)); await handle.sync() } finally { await handle.close() }
-  const directory = await open(storageRoot, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0))
-  try { await directory.sync() } finally { await directory.close() }
+  await syncFileHistoryDirectory(storageRoot)
   await validateSelfHostFileHistoryBinding(dataDir, binding, conversationId, workspace)
   return binding
 }

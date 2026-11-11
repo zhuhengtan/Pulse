@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { defineLaneProgram, InMemoryModelRegistry, ModelRouter } from '@hunterzhu/pulse-runtime'
+import { defineLaneProgram, InMemoryModelRegistry, ModelRouter, type PulseRuntime } from '@hunterzhu/pulse-runtime'
 import type { ProviderAdapter } from '../packages/adapters/src/providers/types.js'
 import { createModelEffectExecutor } from '../packages/adapters/src/providers/runtime-executor.js'
 import { McpStdioClient } from '../packages/adapters/src/mcp/stdio.js'
@@ -13,6 +13,7 @@ import { utf8HeadTail } from '../packages/runtime/src/context/builder.js'
 import { createDocxCapabilityPack, createPdfCapabilityPack, createPptxCapabilityPack, createSpreadsheetCapabilityPack, unimplementedDocumentCapabilities } from '../packages/server/src/capabilities.js'
 import { ExactPatchEditor } from '../packages/server/src/editing.js'
 import { FileSnapshotManager } from '../packages/server/src/file-snapshots.js'
+import * as historyStorage from '../packages/server/src/self-host-file-history.js'
 import { hasVisibleFullRead, latestVisibleReadHash } from '../packages/server/src/file-read-evidence.js'
 import { readBoundedImage, IMAGE_RAW_LIMIT } from '../packages/server/src/image-bytes.js'
 import { globWorkspace, searchWorkspace } from '../packages/server/src/security.js'
@@ -396,6 +397,58 @@ describe('repair round 1 production paths', () => {
       expect(await readFile(join(isolated.root, 'a.txt'), 'utf8')).toBe('old')
       await expect(isolated.host.rollbackFiles({ confirm: true, targets: [{ path: 'a.txt', expectedPostHash: oldHash }] })).resolves.toMatchObject({ status: 'completed' })
       await expect(readFile(join(isolated.root, 'a.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await isolated.host.close(); await rm(isolated.root, { recursive: true, force: true }) }
+  })
+
+  it.each(['live', 'persisted'] as const)('recovers a landed write after a directory sync failure using its real %s failed effect', async evidence => {
+    const isolated = await isolatedHost(), runId = 'wal-directory-failure'
+    const oldHash = createHash('sha256').update('old').digest('hex')
+    const path = join(isolated.root, 'a.txt'), wal = join(isolated.root, '.pulse', 'file-snapshots', 'wal')
+    const syncDirectory = historyStorage.syncFileHistoryDirectory
+    let walSyncs = 0, failures = 0
+    vi.spyOn(historyStorage, 'syncFileHistoryDirectory').mockImplementation(async directory => {
+      if (directory === wal) {
+        walSyncs++
+        // The first write and this patch's pending WAL have already synced.
+        // Only fail the patch's landed-record sync, after the workspace rename.
+        if (await readFile(path, 'utf8').catch(() => '') === 'new') {
+          failures++
+          throw Object.assign(new Error('EIO'), { code: 'EIO' })
+        }
+      }
+      await syncDirectory(directory)
+    })
+    try {
+      const opened = await openSurface(isolated, runId), runtime = opened.runtime as unknown as PulseRuntime
+      const outcome = await runtime.start(runtime.createAgent('Write then patch', twoWriteProgram(oldHash)).agentId).outcome()
+      // This test program returns the tool error as data; the patch itself failed.
+      expect(outcome.status).toBe('succeeded')
+      const result = runtime.state.results.get(outcome.resultRef!)?.value as Array<{ error: string | null }>
+      expect(result.some(item => item.error === 'EIO')).toBe(true)
+      const effect = [...runtime.state.effects.values()].find(effect => effect.key === 'patch-a')!
+      expect(effect).toMatchObject({ executionState: 'failed', sideEffectState: 'none', outcome: { status: 'failed', error: { code: 'EIO' } }, attemptNo: 1 })
+      expect(walSyncs).toBe(4)
+      expect(failures).toBe(1)
+      await runtime.flushPersistence()
+      const records = await Promise.all((await readdir(wal)).map(async name => JSON.parse(await readFile(join(wal, name), 'utf8'))))
+      expect(records).toContainEqual(expect.objectContaining({ effectId: effect.id, status: 'landed' }))
+      expect(await readFile(path, 'utf8')).toBe('new')
+
+      // Without the effect receipt, the actual Host classifier must fail closed.
+      await expect(isolated.host.reconcileWorkspaceWal(isolated.root, undefined, runId, isolated.conversation.id)).rejects.toMatchObject({ code: 'WAL_RECOVERY_UNKNOWN' })
+      expect(await readFile(path, 'utf8')).toBe('new')
+      expect(await readdir(wal)).toHaveLength(records.length)
+
+      // With authoritative failed evidence, the established contract rolls back.
+      const recoveryRuntime = evidence === 'live' ? runtime : undefined
+      const recoveryRun = evidence === 'live' ? runId : 'later-run'
+      const restored = await isolated.host.reconcileWorkspaceWal(isolated.root, recoveryRuntime, recoveryRun, isolated.conversation.id)
+      expect(restored.restored).toContain('a.txt')
+      expect(await readFile(path, 'utf8')).toBe('old')
+      expect(await readdir(wal)).toEqual([])
+      expect(await isolated.host.reconcileWorkspaceWal(isolated.root, recoveryRuntime, recoveryRun, isolated.conversation.id)).toMatchObject({ cleaned: [], restored: [] })
+      expect(effect.attemptNo).toBe(1)
+      expect(failures).toBe(1)
     } finally { await isolated.host.close(); await rm(isolated.root, { recursive: true, force: true }) }
   })
 

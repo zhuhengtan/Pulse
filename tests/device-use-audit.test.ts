@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ToolContext } from '@hunterzhu/pulse-tool-sdk'
 import { DeviceBroker, type DeviceBrokerOptions } from '../packages/server/src/device-use/broker.js'
 import { DeviceRegistry } from '../packages/server/src/device-use/registry.js'
+import { TestDeviceStore } from './helpers/device-store.js'
 import { DeviceStore } from '../packages/server/src/device-use/store.js'
 import { SimulatedDeviceAdapter } from '../packages/server/src/device-use/simulator.js'
 import { createDeviceCapabilityPack } from '../packages/server/src/device-use/pack.js'
@@ -17,7 +18,7 @@ afterEach(async () => { vi.restoreAllMocks(); for (const fn of cleanup.splice(0)
 const context = (): ToolContext => ({ toolCallId: 'tool-1', effectId: 'effect-1', attemptId: 'attempt-1', agentId: 'agent-1', laneId: 'lane-1', signal: new AbortController().signal, emit: () => {} })
 async function fixture(options: DeviceBrokerOptions = {}, maxPermissionEvents?: number) {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-device-audit-')); cleanup.push(() => rm(dir, { recursive: true, force: true }))
-  const store = new DeviceStore(join(dir, 'ledger.json')), registry = new DeviceRegistry(store, Date.now, maxPermissionEvents ? { maxPermissionEvents } : {}), adapter = new SimulatedDeviceAdapter()
+  const store = new TestDeviceStore(join(dir, 'ledger.json')), registry = new DeviceRegistry(store, Date.now, maxPermissionEvents ? { maxPermissionEvents } : {}), adapter = new SimulatedDeviceAdapter()
   const broker = new DeviceBroker(registry, [adapter], { confirmationWindowMs: 20, pollIntervalMs: 2, ...options }); cleanup.push(() => broker.close())
   await broker.discover(); await registry.enroll('sim:light')
   const grant = { authorizationRef: 'audit-grant', principal: 'owner', deviceId: 'sim:light', actions: ['power', 'brightness'] as ('power' | 'brightness')[], expiresAt: Date.now() + 60000, limits: { brightness: { min: 0, max: 80 } } }
@@ -100,8 +101,8 @@ describe('Device Use authorization audit', () => {
   })
   it('reads legacy records without inventing authorization snapshots or lifecycle history', async () => {
     const f = await fixture(), result = await f.broker.set('owner', f.request())
-    const legacy = JSON.parse(await readFile(f.store.path, 'utf8')); delete legacy.commands[0].audit; delete legacy.permissionEvents
-    await writeFile(f.store.path, JSON.stringify(legacy))
+    const legacy = JSON.parse(await f.store.readText()); delete legacy.commands[0].audit; delete legacy.permissionEvents
+    await f.store.writeText(JSON.stringify(legacy))
     expect(deviceCommandSchema.parse(legacy.commands[0]).audit).toBeUndefined()
     const duplicate = await f.broker.set('owner', result.request); expect(duplicate.audit).toBeUndefined(); expect(f.adapter.calls).toHaveLength(1)
     await f.registry.revoke('audit-grant')

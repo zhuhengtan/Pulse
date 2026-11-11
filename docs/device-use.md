@@ -18,7 +18,7 @@ The local Settings > Device Use page is the supported enrollment entry point. It
 
 Local management APIs require the trusted local-admin session and same-origin mutation checks. Paired/remote clients cannot enroll, grant, connect a gateway or read these management records. The Home Assistant form explicitly hands over an in-memory token and exact entity allowlist; the token is cleared from the form and is not saved or supplied to the model. Real setup remains a user action, not an automatic connection made by this implementation.
 
-Private durable storage currently fails closed on Windows until a Windows ACL implementation is provided. POSIX file-mode checks are not treated as Windows ACL evidence.
+Private durable storage currently fails closed on Windows until a Windows ACL implementation is provided. `DeviceStore` rejects both reads and writes before filesystem access, including ownership claims; temporary paths do not bypass this boundary. POSIX file-mode checks are not treated as Windows ACL evidence.
 
 ## Trusted host setup
 

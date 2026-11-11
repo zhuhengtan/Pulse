@@ -1,11 +1,15 @@
+import { mockSceneSandboxStorage } from './helpers/device-store.js'
 import { access } from 'node:fs/promises'
-import { expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { SceneSandbox } from '../packages/server/src/device-use/scene-sandbox.js'
 const cleanupFault = vi.hoisted(() => ({ rejectNext: false }))
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return { ...actual, rm: async (...args: Parameters<typeof actual.rm>) => { if (cleanupFault.rejectNext) { cleanupFault.rejectNext = false; throw new Error('SIMULATED_CLEANUP_REFUSAL') } return actual.rm(...args) } }
 })
+let restoreStorage: (() => void) | undefined
+beforeEach(() => { restoreStorage = mockSceneSandboxStorage() })
+afterEach(() => { restoreStorage?.() })
 const binding = 'trusted-test-admin'
 async function fixture() { const sandbox = new SceneSandbox(); await sandbox.act({ action: 'enable' }, binding); return sandbox }
 async function preview(sandbox: SceneSandbox) { const snapshot = await sandbox.act({ action: 'preview' }, binding); return snapshot.preview! }

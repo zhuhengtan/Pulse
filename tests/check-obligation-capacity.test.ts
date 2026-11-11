@@ -6,13 +6,34 @@ import { join } from 'node:path'
 import { createLocalHost } from '../packages/server/src/index.js'
 import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
+import * as adapters from '@hunterzhu/pulse-adapters'
+import { fixtureNodeChecks } from './helpers/fixture-node-check.js'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 const COUNT = 17
 const names = Array.from({ length: COUNT }, (_, i) => `c${i}.test.mjs`)
 const body = (i: number) => `import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { value } from './feature.mjs'\ntest('value ${i}', () => assert.equal(value, 2))\n`
 
+async function checkExecutor(cwd: string, checks: readonly string[], argv: readonly (readonly string[])[], original: string) {
+  const executor = await fixtureNodeChecks(cwd, argv, {
+    'feature.mjs': [original, original.replace('value = 2', 'value = 2 // reviewed')],
+    ...Object.fromEntries(checks.map(name => [name, [body(names.indexOf(name))]])),
+  })
+  vi.spyOn(adapters, 'runShell').mockImplementation(executor.execute)
+  return executor
+}
+function expectChecks(executor: Awaited<ReturnType<typeof checkExecutor>>, argv: readonly (readonly string[])[]) {
+  expect(executor.calls.map(call => call.args)).toEqual(argv)
+  for (const call of executor.calls) {
+    expect(call.pid).toBeGreaterThan(0)
+    expect(call.result).toMatchObject({ code: 0, timedOut: false, aborted: false, truncated: false })
+    expect(call.result!.stdout).toContain(`value ${names.indexOf(call.args.at(-1)!)}`)
+  }
+}
+
+// Real Node processes exercise the Host ledger; native sandbox/receipt bridges
+// remain in check-debt-handoff, evidence-freshness-host and candidate-test-script.
 // Independent original checks invalidated by one later edit must all stay owed: nothing is evicted by count.
 it.each([
   ['all 17 original checks rerun', names, true],
@@ -24,6 +45,7 @@ it.each([
   await writeFile(join(cwd, 'feature.mjs'), original)
   // Immutable candidate definitions exist before the run, so the model only runs, edits and reruns.
   await Promise.all(names.map((name, i) => writeFile(join(cwd, name), body(i))))
+  const executor = await checkExecutor(cwd, names, names.map(name => ['--test', name]), original)
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)
   let work = 0
   const chat = (message: any) => new Response(JSON.stringify({ choices: [{ message: typeof message === 'string' ? { content: message } : message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }] }), { headers: { 'content-type': 'application/json' } })
@@ -67,6 +89,7 @@ it.each([
     const shells = runtime.effects.filter(([, e]: any) => e.kind === 'tool' && e.input.name === 'shell.exec').map(([, e]: any) => e)
     expect(shells.map((e: any) => e.input.arguments.args[1])).toEqual([...names, ...rerun])
     expect(shells.every((e: any) => e.state === 'succeeded' && e.input.arguments.command === 'node')).toBe(true)
+    expectChecks(executor, [...names, ...rerun].map(name => ['--test', name]))
 
     expect(task?.status === 'accepted', JSON.stringify(task)).toBe(accepted)
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
@@ -83,6 +106,7 @@ it.each([
   const three = names.slice(0, 3)
   await writeFile(join(cwd, 'feature.mjs'), original)
   await Promise.all(three.map((name, i) => writeFile(join(cwd, name), body(i))))
+  const executor = await checkExecutor(cwd, three, three.map(name => ['--test', name]), original)
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)
   let work = 0, stageReviews = 0
   const rerun = new Set<string>()
@@ -121,6 +145,7 @@ it.each([
     const shells = runtime.effects.filter(([, e]: any) => e.kind === 'tool' && e.input.name === 'shell.exec').map(([, e]: any) => e.input.arguments.args[1])
     const stages = [...controller.priorTasks, ...controller.tasks]
     expect(controller.invalidatedChecks).toHaveLength(3)
+    expectChecks(executor, (mode === 'none' ? three : [...three, ...three]).map(name => ['--test', name]))
     expect(controller.actualBudget.used ?? 0).toBeLessThanOrEqual(40)
     expect((await run.usage()).modelCalls).toBeLessThanOrEqual(40)
     for (const stage of stages) expect(stage.checkRerunRequests ?? 0).toBeLessThanOrEqual(2)
@@ -148,6 +173,7 @@ it.each([
   await writeFile(join(cwd, 'c0.test.mjs'), body(0))
   const pattern = `value 0|${'x'.repeat(1300)}`
   const args = ['--test', `--test-name-pattern=${pattern}`, 'c0.test.mjs']
+  const executor = await checkExecutor(cwd, [names[0]!], [args], original)
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)
   let work = 0
   const chat = (message: any) => new Response(JSON.stringify({ choices: [{ message: typeof message === 'string' ? { content: message } : message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }] }), { headers: { 'content-type': 'application/json' } })
@@ -201,6 +227,7 @@ it.each([
     // Approval-gated attempts that never ran are not executions: count only the receipts of real runs.
     const ran = shells.filter((e: any) => e.state === 'succeeded')
     expect(ran).toHaveLength(rerun ? 2 : 1)
+    expectChecks(executor, rerun ? [args, args] : [args])
     expect(ran.every((e: any) => JSON.stringify(e.input.arguments.args) === JSON.stringify(args))).toBe(true)
     expect(shells.filter((e: any) => e.state !== 'succeeded').every((e: any) => JSON.stringify(e.input.arguments.args) === JSON.stringify(args))).toBe(true)
     expect((await run.taskOutcome())?.status === 'accepted', JSON.stringify(await run.taskOutcome())).toBe(rerun)

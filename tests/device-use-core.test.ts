@@ -4,12 +4,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { DeviceStore, DeviceRegistry, DeviceBroker, SimulatedDeviceAdapter, createDeviceCapabilityPack, deviceStateSchema, type DeviceCommandRequest } from '../packages/server/src/device-use/index.js'
+import { TestDeviceStore } from './helpers/device-store.js'
 import { CapabilityPackRegistry } from '../packages/server/src/capabilities.js'
 const cleanup: (() => Promise<unknown>)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 async function fixture(options: ConstructorParameters<typeof DeviceBroker>[2] = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-device-')); cleanup.push(() => rm(dir, { force: true, recursive: true }))
-  const store = new DeviceStore(join(dir, 'ledger.json')), registry = new DeviceRegistry(store), adapter = new SimulatedDeviceAdapter()
+  const store = new TestDeviceStore(join(dir, 'ledger.json')), registry = new DeviceRegistry(store), adapter = new SimulatedDeviceAdapter()
   const broker = new DeviceBroker(registry, [adapter], { confirmationWindowMs: 50, pollIntervalMs: 5, ...options }); cleanup.push(() => broker.close())
   await broker.discover()
   for (const deviceId of ['sim:light', 'sim:thermostat']) { await registry.enroll(deviceId); await registry.grant({ authorizationRef: `grant:${deviceId}`, principal: 'owner', deviceId, actions: ['power', 'brightness', 'targetTemperatureC', 'mode', 'fanMode'], expiresAt: Date.now() + 60_000 }) }
@@ -29,8 +30,8 @@ describe('Device Use core closed loop', () => {
     const f = await fixture(); const result = await f.broker.set('owner', f.request({ power: true, brightness: 30 }))
     expect(result.status).toBe('observed'); expect(result.evidence?.source).toBe('simulator'); expect(result.evidence?.state.brightness).toBe(30)
     expect(result.timeline.map(t => t.status)).toEqual(['accepted', 'sent', 'observed'])
-    if (process.platform !== 'win32') expect((await stat(f.store.path)).mode & 0o777).toBe(0o600)
-    expect(JSON.parse(await readFile(f.store.path, 'utf8')).commands[0].commandId).toBe(result.commandId)
+    if (f.store.persistent) expect((await stat(f.store.path)).mode & 0o777).toBe(0o600)
+    expect(JSON.parse(await f.store.readText()).commands[0].commandId).toBe(result.commandId)
   })
   it('deduplicates in-flight and completed requests without resending', async () => {
     const f = await fixture(); f.adapter.delayMs = 20; const request = f.request()
@@ -61,7 +62,7 @@ describe('Device Use core closed loop', () => {
   })
   it('rechecks a queued grant across separate Broker instances sharing one store', async () => {
     const f = await fixture(); f.adapter.delayMs = 50
-    const other = new DeviceBroker(new DeviceRegistry(new DeviceStore(f.store.path)), [f.adapter], { confirmationWindowMs: 50 }); cleanup.push(() => other.close())
+    const other = new DeviceBroker(new DeviceRegistry(f.store.reopen()), [f.adapter], { confirmationWindowMs: 50 }); cleanup.push(() => other.close())
     const a = f.broker.set('owner', f.request())
     await until(async () => f.adapter.calls.length > 0)
     const b = other.set('owner', f.request({ power: false }, { requestId: 'r2' }))
@@ -111,7 +112,7 @@ describe('Device Use core closed loop', () => {
   it('restores sent as unknown and accepted as unsent cancellation, never dispatches', async () => {
     const f = await fixture(); const result = await f.broker.set('owner', f.request())
     await f.store.transaction(l => { l.commands[0]!.status = 'sent'; l.commands.push({ ...l.commands[0]!, commandId: crypto.randomUUID(), request: { ...l.commands[0]!.request, requestId: 'queued' }, status: 'accepted' }) })
-    const recovered = new DeviceBroker(new DeviceRegistry(new DeviceStore(f.store.path)), [f.adapter]); cleanup.push(() => recovered.close()); await recovered.recover()
+    const recovered = new DeviceBroker(new DeviceRegistry(f.store.reopen()), [f.adapter]); cleanup.push(() => recovered.close()); await recovered.recover()
     expect((await recovered.status('owner', result.commandId)).status).toBe('unknown'); expect(await f.store.transaction(l => l.commands[1]!.status, false)).toBe('cancelled'); expect(f.adapter.calls).toHaveLength(1)
   })
   it('returns per-device scene outcomes without claiming atomic rollback', async () => {
@@ -154,6 +155,11 @@ describe('Device Use core closed loop', () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-device-owner-')); cleanup.push(() => rm(directory, { recursive: true, force: true }))
     const path = join(directory, 'ledger.json'), store = new DeviceStore(path)
     await writeFile(`${path}.owner`, JSON.stringify({ pid: process.pid, token: 'another-host' }), { mode: 0o600 })
+    if (process.platform === 'win32') {
+      await expect(store.transaction(l => l.commands)).rejects.toThrow('DEVICE_STORE_PRIVATE_STORAGE_UNSUPPORTED')
+      expect(JSON.parse(await readFile(`${path}.owner`, 'utf8')).token).toBe('another-host')
+      return
+    }
     await expect(store.transaction(l => l.commands)).rejects.toThrow('DEVICE_STORE_IN_USE')
     await writeFile(`${path}.owner`, JSON.stringify({ pid: 1073741823, token: 'dead-host' }))
     expect(await store.transaction(l => l.commands)).toEqual([])

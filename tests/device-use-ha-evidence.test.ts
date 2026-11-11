@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ToolContext } from '@hunterzhu/pulse-tool-sdk'
 import { DeviceBroker } from '../packages/server/src/device-use/broker.js'
 import { DeviceRegistry } from '../packages/server/src/device-use/registry.js'
-import { DeviceStore } from '../packages/server/src/device-use/store.js'
+import { TestDeviceStore } from './helpers/device-store.js'
 import { HomeAssistantAdapter } from '../packages/server/src/device-use/home-assistant.js'
 import { HostDeviceService } from '../packages/server/src/device-use/host.js'
 import { createDeviceCapabilityPack } from '../packages/server/src/device-use/pack.js'
@@ -20,7 +20,7 @@ async function fixture(id = 'home-assistant') {
   let now = Date.now(), raw = snapshot(now - 1000)
   const request = vi.fn(async (_url: unknown, init?: RequestInit) => new Response(JSON.stringify(init?.method === 'POST' ? [] : raw)))
   const adapter = new HomeAssistantAdapter({ id, homeId: 'fixture', baseUrl: 'https://fixture.example', entities: [{ entityId: 'light.test', writable: true }], getAccessToken: async () => 'fixture-token', fetch: request as typeof fetch, now: () => now })
-  const store = new DeviceStore(join(dir, 'ledger.json')), registry = new DeviceRegistry(store, () => now)
+  const store = new TestDeviceStore(join(dir, 'ledger.json')), registry = new DeviceRegistry(store, () => now)
   const broker = new DeviceBroker(registry, [adapter], { now: () => now, hostIdentity: { instanceId: randomUUID(), epoch: 1 }, confirmationWindowMs: 5 }); cleanup.push(() => broker.close())
   await broker.discover(); const device = (await registry.list())[0]!
   await registry.enroll(device.deviceId); await registry.grant({ authorizationRef: 'fixture-grant', principal: 'owner', deviceId: device.deviceId, actions: ['power'], expiresAt: now + 60000 })

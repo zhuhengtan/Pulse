@@ -1,5 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, X509Certificate } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import { readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { connect as tlsConnect } from 'node:tls'
 import { runHardwareLoopbackSample } from '../examples/hardware-loopback.js'
 import { HardwareIdentityRegistry } from '../packages/server/src/device-use/hardware-identity.js'
@@ -67,6 +70,35 @@ describe.skipIf(!hardwareTestTlsAvailable)('authenticated hardware loopback with
     await expect(f.client({ pinnedServerFingerprint: '00:'.repeat(31) + '00' }).connect()).rejects.toThrow('HARDWARE_TLS_AUTHENTICATION_FAILED')
     await expect(f.client({ tls: pki.untrusted }).connect()).rejects.toThrow(/HARDWARE_(TLS_AUTHENTICATION_FAILED|CONNECTION_CLOSED)/)
     expect(f.bridge.snapshot().terminals).toHaveLength(0); expect(f.identities.list()).toEqual([])
+  })
+
+  it('rejects a client certificate with a valid identity but a corrupted CA signature', async () => {
+    const f = await fixture()
+    const raw = Buffer.from(new X509Certificate(pki.client.cert).raw)
+    raw[raw.length - 1] = raw[raw.length - 1]! ^ 1
+    const certificate = new X509Certificate(raw)
+    expect(certificate.publicKey.equals(new X509Certificate(pki.client.cert).publicKey)).toBe(true)
+    expect(certificate.verify(new X509Certificate(pki.server.ca).publicKey)).toBe(false)
+    await expect(f.client({ tls: { ...pki.client, cert: certificate.toString() } }).connect()).rejects.toThrow(/HARDWARE_(TLS_AUTHENTICATION_FAILED|CONNECTION_CLOSED)/)
+    expect(f.bridge.snapshot().terminals).toHaveLength(0)
+    expect(f.identities.list()).toEqual([]); expect(f.submit).not.toHaveBeenCalled()
+  })
+  it('rejects an expired client certificate even when its CA signature is valid', async () => {
+    const f = await fixture()
+    // Explicit past dates work on both OpenSSL 1.1.1 and 3.x. A negative -days
+    // value is rejected by newer versions and is not a portable expiry fixture.
+    await writeFile(join(pki.directory, 'expired.cnf'), '[ca]\ndefault_ca=test_ca\n[test_ca]\ndatabase=expired-index.txt\nnew_certs_dir=.\nserial=expired-serial.txt\ndefault_md=default\npolicy=test_policy\n[test_policy]\ncommonName=supplied\n')
+    await writeFile(join(pki.directory, 'expired-index.txt'), '')
+    await writeFile(join(pki.directory, 'expired-serial.txt'), '04\n')
+    execFileSync('openssl', ['ca', '-batch', '-notext', '-config', 'expired.cnf', '-cert', 'ca.crt', '-keyfile', 'ca.key', '-in', 'client.csr', '-out', 'expired.crt', '-startdate', '20000101000000Z', '-enddate', '20000102000000Z', '-extfile', 'client.ext'], { cwd: pki.directory, stdio: 'ignore', timeout: 10_000 })
+    const cert = await readFile(join(pki.directory, 'expired.crt'), 'utf8')
+    const certificate = new X509Certificate(cert)
+    expect(certificate.publicKey.equals(new X509Certificate(pki.client.cert).publicKey)).toBe(true)
+    expect(certificate.verify(new X509Certificate(pki.server.ca).publicKey)).toBe(true)
+    expect(Date.parse(certificate.validTo)).toBeLessThan(Date.now())
+    await expect(f.client({ tls: { ...pki.client, cert } }).connect()).rejects.toThrow(/HARDWARE_(TLS_AUTHENTICATION_FAILED|CONNECTION_CLOSED)/)
+    expect(f.bridge.snapshot().terminals).toHaveLength(0)
+    expect(f.identities.list()).toEqual([]); expect(f.submit).not.toHaveBeenCalled()
   })
 
   it('requires a client certificate rather than merely trusting the server', async () => {

@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile, readdir, realpath, rm } from 'node:fs/pro
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { FilesystemTool } from '@hunterzhu/pulse-adapters'
 import { replaceStateFile } from './atomic-file.js'
-import { assertRealHistoryDirectory } from './self-host-file-history.js'
+import { assertRealHistoryDirectory, syncFileHistoryDirectory } from './self-host-file-history.js'
 
 let walSequence = 0
 function nextOrder(): number {
@@ -144,8 +144,7 @@ export class FileSnapshotManager {
     }
     try { await replaceStateFile(temporary, target) }
     catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error }
-    const directory = await open(dirname(target), 'r').catch(() => undefined)
-    if (directory) { try { await directory.sync() } catch { /* not every filesystem can sync a directory */ } finally { await directory.close().catch(() => undefined) } }
+    await syncFileHistoryDirectory(dirname(target))
   }
 
   private async saveBlob(hash: string, bytes: Buffer): Promise<void> {
@@ -157,6 +156,8 @@ export class FileSnapshotManager {
     const existing = existingInfo ? await readFile(target) : undefined
     if (existing) {
       if (createHash('sha256').update(existing).digest('hex') !== hash) throw walError('WAL_BLOB_CORRUPT')
+      // A previous rename may have succeeded before its directory sync failed.
+      await syncFileHistoryDirectory(this.blobsDir)
       return
     }
     await this.atomicBytes(target, bytes)
@@ -312,11 +313,15 @@ export class FileSnapshotManager {
   /** Keep a verified preimage after crash recovery no longer needs the WAL record. */
   private async retainHistory(record: WalRecord): Promise<void> {
     await this.ensureDirs()
-    if ((await this.loadOwners(this.historyDir, [record])).length > 0) return
+    if ((await this.loadOwners(this.historyDir, [record])).length > 0) {
+      // Do not remove pending WAL until a previously renamed history entry is synced.
+      await syncFileHistoryDirectory(this.historyDir)
+      return
+    }
     const file = this.storeFile(this.historyDir, record)
     const existing = await lstat(file).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error })
     if (existing?.isSymbolicLink()) throw walError('WAL_PATH_ESCAPE')
-    if (existing) return
+    if (existing) { await syncFileHistoryDirectory(this.historyDir); return }
     await this.atomicBytes(file, Buffer.from(JSON.stringify({ ...record, status: 'committed' }), 'utf8'))
   }
 
@@ -515,7 +520,11 @@ export class FileSnapshotManager {
     if (journalInfo?.isSymbolicLink()) throw walError('WAL_PATH_ESCAPE')
     let journal: RollbackJournal
     const existingRaw = journalInfo ? await readFile(journalFile, 'utf8') : undefined
-    if (existingRaw) journal = JSON.parse(existingRaw) as RollbackJournal
+    if (existingRaw) {
+      journal = JSON.parse(existingRaw) as RollbackJournal
+      // A retry must persist a renamed journal before acting on its intent.
+      await syncFileHistoryDirectory(this.rollbacksDir)
+    }
     else {
       const records = [...await this.loadRecords(this.walDir), ...await this.loadRecords(this.historyDir)]
       journal = {
