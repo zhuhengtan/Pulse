@@ -76,8 +76,16 @@ export async function stopDevelopmentFrontend(options) {
   log(`正在停止开发前端（PID ${before.pid}，端口 ${before.port}）…`);
   process.kill(before.pid, 'SIGTERM');
   const until = Date.now() + timeoutMs;
-  while (alive(before.pid) && Date.now() < until) await pause(100);
+  while (alive(before.pid) && Date.now() < until) await pause(Math.min(100, Math.max(0, until - Date.now())));
   if (alive(before.pid)) throw new Error('开发前端未正常退出，未强杀，也未启动第二个前端。');
-  if (!await developmentPortAvailable(before.port, new URL(options.url).hostname.replace(/^\[|\]$/g, ''))) throw new Error('开发前端端口尚未释放，未启动第二个前端。');
+  const host = new URL(options.url).hostname.replace(/^\[|\]$/g, '');
+  // Process exit can precede socket release. Reuse the original stop deadline,
+  // and only probe availability: a replacement listener must never be signalled.
+  let available = await developmentPortAvailable(before.port, host);
+  while (!available && Date.now() < until) {
+    await pause(Math.min(100, Math.max(0, until - Date.now())));
+    available = await developmentPortAvailable(before.port, host);
+  }
+  if (!available) throw new Error('开发前端端口尚未释放，未启动第二个前端。');
   log('开发前端已正常退出，将启动新的 Vite。');
 }

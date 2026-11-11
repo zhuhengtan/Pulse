@@ -147,9 +147,10 @@ describe('shell explicit read roots', () => {
           if (name === 'protected.txt') await promisify(execFile)('icacls.exe', [path, '/inheritance:d'], { timeout: 10_000, killSignal: 'SIGKILL' })
         }
       }
-      const result = await runShell('node', ['-e', `
+      const probe = join(primary, 'readonly-probe.cjs')
+      await writeFile(probe, `
         const fs = require('node:fs');
-        const [primary, base] = process.argv.slice(1);
+        const [primary, base] = process.argv.slice(2);
         fs.mkdirSync(primary + '/new-dir');
         fs.writeFileSync(primary + '/allowed.txt', 'yes');
         fs.writeFileSync(primary + '/new-dir/nested.txt', 'nested');
@@ -168,7 +169,8 @@ describe('shell explicit read roots', () => {
           intermediate: denied(() => fs.writeFileSync(require('node:path').dirname(primary) + '/denied-parent.txt', 'bad')),
           intermediateDir: denied(() => fs.mkdirSync(require('node:path').dirname(primary) + '/denied-parent-dir')),
         }));
-      `, primary, f.base], { cwd: f.base, workspaceRoot: primary, canonicalReadRoots: [f.base, primary], timeoutMs: 120_000 })
+      `)
+      const result = await runShell('node', [probe, primary, f.base], { cwd: f.base, workspaceRoot: primary, canonicalReadRoots: [f.base, primary], timeoutMs: 120_000 })
       expect(result.code, result.stderr).toBe(0)
       expect(JSON.parse(result.stdout)).toEqual({ createFile: true, createDir: true, overwrite: true, remove: true, explicitWrite: true, explicitDelete: true, protectedWrite: true, protectedDelete: true, intermediate: true, intermediateDir: true })
       expect(await readFile(join(primary, 'allowed.txt'), 'utf8')).toBe('yes')
