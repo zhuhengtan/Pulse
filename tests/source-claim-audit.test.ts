@@ -9,6 +9,7 @@ import { buildTaskControllerProgram } from '../packages/server/src/task-controll
 import { sourceClaims, claimAssessmentError } from '../packages/server/src/task-controller/source-claim-audit.js'
 import { createLocalHost } from '../packages/server/src/index.js'
 import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
+import { sourceClaimHostTimeout } from './helpers/source-claim-timeouts.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
@@ -20,7 +21,7 @@ it('covers assertions in summaries/tables and Chinese prose with stable IDs, exc
   expect(targets[0]?.text).toContain('My own summary')
 })
 
-it.each(['current', 'external', 'paged'] as const)('checks actual Host source quotes and final-file freshness (%s)', async mode => {
+for (const mode of ['current', 'external', 'paged'] as const) it(`checks actual Host source quotes and final-file freshness (${mode})`, async () => {
   const external = mode === 'external', paged = mode === 'paged'
   vi.spyOn(fixtureDns, 'lookup').mockImplementation((async (host: string) => {
     if (host !== 'example.com') throw new Error('UNEXPECTED_FIXTURE_DNS:' + host)
@@ -29,7 +30,11 @@ it.each(['current', 'external', 'paged'] as const)('checks actual Host source qu
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-claim-host-'))
   const objective = 'Use https://example.com/docs to write report.md accurately explaining the documented flag.'
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)
-  let work = 0, claims = 0, modelRequests = 0, sourceFetches = 0, plans = 0
+  let work = 0, claims = 0, modelRequests = 0, sourceFetches = 0, plans = 0, writes = 0, waits = 0
+  const started = performance.now()
+  const phase = (name: string) => {
+    if (external && process.env.CI) console.info('[source-claim:freshness]', JSON.stringify({ phase: name, elapsedMs: Math.round(performance.now() - started), plans, claims, modelRequests, sourceFetches, writes, waits }))
+  }
   const report = 'The flag suppresses only rendered output; an index may still be written.\nSource: https://example.com/docs\n' + (paged ? '\n```text\n' + 'fixture padding\n'.repeat(440) + '```\n' : '')
   const workTools = [
     ...Array.from({ length: paged ? 5 : 1 }, (_, index) => ({ name: 'web_fetch', args: { url: 'https://example.com/docs', offset: index * 2000 } })),
@@ -47,44 +52,68 @@ it.each(['current', 'external', 'paged'] as const)('checks actual Host source qu
     if (request.messages.some((m: any) => m.content?.includes('You are the Pulse safety reviewer'))) return reply('APPROVE')
     if (text.includes('Create an executable plan')) {
       plans++
+      phase('plan')
       return reply(JSON.stringify({ tasks: [{ id: 'report', kind: 'edit', goal: 'Write report.md from the actual source', check: 'Source-supported bounded explanation', criterionIds: ids, dependsOn: [] }] }))
     }
     if (text.includes('Verify ONLY the active')) return reply(JSON.stringify({ status: 'passed', evidenceRefs: refs, note: 'Actual report saved' }))
     if (text.includes('Independently verify every ORIGINAL')) return reply(JSON.stringify({ criteria: ids.map(criterionId => ({ criterionId, status: 'passed', evidenceRefs: refs, rationale: 'Actual report and source' })) }))
     if (text.includes('Independently check EVERY supplied claim ID')) {
       claims++
+      phase('claim-audit')
       const context = request.messages.map((m: any) => { try { return JSON.parse(String(m.content)) } catch { return {} } }).find((m: any) => m.claimTargets)
       if (external) await writeFile(join(cwd, 'report.md'), 'Externally replaced after the audit started\n')
       return reply(JSON.stringify({ assessments: context.claimTargets.map((target: any) => ({ claimId: target.id, criterionId: ids[0], status: 'supported', sourceRefs: [context.primarySourceRefs[0]], quote: 'The flag suppresses rendered output.', rationale: 'The claim is bounded to the named rendered-output category, not every side effect.' })) }))
     }
     if (text.includes('Independently audit the delivered content') || text.includes('Perform an independent factual audit')) return reply(JSON.stringify({ criteria: ids.map(criterionId => ({ criterionId, status: 'passed', evidenceRefs: refs, rationale: 'Actual source support' })), findings: [] }))
     const call = workTools[work++]
+    if (call?.name === 'fs_write') writes++
     return call ? reply({ content: '', tool_calls: [{ id: 'fixture-' + work, function: { name: call.name, arguments: JSON.stringify(call.args) } }] }) : reply('Report saved.')
   }))
   const host = createLocalHost({ cwd, dataDir: join(cwd, '.host'), provider: { provider: 'openai-compatible', defaultModel: 'fixture', ...(paged || external ? { maxContextTokens: 128_000 } : {}) }, approvalMode: 'auto', taskController: true, jarvis: { enabled: false }, allowNetwork: true, networkHosts: ['example.com'], maxModelCalls: 40 })
   try {
     const c = await host.createConversation(), run = await host.sendMessage(c.id, { text: objective })
     for await (const event of run.events) if (event.type === 'waiting') {
+      waits++
       if (paged) throw new Error(JSON.stringify({ unexpectedWait: event.data, work, claims, modelRequests }))
       await run.reply(String(event.data!.effectId), { approved: true })
     }
     await run.outcome()
     const outcome = await run.taskOutcome()
+    phase('settled')
+    const usage = await run.usage()
+    const state = JSON.parse(await readFile(join(cwd, '.host/conversations', c.id, 'runs', run.id, 'task-controller.json'), 'utf8'))
+    expect(usage.modelCalls).toBeLessThanOrEqual(40)
+    expect(writes).toBe(1)
+    expect(waits).toBe(0)
     expect(claims).toBe(1)
-    expect((await run.usage()).modelCalls).toBe(modelRequests)
+    expect(usage.modelCalls).toBe(modelRequests)
     expect(outcome?.status === 'accepted', JSON.stringify(outcome)).toBe(!external)
     if (paged) { expect(sourceFetches).toBe(5); expect(plans).toBe(1); expect(await readFile(join(cwd, 'report.md'), 'utf8')).toBe(report) }
     if (external) {
       expect(JSON.stringify(outcome)).toContain('EVIDENCE_CHANGED')
+      expect(sourceFetches).toBe(1)
+      expect(plans).toBeGreaterThan(1)
+      expect(state.goalRecoveries).toBeGreaterThan(0)
+      expect(state.recoveryNoProgress).toBeGreaterThan(0)
+      expect(outcome?.blockers).toContainEqual(expect.objectContaining({ code: 'REVIEW_ATTEMPTS_EXHAUSTED' }))
+      const invalidations = state.reliability.invalidations.filter((item: any) => item.code === 'EVIDENCE_CHANGED')
+      expect(invalidations).toHaveLength(1)
+      expect(invalidations[0].refs.length).toBeGreaterThan(0)
+      for (const ref of invalidations[0].refs) {
+        expect(state.reliability.excludedRefs).toContain(ref)
+        expect(outcome?.evidenceRefs).not.toContain(ref)
+      }
+      expect(await readFile(join(cwd, 'report.md'), 'utf8')).toBe('Externally replaced after the audit started\n')
       // The native freshness failure stays a typed blocker even after unchanged replans exhaust their reviews.
       expect(outcome?.blockers).toContainEqual(expect.objectContaining({ code: 'EVIDENCE_CHANGED', recovery: 'reverify-current-inputs' }))
     }
     else {
-      const state = JSON.parse(await readFile(join(cwd, '.host/conversations', c.id, 'runs', run.id, 'task-controller.json'), 'utf8'))
       expect(state.sourceClaimAudit.assessments[0]).toMatchObject({ status: 'supported', quote: 'The flag suppresses rendered output.' })
     }
-  } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
-}, 30_000)
+  } finally { phase('close'); await host.close(); await rm(cwd, { recursive: true, force: true }); phase('cleaned') }
+// External mutation intentionally exercises unchanged replans through review exhaustion.
+// It already took 29.6s on Mac and exceeded 30s on Windows; retain that real Host work.
+}, sourceClaimHostTimeout(process.platform, mode))
 it('does not silently accept partial assertion coverage', () => {
   expect(sourceClaims([{ ref: 'a', text: 'All ' + 'x'.repeat(1800) }]).error).toContain('COVERAGE_INSUFFICIENT')
   expect(sourceClaims([{ ref: 'a', text: Array.from({ length: 97 }, () => 'Always true.').join('\n') }]).error).toContain('COVERAGE_INSUFFICIENT')

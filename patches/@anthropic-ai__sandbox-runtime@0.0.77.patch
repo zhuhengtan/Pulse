@@ -1,0 +1,22 @@
+diff --git a/dist/sandbox/linux-sandbox-utils.js b/dist/sandbox/linux-sandbox-utils.js
+--- a/dist/sandbox/linux-sandbox-utils.js
++++ b/dist/sandbox/linux-sandbox-utils.js
+@@ -1245,7 +1245,6 @@
+         const placement = restorePlacementOf(writePath);
+         if (placement === undefined)
+             continue;
+-        args.push('--bind', placement.source, placement.dest);
+         restoredWrites.push(placement);
+         logForDebugging(`[Sandbox Linux] Re-bound write path wiped by denyRead tmpfs: ${writePath}`);
+     }
+@@ -1267,6 +1266,10 @@
+         args.push('--ro-bind', placement.source, placement.dest);
+         restoredReads.push(placement);
+         logForDebugging(`[Sandbox Linux] Re-allowed read access within denied region: ${allowPath}`);
++    }
++    // Pulse modification: restore writable children after read-only ancestors.
++    for (const placement of restoredWrites) {
++        args.push('--bind', placement.source, placement.dest);
+     }
+     return { restoredWrites, restoredReads };
+ }

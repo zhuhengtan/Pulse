@@ -1,3 +1,4 @@
+import { resolveInstalledPackage, sandboxPackage, verifySandboxBundle } from '../release/dependency-bundle.mjs';
 import { createRequire } from 'node:module';
 import { writeRuntimeManifest } from '../../packages/desktop/src/runtime-manifest.mjs';
 import { optimizeRuntime } from './optimize-runtime.mjs';
@@ -24,6 +25,7 @@ if (process.platform !== 'win32')
     await chmod(join(destination, 'pulse', nodeName), 0o755);
 const bundle = join(destination, 'pulse');
 const optimization = await optimizeRuntime(bundle);
+optimization.sandbox = await verifySandboxBundle(await resolveInstalledPackage(sandboxPackage, join(bundle, 'app/node_modules/@hunterzhu/pulse-adapters')), { bundleRoot: join(bundle, 'app'), platform: process.platform, arch: process.arch });
 await copyFile(join(dirname(process.execPath), '../LICENSE'), join(bundle, 'LICENSES/Node.LICENSE')).catch(() => {});
 const require = createRequire(new URL('../../packages/server/package.json', import.meta.url));
 const pw = createRequire(require.resolve('@playwright/mcp'));

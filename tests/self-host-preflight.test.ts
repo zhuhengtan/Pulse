@@ -1,9 +1,10 @@
 import { mkdtemp, mkdir, writeFile, readFile, rm, realpath, symlink, copyFile } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, expect, it } from 'vitest'
-import { inspectStableEngine, main, selectInvoker } from '../scripts/self-host.mjs'
+import { afterEach, expect, it, vi } from 'vitest'
+import { inspectStableEngine, killOwnedChildGroups, main, selectInvoker } from '../scripts/self-host.mjs'
 import { createSnapshot, snapshotRuntimeDigest } from '../scripts/self-host-snapshot.mjs'
+import { trackControlledMain } from './helpers/self-host-controlled-main'
 
 const roots: string[] = []
 const put = async (file: string, body: string) => { await mkdir(dirname(file), { recursive: true }); await writeFile(file, body); return file }
@@ -18,7 +19,7 @@ async function fixture(verified = true) {
   const module = await put(join(server, 'dist/h5/workspaces.js'), `export class H5WorkspaceManager { static selfHostBeforeApply = 1; static selfHostInternalDataBoundary = 1; constructor() { throw new Error('PREFLIGHT_MUST_NOT_OPEN_DATA') } async get() {} async close() {} ${verified ? 'async finishVerified() {}' : ''} }`)
   return { root, cwd, data, engine, entry, module }
 }
-afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
+afterEach(async () => { vi.useRealTimers(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 it('rejects an old stable engine before authentication, model tasks, or opening any data', async () => {
   const f = await fixture(false), calls: string[] = []
@@ -182,37 +183,97 @@ it.each(['close', 'engine-change', 'integration-check', 'applied-then-throw'])('
 })
 
 it.each(['baseline', 'candidate', 'integration', 'project'])('classifies a real fixed-check timeout at the %s stage without claiming success', async phase => {
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+  vi.setSystemTime(0)
   const f = await fixture(), cwd = await realpath(f.cwd), candidate = join(f.root, 'candidate'), output = join(f.root, 'report')
   await mkdir(candidate)
   await put(join(f.data, 'conversations/conv/runs/run/task-outcome.json'), JSON.stringify({ status: 'accepted' }))
   const task = await put(join(f.root, 'task.txt'), 'fixture'), counter = join(f.root, 'count')
   const stop = ['baseline', 'candidate', 'integration', 'project'].indexOf(phase) + 1
-  const check = await put(join(f.root, 'check.mjs'), `import{existsSync,readFileSync,writeFileSync}from'node:fs';const file=${JSON.stringify(counter)};const n=existsSync(file)?Number(readFileSync(file,'utf8'))+1:1;writeFileSync(file,String(n));if(n===${stop}){setInterval(()=>{},1000)}else process.exit(n===1?23:0)`)
+  const ready = join(f.root, 'check-ready'), entries = join(f.root, 'check-entries.jsonl'), cliStarted = join(f.root, 'cli-started')
+  await writeFile(f.entry, `import{writeFileSync}from'node:fs';writeFileSync(${JSON.stringify(cliStarted)},'unexpected CLI')`)
+  const check = await put(join(f.root, 'check.mjs'), [
+    "import{existsSync,readFileSync,writeFileSync,appendFileSync,renameSync}from'node:fs'",
+    `const file=${JSON.stringify(counter)},ready=${JSON.stringify(ready)}`,
+    "const n=existsSync(file)?Number(readFileSync(file,'utf8'))+1:1;writeFileSync(file,String(n))",
+    `appendFileSync(${JSON.stringify(entries)},JSON.stringify({n,pid:process.pid,cwd:process.cwd()})+'\\n')`,
+    `if(n===${stop}){writeFileSync(ready+'.tmp',String(n));renameSync(ready+'.tmp',ready);setInterval(()=>{},1000)}else process.exit(n===1?23:0)`,
+  ].join('\n'))
   const checks = await put(join(f.root, 'checks.json'), JSON.stringify([[process.execPath, check]]))
-  let requests = 0
+  const requests: string[] = []
+  let mergeCalls = 0, closed = 0
   class Manager {
     static selfHostBeforeApply = 1
     static selfHostInternalDataBoundary = 1
     async get() { return { conversationId: 'conv', projectRoot: cwd, worktreeRoot: candidate, projectSubdirectory: '', status: 'pending', kind: 'git' } }
-    async close() {}
+    async close() { closed++ }
     async finishVerified(_id: string, validate: (cwd: string) => Promise<void>, options: {beforeApply: () => void}) {
+      mergeCalls++
       await validate(candidate); options.beforeApply(); await writeFile(join(cwd, 'applied'), 'yes'); return { status: 'merged' }
     }
   }
-  const code = await main(['--cwd',cwd,'--data-dir',f.data,'--cli-entry',f.entry,'--transport','h5','--task-file',task,'--checks-file',checks,'--output',output,'--max-attempts','1','--timeout-ms','200'], {
+  const pending = main(['--cwd',cwd,'--data-dir',f.data,'--cli-entry',f.entry,'--transport','h5','--task-file',task,'--checks-file',checks,'--output',output,'--max-attempts','1','--timeout-ms','200'], {
     importModule: async () => ({ H5WorkspaceManager: Manager }), log: () => {},
     http: { request: async (url: string) => {
-      requests++
+      requests.push(url)
       if(url==='/api/session/local')return{ok:true};if(url==='/api/session')return{capabilities:{selfHostExternalValidation:1,selfHostInternalDataBoundary:1}}
       if(url==='/api/projects')return[{id:'project',cwd}];if(url==='/api/conversations')return{id:'conv'}
       if(url.endsWith('/messages'))return{runId:'run'};if(url.endsWith('/state'))return{state:'succeeded'};return{ok:true}
     } },
   })
-  const report = JSON.parse(await readFile(join(output, 'report.json'), 'utf8'))
-  expect(code).toBe(5); expect(report).toMatchObject({status:'timeout',ok:false})
-  if(phase==='baseline')expect(requests).toBe(0)
-  if(phase==='project') { expect(report.delivery).toMatchObject({merge:'merged',validation:'project_failed'});expect(await readFile(join(cwd,'applied'),'utf8')).toBe('yes') }
-  else { expect(report.delivery.merge).not.toBe('merged');await expect(readFile(join(cwd,'applied'))).rejects.toMatchObject({code:'ENOENT'}) }
+  const owned = trackControlledMain(pending, 200)
+  try {
+    // Earlier real children finish normally. Only the selected child's ready
+    // receipt allows its original 200ms timer to fire, independent of OS startup.
+    const handshakeDeadline = performance.now() + 5000
+    let entered = false
+    while (performance.now() < handshakeDeadline) {
+      entered = await readFile(ready, 'utf8').then(value => Number(value) === stop, () => false)
+      if (entered) break
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    expect(entered).toBe(true)
+    vi.advanceTimersByTime(200)
+    const code = await owned.wait()
+    const children = (await readFile(entries, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    expect(await Promise.all(children.map(child => realpath(child.cwd)))).toEqual(await Promise.all([cwd, candidate, candidate, cwd].slice(0, stop).map(dir => realpath(dir))))
+    expect(children.map(child => child.n)).toEqual(Array.from({ length: stop }, (_, i) => i + 1))
+    expect(Number(await readFile(counter, 'utf8'))).toBe(stop)
+    for (const child of children) {
+      expect(() => process.kill(child.pid, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }))
+    }
+    expect(killOwnedChildGroups('SIGTERM')).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+    await expect(readFile(cliStarted)).rejects.toMatchObject({ code: 'ENOENT' })
+    const report = JSON.parse(await readFile(join(output, 'report.json'), 'utf8'))
+    expect(code).toBe(5); expect(report).toMatchObject({status:'timeout',ok:false})
+    const groups = [report.baseline.checks, ...report.attempts.map((attempt: any) => attempt.checks), ...(report.integrationChecks ?? []).map((entry: any) => entry.checks), ...(report.mergedChecks ? [report.mergedChecks] : [])]
+    expect(groups).toHaveLength(stop)
+    groups.forEach((checks: any[], index: number) => {
+      expect(checks).toHaveLength(1)
+      expect(checks[0].timedOut).toBe(index === stop - 1)
+      if (index === stop - 1) expect(checks[0]).toMatchObject({ passed: false, closeReason: 'timeout' })
+      else expect(checks[0]).toMatchObject({ code: index === 0 ? 23 : 0, passed: index !== 0 })
+    })
+    expect(report.error.message).toContain('SELF_HOST_FIXED_CHECK_TIMEOUT')
+    const expectedStages = ['baseline_checks', 'candidate_checks', 'integration_checks', 'project_checks'].slice(0, stop)
+    expect(report.stages.filter((entry: any) => ['baseline_checks', 'candidate_checks', 'integration_checks', 'project_checks'].includes(entry.name) && entry.state === 'started').map((entry: any) => entry.name)).toEqual(expectedStages)
+    expect(mergeCalls).toBe(stop >= 3 ? 1 : 0)
+    if(phase==='baseline') {
+      expect(requests).toEqual([])
+      expect(report.attempts).toEqual([])
+      expect(report.conversationId).toBe(null)
+      expect(closed).toBe(0)
+    } else {
+      expect(requests.filter(url => url === '/api/conversations')).toHaveLength(1)
+      expect(requests.filter(url => url.endsWith('/messages'))).toHaveLength(1)
+      expect(report.conversationId).toBe('conv')
+      expect(report.runId).toBe('run')
+      expect(closed).toBeGreaterThan(0)
+    }
+    if(phase==='project') { expect(report.delivery).toMatchObject({merge:'merged',validation:'project_failed'});expect(await readFile(join(cwd,'applied'),'utf8')).toBe('yes') }
+    else { expect(report.delivery.merge).not.toBe('merged');await expect(readFile(join(cwd,'applied'))).rejects.toMatchObject({code:'ENOENT'}) }
+  } finally { await owned.cleanup() }
 })
 
 it('rejects an engine without the internal-data guard before any HTTP request', async () => {

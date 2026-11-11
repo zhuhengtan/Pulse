@@ -5,13 +5,18 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { main, moduleFilePathFromUrl } from '../scripts/self-host.mjs'
+import { main, moduleFilePathFromUrl, listActiveChildren } from '../scripts/self-host.mjs'
+import { trackControlledMain } from './helpers/self-host-controlled-main'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SELF_HOST = path.resolve(HERE, '..', 'scripts', 'self-host.mjs')
 const NODE = process.execPath
+const realSetTimeout = globalThis.setTimeout
+const realPause = (ms: number) => new Promise<void>(resolve => realSetTimeout(resolve, ms))
+
+afterEach(() => vi.useRealTimers())
 
 it('resolves executable file URLs using native paths with encoded characters', () => {
   for (const name of ['entry.mjs', 'snow 雪 #100%.mjs']) {
@@ -266,17 +271,122 @@ it('多轮修复：真实失败命令、退出码和日志反馈给同一会话�
   expect(readFileSync(repaired, 'utf8')).toBe('fixed\n')
 })
 
+it('baseline 超时：真实检查就绪后耗尽预算，不进入 H5 或启动 CLI', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  const f = fixture('baseline-timeout')
+  const engine = fakeEngine(f.root, 'accepted')
+  const ready = path.join(f.root, 'baseline-ready')
+  const check = write(path.join(f.root, 'checks', 'wait.mjs'), [
+    "import { writeFileSync } from 'node:fs'",
+    `writeFileSync(${JSON.stringify(ready)}, 'ready')`,
+    'setInterval(() => {}, 1000)',
+  ].join('\n'))
+  f.writeChecks([[NODE, check]])
+  const calls: string[] = []
+  const pending = main([
+    '--task-file', f.taskFile, '--checks-file', f.checksFile,
+    '--cwd', f.cwd, '--data-dir', f.dataDir, '--output', f.outDir,
+    '--cli-entry', engine.entry, '--transport', 'h5', '--timeout-ms', '50',
+  ], {
+    http: { request: async (target: string) => { calls.push(target); throw new Error('HTTP_MUST_NOT_START') } },
+    importModule: async () => ({ H5WorkspaceManager: class { static selfHostBeforeApply = 1; static selfHostInternalDataBoundary = 1; async get() {} async close() {} async finishVerified() {} } }),
+    log: () => {},
+  })
+  const owned = trackControlledMain(pending, 50)
+  try {
+    // Keep real I/O progressing, but do not spend the check's timer until its
+    // own child acknowledges entry. This tests timeout, not Node startup speed.
+    const handshakeDeadline = Date.now() + 5000
+    while (!existsSync(ready) && Date.now() < handshakeDeadline) {
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    const entered = existsSync(ready)
+    expect(entered).toBe(true)
+    vi.advanceTimersByTime(50)
+    const code = await owned.wait()
+    const report = readJson(path.join(f.outDir, 'report.json'))
+    expect(code).toBe(5)
+    expect(report).toMatchObject({ status: 'timeout', ok: false, conversationId: null, runId: null })
+    expect(report.baseline.allPassed).toBe(false)
+    expect(report.baseline.checks).toHaveLength(1)
+    expect(report.baseline.checks[0]).toMatchObject({ timedOut: true, passed: false, closeReason: 'timeout' })
+    expect(report.error.message).toContain('SELF_HOST_FIXED_CHECK_TIMEOUT')
+    expect(report.attempts).toEqual([])
+    expect(calls).toEqual([])
+    expect(existsSync(engine.ready)).toBe(false)
+  } finally { await owned.cleanup() }
+})
+
+it.each(['late-spawn', 'late-ready', 'assertion'])('controlled main cleans up after %s fixture failure, including pending launches', async fault => {
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+  const f = fixture(`cleanup-${fault}`)
+  const engine = fakeEngine(f.root, 'accepted')
+  const ready = path.join(f.root, 'ready')
+  const check = write(path.join(f.root, 'checks', 'wait.mjs'), [
+    "import { writeFileSync } from 'node:fs'",
+    `setTimeout(() => writeFileSync(${JSON.stringify(ready)}, 'ready'), ${fault === 'late-ready' ? 250 : 0})`,
+    'setInterval(() => {}, 1000)',
+  ].join('\n'))
+  f.writeChecks([[NODE, check]])
+  const calls: string[] = []
+  let preflightEntered = false
+  const pending = main([
+    '--task-file', f.taskFile, '--checks-file', f.checksFile,
+    '--cwd', f.cwd, '--data-dir', f.dataDir, '--output', f.outDir,
+    '--cli-entry', engine.entry, '--transport', 'h5', '--timeout-ms', '50',
+  ], {
+    http: { request: async (target: string) => { calls.push(target); throw new Error('HTTP_MUST_NOT_START') } },
+    importModule: async () => {
+      preflightEntered = true
+      if (fault === 'late-spawn') await realPause(150)
+      return { H5WorkspaceManager: class { static selfHostBeforeApply = 1; static selfHostInternalDataBoundary = 1; async get() {} async close() {} async finishVerified() {} } }
+    },
+    log: () => {},
+  })
+  const owned = trackControlledMain(pending, 50)
+  const failAtBoundary = async () => {
+    try {
+      const deadline = performance.now() + 5000
+      while (performance.now() < deadline) {
+        if (fault === 'late-spawn' ? preflightEntered : fault === 'late-ready' ? listActiveChildren().length > 0 : existsSync(ready)) break
+        await realPause(5)
+      }
+      if (fault === 'late-spawn') { expect(preflightEntered).toBe(true); expect(listActiveChildren()).toEqual([]) }
+      else if (fault === 'late-ready') { expect(listActiveChildren()).toHaveLength(1); expect(existsSync(ready)).toBe(false) }
+      else expect(existsSync(ready)).toBe(true)
+      expect(false, `fixture ${fault} failure`).toBe(true)
+    } finally { await owned.cleanup() }
+  }
+  await expect(failAtBoundary()).rejects.toThrow(`fixture ${fault} failure`)
+  expect(owned.settled).toBe(true)
+  expect(owned.children.size).toBe(1)
+  expect(await pending).toBe(5)
+  expect(calls).toEqual([])
+  expect(existsSync(engine.ready)).toBe(false)
+  // Main has settled, so delayed setup cannot launch a replacement afterward.
+  await realPause(50)
+  expect(listActiveChildren()).toEqual([])
+  expect(vi.getTimerCount()).toBe(0)
+})
+
 it.each(['auth', 'poll'])('H5 总预算在 %s 耗尽：报告 timeout，保留已知任务身份且不重复启动 CLI', async (stage) => {
+  // Advance only when the intended HTTP phase is entered. The same 50ms
+  // option also limits baseline child startup, which is not under test here.
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+  vi.setSystemTime(0)
   const f = fixture(`h5-timeout-${stage}`)
   const engine = fakeEngine(f.root, 'accepted')
-  const check = write(path.join(f.root, 'checks', 'ok.mjs'), 'process.exit(0)\n')
+  // A real child deliberately takes longer than the H5 budget: reaching HTTP
+  // proves OS startup cannot select the timeout phase for this regression.
+  const check = write(path.join(f.root, 'checks', 'ok.mjs'), 'setTimeout(() => process.exit(0), 80)\n')
   f.writeChecks([[NODE, check]])
   const calls: string[] = []
   const http = {
-    request: async (target: string) => {
+    request: async (target: string, init: { timeout: number }) => {
       calls.push(target)
+      expect(init.timeout).toBe(50)
       if (target === '/api/session/local') {
-        if (stage === 'auth') await new Promise(resolve => setTimeout(resolve, 80))
+        if (stage === 'auth') vi.setSystemTime(50)
         return { ok: true }
       }
       if (target === '/api/session') return { capabilities: { selfHostExternalValidation: 1, selfHostInternalDataBoundary: 1 } }
@@ -285,13 +395,13 @@ it.each(['auth', 'poll'])('H5 总预算在 %s 耗尽：报告 timeout，保留�
       if (target === '/api/conversations/conv-timeout') return { ok: true }
       if (target === '/api/conversations/conv-timeout/messages') return { runId: 'run-timeout' }
       if (target === '/api/runs/run-timeout/state') {
-        await new Promise(resolve => setTimeout(resolve, 80))
+        vi.setSystemTime(50)
         throw Object.assign(new Error('fixture request timeout'), { name: 'AbortError' })
       }
       throw new Error(`Unexpected request: ${target}`)
     },
   }
-  const code = await main([
+  const pending = main([
     '--task-file', f.taskFile,
     '--checks-file', f.checksFile,
     '--cwd', f.cwd,
@@ -301,21 +411,30 @@ it.each(['auth', 'poll'])('H5 总预算在 %s 耗尽：报告 timeout，保留�
     '--transport', 'h5',
     '--timeout-ms', '50',
   ], { http, importModule: async () => ({ H5WorkspaceManager: class { static selfHostBeforeApply = 1; static selfHostInternalDataBoundary = 1; async get() {} async close() {} async finishVerified() {} } }), log: () => {} })
-  const report = readJson(path.join(f.outDir, 'report.json'))
-  expect(report.status).toBe('timeout')
-  expect(code).toBe(5)
-  expect(report.ok).toBe(false)
-  expect(existsSync(engine.ready)).toBe(false)
-  if (stage === 'auth') {
-    expect(calls).toEqual(['/api/session/local'])
-    expect(report.conversationId).toBe(null)
-  } else {
-    expect(report.conversationId).toBe('conv-timeout')
-    expect(report.runId).toBe('run-timeout')
-    expect(report.taskUrl).toContain('/work/conv-timeout')
-    expect(calls.filter(target => target === '/api/conversations')).toHaveLength(1)
-    expect(calls.filter(target => target.endsWith('/messages'))).toHaveLength(1)
-  }
+  const owned = trackControlledMain(pending, 50)
+  try {
+    const code = await owned.wait()
+    const report = readJson(path.join(f.outDir, 'report.json'))
+    expect(report.baseline.allPassed).toBe(true)
+    expect(report.baseline.checks[0].code).toBe(0)
+    expect(report.status).toBe('timeout')
+    expect(code).toBe(5)
+    expect(report.ok).toBe(false)
+    expect(existsSync(engine.ready)).toBe(false)
+    if (stage === 'auth') {
+      expect(calls).toEqual(['/api/session/local'])
+      expect(report.conversationId).toBe(null)
+      expect(report.runId).toBe(null)
+    } else {
+      expect(calls.at(-1)).toBe('/api/runs/run-timeout/state')
+      expect(calls.filter(target => target.endsWith('/state'))).toHaveLength(1)
+      expect(report.conversationId).toBe('conv-timeout')
+      expect(report.runId).toBe('run-timeout')
+      expect(report.taskUrl).toContain('/work/conv-timeout')
+      expect(calls.filter(target => target === '/api/conversations')).toHaveLength(1)
+      expect(calls.filter(target => target.endsWith('/messages'))).toHaveLength(1)
+    }
+  } finally { await owned.cleanup() }
 })
 
 // 覆盖清单（对应 scripts/self-host.mjs 四处缺陷的回归）：
@@ -368,6 +487,8 @@ it('H5 离线：认证先于查项目，且只置顶本次新建 conversation', 
 })
 
 it('H5 离线：认证后总预算耗尽立即停止，不查项目也不建会话', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(0)
   const { createH5EngineInvoker } = await import('../scripts/self-host.mjs')
   const fs = await import('node:fs')
   const os = await import('node:os')
@@ -379,7 +500,8 @@ it('H5 离线：认证后总预算耗尽立即停止，不查项目也不建会�
       const pathname = String(target).split('?')[0]
       const method = init.method ?? 'GET'
       calls.push({ path: pathname, method })
-      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(init.timeout).toBe(5)
+      vi.setSystemTime(5)
       return { ok: true }
     },
   }

@@ -241,6 +241,9 @@ describe('whole-run provider attempt budget', () => {
     } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
   })
 
+  // This deliberately uncooperative provider consumes up to 16 persisted Host
+  // attempts, including parent diagnosis after denial. Allow time for those
+  // checkpoints under CI contention; provider admission remains capped at 16.
   it.each(['ollama', 'deepseek'] as const)('preserves a %s worker denial while bounding parent diagnosis by the original budget', async reviewer => {
     vi.stubEnv('PULSE_TEST_REVIEW_KEY', 'fixture-key')
     const root = await mkdtemp(join(tmpdir(), 'pulse-controller-denial-'))
@@ -264,16 +267,23 @@ describe('whole-run provider attempt budget', () => {
       expect(primary + reviews + summaries).toBeLessThanOrEqual(16)
       const usage = await run.usage()
       expect(usage.modelCalls).toBe(primary + reviews + summaries)
+      expect(usage.budget?.limit).toBe(16)
+      expect(usage.budget?.used).toBe(usage.modelCalls)
+      expect(usage.budget?.purposes.approval).toBe(1)
       expect(usage.budget?.purposes['completion-summary'] ?? 0).toBe(summaries)
       expect((await run.taskOutcome())?.status).not.toBe('accepted')
       const runDirectory = join(root, 'data/conversations', conversation.id, 'runs', run.id)
+      const ledger = JSON.parse(await readFile(join(runDirectory, 'model-budget.json'), 'utf8'))
+      expect(ledger).toMatchObject({ limit: 16, used: usage.modelCalls, purposes: { approval: 1 } })
+      expect(ledger.usageReceipts).toHaveLength(usage.modelCalls)
+      expect(new Set(ledger.usageReceipts).size).toBe(usage.modelCalls)
       const snapshot = await hydrateRuntimeResultBodies(JSON.parse(await readFile(join(runDirectory, 'runtime.json'), 'utf8')), new FileRuntimeContentStore(join(runDirectory, 'runtime-results')))
       const commands = snapshot.state.state.effects.map(([, effect]: any) => effect).filter((effect: any) => effect.kind === 'tool' && effect.input?.name === 'shell.exec')
       expect(commands.length).toBeGreaterThanOrEqual(1)
       expect(commands.filter((effect: any) => effect.outcome?.status === 'succeeded')).toHaveLength(0)
       expect(commands.every((effect: any) => effect.outcome?.error?.code === 'AI_APPROVAL_DENIED')).toBe(true)
     } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
-  })
+  }, process.platform === 'win32' ? 180_000 : 30_000)
 })
 
 describe('failed request diagnostics and direct create protection', () => {

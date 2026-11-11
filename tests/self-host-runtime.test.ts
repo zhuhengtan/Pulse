@@ -1,12 +1,33 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterAll, beforeAll, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
 // @ts-expect-error standalone script
 import { SelfHostRuntime, PROTOCOL } from '../scripts/self-host-runtime.mjs'
 // @ts-expect-error standalone script
 import { createSnapshot } from '../scripts/self-host-snapshot.mjs'
 
+const nativeSetTimeout = globalThis.setTimeout
+const nativeClearTimeout = globalThis.clearTimeout
+async function bounded<T>(pending: Promise<T>, label: string, timeoutMs = 5000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([pending, new Promise<never>((_, reject) => {
+      timer = nativeSetTimeout(() => reject(new Error(`fixture ${label} deadline`)), timeoutMs)
+    })])
+  } finally { if (timer) nativeClearTimeout(timer) }
+}
+afterEach(() => vi.useRealTimers())
+const blockedErrors = {
+  badIdentity: 'identity/protocol mismatch',
+  silentResume: 'resume timeout',
+  silentStop: 'stop exit unconfirmed',
+  healthError: 'initialize failed: CHILD_ERROR_REDACTED',
+  healthNoOk: 'maintenance lease required',
+  wrongPid: 'runtime health identity/version mismatch',
+  wrongVersion: 'runtime health identity/version mismatch',
+  wrongPort: 'runtime health identity/version mismatch',
+}
 let tmp: string
 const specs: Record<string, any> = {}
 beforeAll(async () => {
@@ -26,7 +47,10 @@ let leaseId = 'lease', active = false;
 const serverInstanceId = require('node:crypto').randomUUID();
 function release() { if (active) { fs.unlinkSync(writer); active = false; } }
 process.on('disconnect', () => { release(); process.exit(0); });
-process.on('message', m => {
+process.on('message', async m => {
+  // Slow real initialization must not masquerade as the selected rejection.
+  if (m.type === 'initialize' && ${JSON.stringify(Object.hasOwn(blockedErrors, kind))}) await new Promise(resolve => setTimeout(resolve, 250));
+  fs.appendFileSync(path.join(process.env.PULSE_DATA_DIR, 'phases'), JSON.stringify({ type: m.type, pid: process.pid }) + '\\n');
   if (m.type === 'stop') { if (${JSON.stringify(kind)} === 'silentStop') return; release(); process.exit(0); }
   let result = { ok: true, mode: 'maintenance', idle: true, leaseId, serverPid: process.pid, serverInstanceId, port: 12345, serverVersion: '1.0.0' };
   if (${JSON.stringify(kind)} === 'wrongPid') result.serverPid++;
@@ -96,27 +120,88 @@ it('keeps a busy owned child running and refuses concurrent operations', async (
   }
 })
 
-for (const kind of ['badIdentity', 'silentResume', 'silentStop', 'healthError', 'healthNoOk', 'wrongPid', 'wrongVersion', 'wrongPort']) {
+for (const [kind, expectedError] of Object.entries(blockedErrors)) {
   it(`blocks conservatively on ${kind}, retaining the lock without launching a replacement`, async () => {
+    // Child timers remain real. Only advance the controller's original 200ms
+    // operation timer after the silent target phase acknowledges entry.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const root = path.join(tmp, `blocked-${kind}`)
     const runtime = new SelfHostRuntime({ controlRoot: root, timeoutMs: 200 })
+    const operationDeadline = performance.now() + 5000
+    const remainingOperation = () => Math.max(1, operationDeadline - performance.now())
+    const phasesFile = path.join(root, 'data', 'phases')
+    const readPhases = async (): Promise<Array<{ type: string; pid: number }>> => {
+      const text = await fs.readFile(phasesFile, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error })
+      // An append may be in progress while the child is publishing its receipt.
+      return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(line => JSON.parse(line))
+    }
     try {
       if (kind === 'silentStop') {
-        await runtime.start(specs[kind])
-        await expect(runtime.switch(specs.good)).rejects.toThrow('stop exit unconfirmed')
-      } else await expect(runtime.start(specs[kind])).rejects.toThrow()
+        const started = await bounded(runtime.start(specs[kind]), 'start', remainingOperation())
+        expect(started.phase).toBe('active')
+        expect((await readPhases()).map(entry => entry.type)).toEqual(['initialize', 'probe', 'resume'])
+      }
+      // Attach the rejection handler immediately while the real IPC progresses.
+      const outcome = (kind === 'silentStop' ? runtime.switch(specs.good) : runtime.start(specs[kind]))
+        .then(() => null, (error: Error) => error)
+      if (kind === 'silentResume' || kind === 'silentStop') {
+        const target = kind === 'silentResume' ? 'resume' : 'stop'
+        const deadline = operationDeadline
+        let entered = false
+        while (performance.now() < deadline) {
+          entered = (await readPhases()).some(entry => entry.type === target)
+          if (entered) break
+          await new Promise<void>(resolve => nativeSetTimeout(resolve, 5))
+        }
+        // A failed handshake goes straight to owned-child cleanup, whose
+        // disconnect also settles any pending controller request.
+        expect(entered).toBe(true)
+        vi.advanceTimersByTime(200)
+        const failure = await bounded(outcome, target, remainingOperation())
+        expect(failure?.message).toBe(expectedError)
+      } else {
+        expect((await bounded(outcome, 'initialize rejection', remainingOperation()))?.message).toBe(expectedError)
+      }
+      const expectedPhases = kind === 'silentStop' ? ['initialize', 'probe', 'resume', 'quiesce', 'stop']
+        : kind === 'silentResume' ? ['initialize', 'probe', 'resume'] : ['initialize']
+      const receipts = await readPhases()
+      expect(receipts.map(entry => entry.type)).toEqual(expectedPhases)
+      expect(new Set(receipts.map(entry => entry.pid))).toEqual(new Set([runtime.child.process.pid]))
       expect(runtime.status().phase).toBe('blocked')
       expect(runtime.status().identity.digest).toBe(specs[kind].expectedDigest)
       expect((await fs.stat(path.join(root, 'state', 'lock'))).isDirectory()).toBe(true)
+      expect(runtime.history.filter((entry: any) => entry.phase === 'launch_planned')).toHaveLength(1)
+      const saved = JSON.parse(await fs.readFile(path.join(root, 'state', 'journal.json'), 'utf8'))
+      expect(saved.error).toBe(expectedError)
+      expect(runtime.child.process.listenerCount('message')).toBe(0)
+      expect(vi.getTimerCount()).toBe(0)
       await expect(runtime.switch(specs.good)).rejects.toThrow('runtime not active')
       await expect(new SelfHostRuntime({ controlRoot: root }).start(specs.good)).rejects.toThrow()
+      expect(await readPhases()).toEqual(receipts)
     } finally {
-      const child = runtime.child.process
-      if (!runtime.child.exited) {
-        const exited = new Promise(resolve => child.once('exit', resolve))
-        child.disconnect()
-        await exited
+      const slot = runtime.child
+      if (slot && !slot.exited) {
+        const child = slot.process
+        const exited = new Promise<void>(resolve => child.once('exit', () => resolve()))
+        if (child.connected) child.disconnect()
+        try { await bounded(exited, 'cooperative cleanup', 2000) }
+        catch (error) {
+          // Own fixture only. Two 2s cleanup bounds plus the 5s operation
+          // watchdog fit inside the unchanged 10s outer test budget.
+          child.kill('SIGKILL')
+          await bounded(exited, 'forced cleanup', 2000)
+          throw error
+        }
       }
+      await runtime.journalQueue
+      if (slot) {
+        expect(slot.exited).toBe(true)
+        expect(slot.process.connected).toBe(false)
+        expect(slot.process.listenerCount('message')).toBe(0)
+        expect(() => process.kill(slot.process.pid, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }))
+      }
+      await expect(fs.stat(path.join(root, 'data', 'writer'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(vi.getTimerCount()).toBe(0)
     }
   })
 }

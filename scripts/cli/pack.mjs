@@ -1,9 +1,8 @@
+import { copyPackagePayload, copyProductionDependency, resolveInstalledPackage, sandboxPackage, verifySandboxBundle, portableTarArguments } from '../release/dependency-bundle.mjs'
 import { createHash } from 'node:crypto'
-import { createRequire } from 'node:module'
 import { chmod, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { realpath } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
-import { dirname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repo = fileURLToPath(new URL('../../', import.meta.url))
@@ -27,115 +26,35 @@ for (const name of ['cli', 'server', 'data', 'runtime', 'adapters', 'tool-sdk'])
   if (name === 'server') await cp(join(repo, 'packages/server/native'), join(target, 'native'), { recursive: true }).catch(error => { if (error.code !== 'ENOENT') throw error })
   await cp(join(source, 'package.json'), join(target, 'package.json'))
 }
-await cp(join(repo, 'node_modules/zod'), join(stage, 'pulse/app/node_modules/zod'), { recursive: true, dereference: true })
+await copyPackagePayload(join(repo, 'node_modules/zod'), join(stage, 'pulse/app/node_modules/zod'))
 await cp(join(repo, 'node_modules/zod/LICENSE'), join(stage, 'pulse/LICENSES/zod.MIT.txt'))
 
-// The published CLI is self-contained, so copy its production dependency
-// closure into the staged node_modules tree. Keeping dependencies nested under
-// their owning package preserves pnpm's resolution for duplicate versions.
-const dependencyList = spawnSync(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['list', '--prod', '--depth', 'Infinity', '--filter', '@hunterzhu/pulse-cli', '--json'], {
-  cwd: repo,
-  encoding: 'utf8',
-  shell: process.platform === 'win32',
-})
-if (dependencyList.status !== 0) throw new Error(dependencyList.stderr || 'Unable to inspect CLI production dependencies')
-const dependencyRoot = JSON.parse(dependencyList.stdout)[0]
-const runtimeRequire = createRequire(import.meta.url)
-const copiedDependencies = new Set()
-const dependencyNodesByPath = new Map()
+// Rebuild production closures without local package-manager links or shims.
+const skipDependency = name => name.startsWith('@hunterzhu/') || name.startsWith('@types/')
+const resolveDependencySource = resolveInstalledPackage
+const copyDependency = (name, source, target) => copyProductionDependency(name, source, target, { skip: skipDependency })
 
-function indexDependencyNodes(dependencies) {
-  for (const [name, dependency] of Object.entries(dependencies ?? {})) {
-    if (dependency?.path) {
-      const existing = dependencyNodesByPath.get(dependency.path)
-      if (!existing || Object.keys(dependency.dependencies ?? {}).length > Object.keys(existing.dependencies ?? {}).length) {
-        dependencyNodesByPath.set(dependency.path, { name, dependency })
-      }
-      indexDependencyNodes(dependency.dependencies)
-    }
-  }
-}
-
-indexDependencyNodes(dependencyRoot.dependencies)
-
-async function resolveDependencySource(name, parentSource) {
-  const treeDependency = dependencyNodesByPath.get(parentSource)?.dependency.dependencies?.[name]
-  if (treeDependency?.path) {
-    try { return await realpath(treeDependency.path) } catch { /* optional platform package may not be installed here */ }
-  }
-  try {
-    return await realpath(join(parentSource, 'node_modules', name))
-  } catch {
-    const resolved = runtimeRequire.resolve(name, { paths: [parentSource] })
-    let directory = dirname(resolved)
-    while (directory !== dirname(directory)) {
-      try {
-        const manifest = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'))
-        if (manifest.name === name) return directory
-      } catch {
-        // Keep walking until the package root is found.
-      }
-      directory = dirname(directory)
-    }
-    throw new Error(`Unable to locate package root for ${name} from ${parentSource}`)
-  }
-}
-
-async function copyDependency(name, source, target) {
-  if (name.startsWith('@hunterzhu/') || name === 'zod' || name.startsWith('@types/')) return
-  const key = `${source}\0${target}`
-  if (copiedDependencies.has(key)) return
-  copiedDependencies.add(key)
-  await mkdir(dirname(target), { recursive: true })
-  await cp(source, target, { recursive: true, dereference: true })
-
-  const manifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'))
-  const dependencies = { ...manifest.dependencies }
-  for (const dependencyName of Object.keys(dependencies)) {
-    if (dependencyName.startsWith('@hunterzhu/') || dependencyName === 'zod' || dependencyName.startsWith('@types/')) continue
-    const dependencySource = await resolveDependencySource(dependencyName, source)
-    await copyDependency(dependencyName, dependencySource, join(target, 'node_modules', dependencyName))
-  }
-  for (const dependencyName of Object.keys(manifest.optionalDependencies ?? {})) {
-    if (dependencyName.startsWith('@hunterzhu/') || dependencyName === 'zod' || dependencyName.startsWith('@types/')) continue
-    try {
-      const dependencySource = await resolveDependencySource(dependencyName, source)
-      await copyDependency(dependencyName, dependencySource, join(target, 'node_modules', dependencyName))
-    } catch {
-      // Optional platform integrations may not be installed on this host.
-    }
-  }
-}
-
-for (const [name, dependency] of Object.entries(dependencyRoot.dependencies ?? {})) {
-  if (!dependency?.path || name.startsWith('@hunterzhu/') || name === 'zod' || name.startsWith('@types/')) continue
-  await copyDependency(name, dependency.path, join(stage, 'pulse/app/node_modules', name))
-}
-
-// `pnpm list --filter pulse-cli` nests server/runtime/adapter dependencies
-// below workspace links. Walk each bundled workspace package explicitly so
-// its production dependencies are copied beside the package that imports them.
+// Walk each workspace package so each dependency resolves beside its owner.
 for (const packageName of ['cli', 'server', 'data', 'runtime', 'adapters', 'tool-sdk']) {
   const source = join(repo, `packages/${packageName}`)
   const packageManifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'))
   const target = join(stage, 'pulse/app/node_modules', packageManifest.name)
   const dependencies = { ...packageManifest.dependencies }
   for (const dependencyName of Object.keys(dependencies)) {
-    if (dependencyName.startsWith('@hunterzhu/') || dependencyName === 'zod' || dependencyName.startsWith('@types/')) continue
+    if (skipDependency(dependencyName)) continue
     const dependencySource = await resolveDependencySource(dependencyName, source)
     await copyDependency(dependencyName, dependencySource, join(target, 'node_modules', dependencyName))
   }
   for (const dependencyName of Object.keys(packageManifest.optionalDependencies ?? {})) {
-    if (dependencyName.startsWith('@hunterzhu/') || dependencyName === 'zod' || dependencyName.startsWith('@types/')) continue
-    try {
-      const dependencySource = await resolveDependencySource(dependencyName, source)
-      await copyDependency(dependencyName, dependencySource, join(target, 'node_modules', dependencyName))
-    } catch {
-      // Keep the package usable on the build host when optional binaries for
-      // other operating systems are absent from the local pnpm store.
-    }
+    if (skipDependency(dependencyName)) continue
+    let dependencySource
+    try { dependencySource = await resolveDependencySource(dependencyName, source) }
+    catch (error) { if (['MODULE_NOT_FOUND', 'ENOENT'].includes(error.code)) continue; throw error }
+    await copyDependency(dependencyName, dependencySource, join(target, 'node_modules', dependencyName))
   }
 }
+
+await verifySandboxBundle(await resolveInstalledPackage(sandboxPackage, join(stage, 'pulse/app/node_modules/@hunterzhu/pulse-adapters')))
 
 // Keep the launcher outside the package, but load the complete published CLI
 // distribution so relative imports such as ./commands/interactive.js resolve
@@ -246,7 +165,13 @@ The installer adds a launcher under \`~/.pulse/bin\` (or \`%USERPROFILE%\\.pulse
 const tar = join(out, `pulse-${version}.tar.gz`)
 const tempTar = join(out, `.pulse-${version}.tmp.tar.gz`)
 await rm(tempTar, { force: true })
-const packed = spawnSync('tar', ['-czf', tempTar, '-C', stage, 'pulse'], { stdio: 'inherit' })
+const tarEnv = { ...process.env, COPYFILE_DISABLE: '1' }
+// Do not let host tar/compressor options add names or extended metadata.
+delete tarEnv.TAR_OPTIONS; delete tarEnv.GZIP
+const tarVersion = spawnSync('tar', ['--version'], { encoding: 'utf8', env: tarEnv })
+if (tarVersion.status !== 0) throw new Error('TAR_VERSION_CHECK_FAILED')
+const tarArgs = portableTarArguments(tarVersion.stdout, tempTar, stage)
+const packed = spawnSync('tar', tarArgs, { stdio: 'inherit', env: tarEnv })
 if (packed.status !== 0) process.exit(packed.status ?? 1)
 await rename(tempTar, tar)
 const digest = createHash('sha256').update(await readFile(tar)).digest('hex')

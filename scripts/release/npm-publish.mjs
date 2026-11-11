@@ -1,30 +1,24 @@
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { npmCommand, stageNpmPackages } from './npm-stage.mjs'
 
 const repo = fileURLToPath(new URL('../../', import.meta.url))
-const stage = await mkdtemp(join(tmpdir(), 'pulse-npm-release-'))
-const order = ['data', 'runtime', 'tool-sdk', 'adapters', 'server', 'cli']
-const manifests = new Map()
-for (const name of order) manifests.set(name, JSON.parse(await readFile(join(repo, `packages/${name}/package.json`), 'utf8')))
-const versions = new Map([...manifests.values()].map((data) => [data.name, data.version]))
+// An explicit dry-run destination retains inspectable tarballs; publication
+// always owns a fresh temporary stage and cannot consume stale artifacts.
+const retained = process.env.NPM_DRY_RUN === '1' && process.env.PULSE_NPM_ARTIFACTS_DIR
+if (retained) await mkdir(resolve(retained), { recursive: true })
+const stage = await mkdtemp(join(retained ? resolve(retained) : tmpdir(), 'pulse-npm-release-'))
 try {
-  for (const name of order) {
-    const source = join(repo, `packages/${name}`); const target = join(stage, name)
-    await mkdir(target, { recursive: true }); await cp(join(source, 'dist'), join(target, 'dist'), { recursive: true })
-    if (name === 'server') await cp(join(repo, 'packages/web/dist'), join(target, 'dist/web'), { recursive: true })
-  if (name === 'server') await cp(join(repo, 'packages/server/native'), join(target, 'native'), { recursive: true }).catch(error => { if (error.code !== 'ENOENT') throw error })
-    await cp(join(source, 'README.md'), join(target, 'README.md'))
-    if (name === 'cli') await cp(join(source, 'scripts'), join(target, 'scripts'), { recursive: true })
-    const data = structuredClone(manifests.get(name))
-    for (const dependencies of [data.dependencies, data.optionalDependencies, data.peerDependencies]) for (const [dependency, value] of Object.entries(dependencies ?? {})) if (value === 'workspace:*' && versions.has(dependency)) dependencies[dependency] = versions.get(dependency)
-    await writeFile(join(target, 'package.json'), `${JSON.stringify(data, null, 2)}\n`)
-    const args = ['publish', target, '--access', 'public', '--ignore-scripts']
-    if (process.env.NPM_DRY_RUN === '1') args.push('--dry-run')
+  const packages = await stageNpmPackages(repo, stage)
+  await writeFile(join(stage, 'artifacts.json'), JSON.stringify(packages.map(({ archive, ...item }) => ({ ...item, filename: archive.split(/[\\/]/).pop() })), null, 2) + '\n')
+  // No publish invocation, including dry-run, happens until every package is
+  // fully packed and checked. Publish these exact inspected bytes in order.
+  for (const item of process.env.NPM_DRY_RUN === '1' ? [] : packages) {
+    const args = ['publish', item.archive, '--access', 'public', '--ignore-scripts']
     if (process.env.NPM_PROVENANCE === '1') args.push('--provenance')
-    const result = spawnSync('npm', args, { stdio: 'inherit', env: process.env })
-    if (result.status !== 0) process.exit(result.status ?? 1)
+    process.stdout.write(npmCommand(args, { cwd: stage }))
   }
-} finally { await rm(stage, { recursive: true, force: true }) }
+  if (retained) console.log(`Verified npm artifacts: ${stage}`)
+} finally { if (!retained) await rm(stage, { recursive: true, force: true }) }

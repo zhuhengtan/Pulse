@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FilesystemTool, runShell } from '@hunterzhu/pulse-adapters'
+import { encodeSandboxCommand } from '../packages/adapters/src/tools/shell.js'
 describe('native filesystem and shell contracts', () => {
 it('enforces filesystem sandbox and runs bounded shell output', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-m3-'))
@@ -20,8 +21,14 @@ it('enforces filesystem sandbox and runs bounded shell output', async () => {
       expect(unicode.stdout).toBe('雪')
       expect(Buffer.byteLength(unicode.stdout, 'utf8')).toBeLessThanOrEqual(4)
       expect(unicode.truncated).toBe(true)
-      const argv = ['', 'two words', `quote'" ; $(touch ${join(root, 'injected')})`, 'line\nbreak', '雪', `value 0|${'x'.repeat(1300)}`]
-      const echoed = await runShell(process.execPath, ['-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))', ...argv], { cwd: root })
+      const argv = ['', 'two words', `quote'" ; $(touch ${join(root, 'injected')})`, 'line\nbreak', '雪', `value 0|${'x'.repeat(750)}`]
+      const echoArgs = ['-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))', ...argv]
+      // Include the full executable, script and fixture path in the Windows
+      // transport check, even when this native round-trip runs on another OS.
+      const windowsNode = process.platform === 'win32' ? process.execPath : String.raw`C:\hostedtoolcache\windows\node\22.23.4\x64\node.exe`
+      const windowsRoot = process.platform === 'win32' ? root : String.raw`C:\Users\runneradmin\AppData\Local\Temp\pulse-m3-XXXXXX`
+      expect(encodeSandboxCommand(windowsNode, echoArgs.map(arg => arg.replace(join(root, 'injected'), windowsRoot + '\\injected')), 'win32').length).toBeLessThanOrEqual(8000)
+      const echoed = await runShell(process.execPath, echoArgs, { cwd: root })
       expect(echoed.code, echoed.stderr).toBe(0)
       expect(JSON.parse(echoed.stdout)).toEqual(argv)
       await expect(readFile(join(root, 'injected'), 'utf8')).rejects.toThrow()

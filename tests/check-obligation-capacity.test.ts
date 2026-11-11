@@ -8,6 +8,7 @@ import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 import * as adapters from '@hunterzhu/pulse-adapters'
 import { fixtureNodeChecks } from './helpers/fixture-node-check.js'
+import { encodeSandboxCommand } from '../packages/adapters/src/tools/shell.js'
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
@@ -171,8 +172,13 @@ it.each([
   const original = 'export const value = 2\n'
   await writeFile(join(cwd, 'feature.mjs'), original)
   await writeFile(join(cwd, 'c0.test.mjs'), body(0))
-  const pattern = `value 0|${'x'.repeat(1300)}`
+  // The key must exceed its 1000-character hash threshold while the complete
+  // Windows command still fits the real 8000-character encoded transport.
+  const pattern = `value 0|${'x'.repeat(950)}`
   const args = ['--test', `--test-name-pattern=${pattern}`, 'c0.test.mjs']
+  expect(JSON.stringify(['argv', 'node', args, '.']).length).toBeGreaterThan(1000)
+  const windowsNode = process.platform === 'win32' ? process.execPath : String.raw`C:\hostedtoolcache\windows\node\22.23.4\x64\node.exe`
+  expect(encodeSandboxCommand(windowsNode, args, 'win32').length).toBeLessThanOrEqual(8000)
   const executor = await checkExecutor(cwd, [names[0]!], [args], original)
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)
   let work = 0
@@ -194,18 +200,23 @@ it.each([
     if (work < turns.length) { const turn = turns[work++]; return turn ? tools(...turn) : chat('Patch applied; checks pending.') }
     return chat('Completed with the latest actual test results.')
   }))
-  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture', maxContextTokens: 1_000_000, maxOutputTokens: 4096 }, taskController: true, jarvis: { enabled: false }, approvalMode: 'auto', maxModelCalls: 40 })
+  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture', maxContextTokens: 1_000_000, maxOutputTokens: 4096 }, taskController: true, jarvis: { enabled: false }, approvalMode: 'auto', maxModelCalls: 40, execPolicy: { rules: [{ pattern: ['node', ...args], decision: 'prompt' }] } })
   try {
     const conv = await host.createConversation(), run = await host.sendMessage(conv.id, { text: objective })
-    // The long pattern is outside the automatic allowlist, so the user approves exactly this fixture's explicit local check;
-    // anything else (another tool, argv or an ask question) fails the test and nothing is auto-approved by production.
+    // An explicit policy requires the exact long check to wait for the user,
+    // independently of reviewer availability or necessary-verification heuristics.
+    expect(await host.checkExecPolicy({ command: 'node', args })).toMatchObject({ decision: 'prompt', reason: 'exec_policy_prompt' })
     const approvals: unknown[] = []
     const watcher = (async () => { for await (const event of run.events) if (event.type === 'waiting') for (const group of await run.pendingInteractions()) {
       expect(group.kind, JSON.stringify(group)).toBe('approval')
       for (const item of group.items) {
-        const tools = (item.input as any).tools as Array<{ toolName: string; input: { command: string; args: string[]; cwd?: string } }>
+        const tools = (item.input as any).tools as Array<{ toolName: string; reviewCode?: string; input: { command: string; args: string[]; cwd?: string } }>
         expect(tools).toHaveLength(1)
-        expect(tools[0]).toMatchObject({ toolName: 'shell.exec', input: { command: 'node', args } })
+        expect(tools[0]).toMatchObject({ toolName: 'shell.exec', reviewCode: 'EXEC_POLICY_PROMPT', input: { command: 'node', args } })
+        expect(await run.reviewApproval(item.effectId)).toMatchObject({ status: 'manual', reason: 'exec_policy_prompt' })
+        // Each pending request has executed nothing yet: zero before the first
+        // approval, then only the prior approved check before its exact rerun.
+        expect(executor.calls).toHaveLength(approvals.length)
         if (tools[0]!.input.cwd) expect(tools[0]!.input.cwd.startsWith(cwd) || tools[0]!.input.cwd === '.').toBe(true)
         approvals.push(tools[0]!.input.args)
         await run.reply(item.effectId, { approved: true })
@@ -215,6 +226,7 @@ it.each([
     expect(outcome, outcome.text).toMatchObject({ status: 'succeeded' })
     await watcher
     expect(approvals.length).toBeGreaterThanOrEqual(1)
+    expect(approvals).toEqual(rerun ? [args, args] : [args])
     const root = join(cwd, 'data/conversations', conv.id, 'runs', run.id)
     const controller = JSON.parse(await readFile(join(root, 'task-controller.json'), 'utf8'))
     const runtime = JSON.parse(await readFile(join(root, 'runtime.json'), 'utf8')).state.state
@@ -222,6 +234,7 @@ it.each([
     // The persisted controller stays valid: the long argv is kept whole in toolArguments, only the key is bounded.
     expect(owed).toHaveLength(1)
     expect(owed[0].key.length).toBeLessThanOrEqual(1200)
+    expect(owed[0].key).toMatch(/^sha256:[a-f0-9]{64}$/)
     expect(owed[0].toolArguments).toEqual({ command: 'node', args })
     const shells = runtime.effects.filter(([, e]: any) => e.kind === 'tool' && e.input.name === 'shell.exec').map(([, e]: any) => e)
     // Approval-gated attempts that never ran are not executions: count only the receipts of real runs.

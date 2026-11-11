@@ -6,3 +6,6 @@ allowBuilds:
   node-pty: true
 minimumReleaseAgeExclude:
   - electron@44.9.2
+
+patchedDependencies:
+  '@anthropic-ai/sandbox-runtime@0.0.77': patches/@anthropic-ai__sandbox-runtime@0.0.77.patch

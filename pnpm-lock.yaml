@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@anthropic-ai/sandbox-runtime@0.0.77': fc6426d1dbfbd24768ad36c9ffdd92814aa6d2c16812fd3f28f6ac93b211e39c
+
 importers:
 
   .:
@@ -29,7 +32,7 @@ importers:
     dependencies:
       '@anthropic-ai/sandbox-runtime':
         specifier: 0.0.77
-        version: 0.0.77
+        version: 0.0.77(patch_hash=fc6426d1dbfbd24768ad36c9ffdd92814aa6d2c16812fd3f28f6ac93b211e39c)
       '@hunterzhu/pulse-runtime':
         specifier: workspace:*
         version: link:../runtime
@@ -3974,7 +3977,7 @@ snapshots:
       react-dom: 19.3.0(react@19.3.0)
       throttle-debounce: 5.0.2
 
-  '@anthropic-ai/sandbox-runtime@0.0.77':
+  '@anthropic-ai/sandbox-runtime@0.0.77(patch_hash=fc6426d1dbfbd24768ad36c9ffdd92814aa6d2c16812fd3f28f6ac93b211e39c)':
     dependencies:
       '@pondwader/socks5-server': 1.0.10
       commander: 12.1.0

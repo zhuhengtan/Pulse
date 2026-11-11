@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, realpath } from 'node:fs/promi
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
+import { pathToFileURL } from 'node:url'
 import { once } from 'node:events'
 import ts from 'typescript'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -39,22 +40,65 @@ async function childModule(root: string) {
     const source = await readFile(resolve(`packages/server/src/${name}.ts`), 'utf8')
     await writeFile(join(out, `${name}.js`), ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText)
   }
-  return join(out, 'h5/workspaces.js')
+  // ESM specifiers are URLs, not native paths (a Windows drive is a URL scheme).
+  return pathToFileURL(join(out, 'h5/workspaces.js')).href
 }
+
+function waitForCheckpoint(child: ReturnType<typeof spawn>, expected: string) {
+  let stdout = '', stderr = ''
+  // Drain both pipes and retain bounded diagnostics, including loader errors.
+  child.stdout!.setEncoding('utf8').on('data', chunk => { stdout = (stdout + chunk).slice(-8192) })
+  child.stderr!.setEncoding('utf8').on('data', chunk => { stderr = (stderr + chunk).slice(-8192) })
+  return new Promise<void>((resolve, reject) => {
+    const details = () => `stdout: ${stdout}\nstderr: ${stderr}`
+    const cleanup = () => { clearTimeout(timer); child.off('message', message); child.off('close', close); child.off('error', error) }
+    const message = (value: unknown) => {
+      cleanup()
+      if (value === expected) resolve()
+      else reject(new Error(`unexpected child marker: ${JSON.stringify(value)}; expected ${expected}\n${details()}`))
+    }
+    // close, unlike exit, guarantees the piped diagnostics have been drained.
+    const close = (code: number | null, signal: NodeJS.Signals | null) => { cleanup(); reject(new Error(`child exited early: code=${code}, signal=${signal}\n${details()}`)) }
+    const error = (cause: Error) => { cleanup(); reject(cause) }
+    const timer = setTimeout(() => { cleanup(); reject(new Error(`child marker timeout: ${expected}\n${details()}`)) }, 15000)
+    timer.unref()
+    child.on('message', message); child.on('close', close); child.on('error', error)
+  })
+}
+
+async function killChild(child: ReturnType<typeof spawn>) {
+  const exited = once(child, 'exit')
+  expect(child.kill('SIGKILL')).toBe(true)
+  const [code, signal] = await exited
+  // Windows implements SIGKILL as unconditional termination, without POSIX signals.
+  if (process.platform === 'win32') expect(code !== 0 || signal === 'SIGKILL').toBe(true)
+  else expect(signal).toBe('SIGKILL')
+}
+
+it('imports child modules from paths containing URL delimiters', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pulse-crash-#%-')); roots.push(root)
+  const module = await childModule(root)
+  expect(module).toMatch(/^file:/)
+  expect((await exec(process.execPath, ['--input-type=module', '-e', `import {H5WorkspaceManager} from ${JSON.stringify(module)}; console.log(typeof H5WorkspaceManager)`])).stdout.trim()).toBe('function')
+})
+
+it('reports child startup failures with the exit code and drained stderr', async () => {
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `throw new Error('CHILD_STARTUP_FAILURE')`], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
+  await expect(waitForCheckpoint(child, 'ready')).rejects.toThrow(/code=1, signal=null[\s\S]*stderr:[\s\S]*CHILD_STARTUP_FAILURE/)
+})
 
 it('a real SIGKILL during verification leaves a lock and never silently retries the merge', async () => {
   const f = await fixture(), module = await childModule(f.root)
   const child = spawn(process.execPath, ['--input-type=module', '-e', `import {H5WorkspaceManager} from ${JSON.stringify(module)}; const m=new H5WorkspaceManager(${JSON.stringify(f.data)}); await m.finishVerified('conv',async()=>{process.send('validating');await new Promise(()=>{});});`], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
-  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    await Promise.race([once(child, 'message'), once(child, 'exit').then(x => { throw new Error(`child exited early: ${x}`) }), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('child marker timeout')), 15000); timer.unref() })])
-    child.kill('SIGKILL'); await once(child, 'exit')
+    await waitForCheckpoint(child, 'validating')
+    await killChild(child)
     const lock = await readFile(f.lock, 'utf8')
     expect(await readFile(join(f.project, 'code.txt'), 'utf8')).toBe('base\n')
     expect(await f.manager.finishVerified('conv', async () => {})).toMatchObject({ status: 'conflict', error: 'WORKSPACE_MERGE_LOCKED' })
     expect(await readFile(f.lock, 'utf8')).toBe(lock)
     expect((await f.manager.get('conv'))?.status).toBe('running')
-  } finally { clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit') } }
+  } finally { if (child.exitCode === null && child.signalCode === null) await killChild(child) }
 }, 25000)
 
 it('real apply followed by failed record save is durable uncertainty and cannot be retried', async () => {
@@ -142,15 +186,14 @@ it('SIGKILL after real apply and before saving merged preserves an unknown resul
     m.save=async r=>{if(r.status==='merged'){process.send('applied');await new Promise(()=>{});}return save(r)};
     await m.finishVerified('conv',async()=>{});`
   const child = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
-  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    await Promise.race([once(child, 'message'), once(child, 'exit').then(x => { throw new Error(`child exited early: ${x}`) }), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('child marker timeout')), 15000); timer.unref() })])
-    child.kill('SIGKILL'); await once(child, 'exit')
+    await waitForCheckpoint(child, 'applied')
+    await killChild(child)
     expect(await readFile(join(f.project, 'code.txt'), 'utf8')).toBe('task\n')
     expect((await f.manager.get('conv'))?.mergeState).toBe('applying')
     await expect(f.manager.finishVerified('conv', async () => {})).rejects.toThrow('WORKSPACE_MERGE_RESULT_UNKNOWN')
     await expect(f.manager.finish('conv', false)).rejects.toThrow('WORKSPACE_MERGE_RESULT_UNKNOWN')
-  } finally { clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit') } }
+  } finally { if (child.exitCode === null && child.signalCode === null) await killChild(child) }
 }, 25000)
 
 it.each([String(process.pid), '', 'unrecognized-owner'])('never steals an active or unidentified lock (%j)', async contents => {

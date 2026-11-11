@@ -33,7 +33,7 @@
     "release:check": "node scripts/release/check.mjs",
     "release:version": "node scripts/release/version.mjs",
     "changelog:sync": "node scripts/release/sync-cli-highlights.mjs",
-    "release:publish": "pnpm build && pnpm release:check && pnpm publish -r --access public --no-git-checks",
+    "release:publish": "pnpm release:npm-publish",
     "release:npm-publish": "pnpm build && pnpm release:check && node scripts/release/npm-publish.mjs",
     "release:npm-dry-run": "pnpm build && pnpm release:check && NPM_DRY_RUN=1 node scripts/release/npm-publish.mjs",
     "test": "vitest run --exclude 'tests/live/**'",
