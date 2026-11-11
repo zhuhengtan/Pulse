@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { closeToTray, quitFromMenu } from './smoke-lifecycle.mjs';
+import { closeToTray, quitFromMenu, ownSmokeFixture } from './smoke-lifecycle.mjs';
 import { previewProcessExit } from './preview-lifecycle.mjs';
 import { MockAdapter } from '../../packages/adapters/dist/providers/mock.js';
 import { createLocalHost, H5Server } from '../../packages/server/dist/index.js';
@@ -18,6 +18,8 @@ MockAdapter.prototype.executeAttempt = async function (request) {
     return executeMockAttempt.call(this, request);
 };
 const root = await mkdtemp(join(tmpdir(), 'pulse-desktop-smoke-')), directory = join(root, 'data');
+const fixture = await ownSmokeFixture(root, directory, join(root, 'user-data'));
+let failure, result;
 const host = createLocalHost({ cwd: root, dataDir: directory, provider: { provider: 'mock', defaultModel: 'mock' }, providerProfiles: { mock: { provider: 'mock', defaultModel: 'mock' } }, providerModels: { mock: { provider: 'mock', model: 'mock' } }, activeModel: 'mock', assistantModel: 'mock', mockResponse: 'Desktop socket reply', jarvis: { enabled: false } });
 const server = new H5Server(host, { dataDir: directory, port: 0, host: '127.0.0.1' });
 let desktop;
@@ -86,7 +88,7 @@ try {
     server.assistantView = async () => { throw new Error('DESKTOP_MUST_NOT_READ_SERVER_HISTORY'); };
     const env = { ...process.env, PULSE_DESKTOP_USER_DATA: join(root, 'user-data'), PULSE_DESKTOP_DATA_DIR: directory, PULSE_HOME: join(root, 'home') };
     delete env.ELECTRON_RUN_AS_NODE;
-    desktop = await _electron.launch({ executablePath: process.env.PULSE_DESKTOP_EXECUTABLE ?? electronPath, args: process.env.PULSE_DESKTOP_EXECUTABLE ? [] : [fileURLToPath(new URL('../../packages/desktop', import.meta.url))], env, timeout: 20000 });
+    desktop = fixture.desktop(await _electron.launch({ executablePath: process.env.PULSE_DESKTOP_EXECUTABLE ?? electronPath, args: process.env.PULSE_DESKTOP_EXECUTABLE ? [] : [fileURLToPath(new URL('../../packages/desktop', import.meta.url))], env, timeout: 20000 }));
     page = await desktop.firstWindow();
     await page.waitForFunction(() => typeof window.pulseDesktop?.events === 'function', undefined, { timeout: 10000 });
     await page.evaluate(() => {
@@ -187,7 +189,7 @@ try {
     const session = await fetch(`http://127.0.0.1:${server.effectivePort}/api/session/local`, { method: 'POST', headers: { Origin: `http://127.0.0.1:${server.effectivePort}` } });
     if (!session.ok)
         throw new Error('SERVICE_STOPPED_WITH_WINDOW');
-    desktop = await _electron.launch({ executablePath: process.env.PULSE_DESKTOP_EXECUTABLE ?? electronPath, args: process.env.PULSE_DESKTOP_EXECUTABLE ? [] : [fileURLToPath(new URL('../../packages/desktop', import.meta.url))], env, timeout: 20000 });
+    desktop = fixture.desktop(await _electron.launch({ executablePath: process.env.PULSE_DESKTOP_EXECUTABLE ?? electronPath, args: process.env.PULSE_DESKTOP_EXECUTABLE ? [] : [fileURLToPath(new URL('../../packages/desktop', import.meta.url))], env, timeout: 20000 }));
     page = await desktop.firstWindow();
     await page.getByText('Desktop socket reply', { exact: true }).waitFor({ timeout: 10000 });
     if (await page.getByText('Desktop socket reply', { exact: true }).count() !== 1) throw new Error('REOPENED_CHAT_REPLY_DUPLICATED');
@@ -203,9 +205,10 @@ try {
     desktop = undefined;
     if (errors.length)
         throw new Error(errors.join('\n'));
-    console.log(JSON.stringify({ ok: true, localHistoryBypassesServer: true, chatWebSocket: true, savedReplyReconciled: true, workPostSse: true, workMessages: 10000, rapidSwitches: 30, switchP95Ms, maxLongTaskMs, virtualNodes, serviceSurvivesWindow: true, offlineHistoryAfterReload: true, screenshots: [join(tmpdir(), 'pulse-desktop-chat.png'), join(tmpdir(), 'pulse-desktop-work.png')] }));
+    result = { ok: true, localHistoryBypassesServer: true, chatWebSocket: true, savedReplyReconciled: true, workPostSse: true, workMessages: 10000, rapidSwitches: 30, switchP95Ms, maxLongTaskMs, virtualNodes, serviceSurvivesWindow: true, offlineHistoryAfterReload: true, screenshots: [join(tmpdir(), 'pulse-desktop-chat.png'), join(tmpdir(), 'pulse-desktop-work.png')] };
 }
 catch (error) {
+    failure = error;
     if (diagnostics) {
         await mkdir(diagnostics, { recursive: true }).catch(() => {});
         const rendered = await page?.locator('.message').evaluateAll(nodes => nodes.map(node => ({ text: node.innerText, visible: Boolean(node.getClientRects().length) }))).catch(() => []);
@@ -214,12 +217,8 @@ catch (error) {
         await page?.screenshot({ path: join(diagnostics, 'failure.png') }).catch(() => {});
         await stopTimeline().catch(() => {});
     }
-    throw error;
 }
 finally {
-    await closeOwnedDesktop(true);
-    await server.stop();
-    await host.close();
-    await new Promise(r => setTimeout(r, 1700));
-    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await fixture.finish(failure, { stopServer: () => server.stop(), closeHost: () => host.close() });
 }
+console.log(JSON.stringify(result));

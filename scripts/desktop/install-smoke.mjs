@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { closeToTray, quitFromMenu } from './smoke-lifecycle.mjs';
+import { closeToTray, quitFromMenu, ownSmokeFixture } from './smoke-lifecycle.mjs';
 const require = createRequire(new URL('../../packages/server/package.json', import.meta.url));
 const { _electron } = createRequire(require.resolve('@playwright/mcp'))('playwright');
 const execute = promisify(execFile);
@@ -23,6 +23,8 @@ delete env.PULSE_BROWSER_EXECUTABLE;
 // A packaged smoke must consume its installed resources, never the checkout's
 // runtime (which previously hid missing files in final Windows installers).
 if (process.env.PULSE_DESKTOP_EXECUTABLE) delete env.PULSE_DESKTOP_RUNTIME_DIR;
+const fixture = await ownSmokeFixture(root, data, profile);
+let result;
 let desktop, pid, failure, phase = 'initializing';
 const instances = [];
 const diagnostics = process.env.PULSE_DESKTOP_SMOKE_ARTIFACTS;
@@ -35,6 +37,7 @@ async function step(label, run, timeout) { phase = label; console.log(`[desktop:
 const website = createServer((_request, response) => response.end('<title>Bundled browser ready</title><h1>Bundled browser ready</h1>'));
 async function launch(label) {
     desktop = await step(`${label}:launch`, () => _electron.launch({ executablePath, args, env, timeout: 30000 }), 35000);
+    fixture.desktop(desktop);
     const instance = { app: desktop, process: desktop.process(), exited: undefined };
     instance.exited = new Promise(resolve => instance.process.once('exit', (code, signal) => resolve({ code, signal })));
     instances.push(instance);
@@ -125,7 +128,7 @@ try {
     await page.screenshot({ path: join(tmpdir(), 'pulse-desktop-environment-repair.png') });
     await closeWindow('repaired');
     process.kill(pid, 0);
-    console.log(JSON.stringify({ ok: true, packaged: Boolean(process.env.PULSE_DESKTOP_EXECUTABLE), noSystemNodeOrChrome: true, firstRun: true, terminalCommand: true, rememberedDevice: true, bundledBrowser: true, repairsWithoutStoppingBackend: true, preservesConfigAndData: true }));
+    result = { ok: true, packaged: Boolean(process.env.PULSE_DESKTOP_EXECUTABLE), noSystemNodeOrChrome: true, firstRun: true, terminalCommand: true, rememberedDevice: true, bundledBrowser: true, repairsWithoutStoppingBackend: true, preservesConfigAndData: true };
 } catch (error) {
     failure = error;
     console.error(`[desktop:install] failed during ${phase}: ${error.message}`);
@@ -138,15 +141,7 @@ try {
             await bounded(page.screenshot({ path: diagnostics ? join(diagnostics, 'installation-failure.png') : join(tmpdir(), 'pulse-clean-install-failure.png') }), 'failure-screenshot', 5000).catch(() => {});
         }
     }
-    throw error;
 } finally {
-    pid ??= await readFile(join(data, 'service.json'), 'utf8').then(value => JSON.parse(value).pid).catch(() => undefined);
-    if (pid) { try { process.kill(pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
-    // Stop the test's background before waiting for automation pipe cleanup.
-    let cleanupError;
-    for (const { app, process: child } of instances) { try { await bounded(app.close(), 'cleanup-window', 5000); } catch (error) { cleanupError ??= error; if (child.exitCode === null) child.kill('SIGKILL'); } }
-    await new Promise(resolve => website.close(resolve));
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
-    if (cleanupError && !failure) throw cleanupError;
+    await fixture.finish(failure, { closeOther: () => new Promise((resolveClose, reject) => website.close(error => error && error.code !== 'ERR_SERVER_NOT_RUNNING' ? reject(error) : resolveClose())) });
 }
+console.log(JSON.stringify(result));

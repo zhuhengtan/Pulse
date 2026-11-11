@@ -3,10 +3,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { closeToTray, quitFromMenu } from './smoke-lifecycle.mjs'
+import { closeToTray, quitFromMenu, ownSmokeFixture } from './smoke-lifecycle.mjs'
 const require=createRequire(new URL('../../packages/server/package.json',import.meta.url)),{_electron}=createRequire(require.resolve('@playwright/mcp'))('playwright')
 const root=await mkdtemp(join(tmpdir(),'pulse-desktop-startup-')),data=join(root,'data'),env={...process.env,PULSE_DESKTOP_USER_DATA:join(root,'user'),PULSE_DESKTOP_DATA_DIR:data,PULSE_HOME:join(root,'home'),PULSE_CONFIG:join(root,'home','config.json'),PULSE_JARVIS_ENABLED:'false'}
 delete env.ELECTRON_RUN_AS_NODE
+const fixture=await ownSmokeFixture(root,data,join(root,'user'))
+let failure,result
 let desktop,desktopProcess,ownedPid,page,phase='initializing',processExit
 async function bounded(promise,label,timeout){
  let timer
@@ -17,6 +19,7 @@ async function step(label,run,timeout=15000){phase=label;console.log(`[desktop:s
 try{
  const executable=process.env.PULSE_DESKTOP_EXECUTABLE??createRequire(new URL('../../packages/desktop/package.json',import.meta.url))('electron')
  desktop=await step('launch',()=>_electron.launch({executablePath:executable,args:process.env.PULSE_DESKTOP_EXECUTABLE?[]:[fileURLToPath(new URL('../../packages/desktop',import.meta.url))],env,timeout:25000}),30000)
+ fixture.desktop(desktop)
  desktopProcess=desktop.process()
  const exited=new Promise(resolve=>desktopProcess.once('exit',(code,signal)=>{processExit={code,signal};resolve(processExit)}))
  page=await step('first-window',()=>desktop.firstWindow({timeout:15000}))
@@ -31,8 +34,9 @@ try{
  process.kill(ownedPid,0)
  const response=await step('background-health',()=>fetch(`http://127.0.0.1:${descriptor.port}/api/session/local`,{method:'POST',headers:{Origin:`http://127.0.0.1:${descriptor.port}`},signal:AbortSignal.timeout(5000)}),6000)
  if(!response.ok)throw new Error('BACKGROUND_NOT_ALIVE')
- console.log(JSON.stringify({ok:true,startsOwnBackground:true,closeHidesToTray:true,explicitQuitExits:true,serviceSurvivesDesktopExit:true,bundledNode:Boolean(process.env.PULSE_DESKTOP_EXECUTABLE)}))
+ result={ok:true,startsOwnBackground:true,closeHidesToTray:true,explicitQuitExits:true,serviceSurvivesDesktopExit:true,bundledNode:Boolean(process.env.PULSE_DESKTOP_EXECUTABLE)}
 }catch(error){
+ failure=error
  console.error(`[desktop:startup] failed during ${phase}: ${error.message}`)
  const diagnostics=process.env.PULSE_DESKTOP_SMOKE_ARTIFACTS
  if(diagnostics){
@@ -40,12 +44,7 @@ try{
   await writeFile(join(diagnostics,'startup-failure.json'),JSON.stringify({phase,error:error.message,processExit,pageClosed:page?.isClosed(),nativeExitCode:desktopProcess?.exitCode,nativeSignalCode:desktopProcess?.signalCode},null,2))
   if(page)await bounded(page.screenshot({path:join(diagnostics,'startup-failure.png')}),'failure-screenshot',5000).catch(()=>{})
  }
- throw error
 }finally{
- // A stuck graceful-close promise must not swallow the original failed phase.
- // Forced termination is cleanup of our own test instance, never a passing check.
- ownedPid??=await readFile(join(data,'service.json'),'utf8').then(text=>JSON.parse(text).pid).catch(()=>undefined)
- if(ownedPid){try{process.kill(ownedPid,'SIGTERM')}catch(error){if(error.code!=='ESRCH')throw error};for(let i=0;i<100;i++){try{process.kill(ownedPid,0)}catch{break}await new Promise(r=>setTimeout(r,50))}}
- if(desktop){try{await bounded(desktop.close(),'cleanup-window',5000)}catch{if(desktopProcess?.exitCode===null)desktopProcess.kill('SIGKILL')}}
- await new Promise(r=>setTimeout(r,1700));await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100})
+ await fixture.finish(failure)
 }
+console.log(JSON.stringify(result))
