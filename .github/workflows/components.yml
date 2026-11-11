@@ -104,20 +104,47 @@ jobs:
           else
             pack shell artifacts/desktop/pulse-linux-x86_64.AppImage
           fi
-      - name: Load maintained backend acceptance harness for immutable-tag recovery
-        if: env.COMPONENT == 'backend' && github.event_name == 'workflow_dispatch'
+      - name: Load maintained component acceptance harness for immutable-tag recovery
+        if: (env.COMPONENT == 'backend' || env.COMPONENT == 'frontend') && github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           path: .release-controller
-          sparse-checkout: scripts/updates/backend-smoke.mjs
+          sparse-checkout: |
+            scripts/updates/backend-smoke.mjs
+            scripts/updates/frontend-smoke.mjs
+            scripts/desktop/smoke-lifecycle.mjs
           sparse-checkout-cone-mode: false
           persist-credentials: false
       - name: Use maintained acceptance harness without changing release packages
-        if: env.COMPONENT == 'backend' && github.event_name == 'workflow_dispatch'
+        if: (env.COMPONENT == 'backend' || env.COMPONENT == 'frontend') && github.event_name == 'workflow_dispatch'
         shell: bash
+        env:
+          ACCEPTANCE_SHA: ${{ github.sha }}
         run: |
-          cp .release-controller/scripts/updates/backend-smoke.mjs scripts/updates/backend-smoke.mjs
+          set -euo pipefail
+          case "$ACCEPTANCE_SHA" in
+            *[!0-9a-f]*|'') echo "ACCEPTANCE_SHA_NOT_EXACT" >&2; exit 1 ;;
+          esac
+          test "${#ACCEPTANCE_SHA}" -eq 40
+          test "$(git -C .release-controller rev-parse HEAD)" = "$ACCEPTANCE_SHA"
+          tagged_head="$(git rev-parse "refs/tags/$COMPONENT_RELEASE_TAG^{commit}")"
+          test "$(git rev-parse HEAD)" = "$tagged_head"
+          case "$COMPONENT" in
+            backend) files=(scripts/updates/backend-smoke.mjs) ;;
+            frontend) files=(scripts/updates/frontend-smoke.mjs scripts/desktop/smoke-lifecycle.mjs) ;;
+            *) echo "UNSUPPORTED_ACCEPTANCE_COMPONENT" >&2; exit 1 ;;
+          esac
+          for file in "${files[@]}"; do
+            test -f ".release-controller/$file"
+          done
+          git diff --exit-code -- packages
+          for file in "${files[@]}"; do
+            cp ".release-controller/$file" "$file"
+          done
+          test "$(git -C .release-controller rev-parse HEAD)" = "$ACCEPTANCE_SHA"
+          test "$(git rev-parse "refs/tags/$COMPONENT_RELEASE_TAG^{commit}")" = "$tagged_head"
+          test "$(git rev-parse HEAD)" = "$tagged_head"
           git diff --exit-code -- packages
       - name: Verify real backend update and startup-failure rollback
         if: env.COMPONENT == 'backend'

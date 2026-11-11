@@ -1,18 +1,19 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { createHash, createPrivateKey } from 'node:crypto';
+import { createPrivateKey } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLocalHost, H5Server } from '../../packages/server/dist/index.js';
 import { packComponent, signEnvelope } from './pack.mjs';
-import { releaseId } from '../../packages/server/dist/updates/contracts.js';
+import { ownSmokeFixture, closeToTray, quitFromMenu } from '../desktop/smoke-lifecycle.mjs';
 
 if (!process.env.PULSE_UPDATE_PRIVATE_KEY_FILE) throw new Error('PULSE_UPDATE_PRIVATE_KEY_FILE is required for real shell trust verification');
 const key = createPrivateKey(await readFile(process.env.PULSE_UPDATE_PRIVATE_KEY_FILE)), keyId = process.env.PULSE_UPDATE_KEY_ID ?? 'pulse-20261025';
 const temporary = await mkdtemp(join(tmpdir(), 'pulse-update-frontend-')), root = join(temporary, 'home'), dataDir = join(temporary, 'data');
+const fixture = await ownSmokeFixture(temporary, dataDir, join(temporary, 'user-data'));
 const content = new Map(), refs = [];
 const feed = createServer((request, response) => { const bytes = content.get(request.url); if (!bytes) { response.writeHead(404).end(); return; } response.end(bytes); });
 await new Promise(resolve => feed.listen(0, '127.0.0.1', resolve));
@@ -22,12 +23,32 @@ const server = new H5Server(host, { dataDir, port: 0, host: '127.0.0.1', updates
 const require = createRequire(new URL('../../packages/server/package.json', import.meta.url));
 const { _electron } = createRequire(require.resolve('@playwright/mcp'))('playwright');
 const electron = createRequire(new URL('../../packages/desktop/package.json', import.meta.url))('electron');
-let desktop;
+let desktop, exited, failure, report;
+async function quitOwnedDesktop() {
+  if (!desktop) return;
+  const child = desktop.process();
+  let timer;
+  try {
+    await Promise.race([
+      (async () => {
+        if (child.exitCode === null && child.signalCode == null) { await closeToTray(desktop); await quitFromMenu(desktop); }
+        const exit = await exited;
+        if (exit.code !== 0 || exit.signal) throw new Error(`DESKTOP_EXIT_FAILED:${exit.code}:${exit.signal}`);
+      })(),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('DESKTOP_QUIT_TIMEOUT')), 15000); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
 try {
   await host.init(); await server.start(); server.updates.stop();
   const env = { ...process.env, PULSE_HOME: root, PULSE_DESKTOP_INSTALL_ROOT: root, PULSE_DESKTOP_USER_DATA: join(temporary, 'user-data'), PULSE_DESKTOP_DATA_DIR: dataDir };
   delete env.ELECTRON_RUN_AS_NODE; delete env.PULSE_DESKTOP_RUNTIME_DIR; delete env.PULSE_DESKTOP_DEV_URL;
   desktop = await _electron.launch({ executablePath: process.env.PULSE_DESKTOP_EXECUTABLE ?? electron, args: process.env.PULSE_DESKTOP_EXECUTABLE ? [] : [fileURLToPath(new URL('../../packages/desktop', import.meta.url))], env });
+  fixture.desktop(desktop);
+  const child = desktop.process();
+  exited = child.exitCode !== null || child.signalCode != null
+    ? Promise.resolve({ code: child.exitCode, signal: child.signalCode })
+    : new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
   const page = await desktop.firstWindow();
   const setupDeadline = Date.now() + 190000; let completed = false, lastPhase;
   while (!completed && Date.now() < setupDeadline) {
@@ -62,8 +83,17 @@ try {
   assert.equal(offlineUpdates.status, 200); assert.equal(offlineUpdates.body.serviceOffline, true); assert.equal(offlineUpdates.body.frontend, generations[1]);
   const artifacts = fileURLToPath(new URL('../../artifacts/update-acceptance/', import.meta.url)); await mkdir(artifacts, { recursive: true });
   await page.screenshot({ path: join(artifacts, 'frontend-updated.png') });
-  const report = { ok: true, packaged: Boolean(process.env.PULSE_DESKTOP_EXECUTABLE), signedFrontend: true, electronShellUnchanged: true, generations, draftSurvivesTwoReloads: true, oldAssetsRetained: true, updateStatusWithoutServer: true };
-  await writeFile(join(artifacts, 'frontend.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report));
+  report = { ok: true, packaged: Boolean(process.env.PULSE_DESKTOP_EXECUTABLE), signedFrontend: true, electronShellUnchanged: true, generations, draftSurvivesTwoReloads: true, oldAssetsRetained: true, updateStatusWithoutServer: true };
+} catch (error) {
+  failure = error;
 } finally {
-  if (desktop) await desktop.close(); await server.stop(); await host.close(); await new Promise(resolve => feed.close(resolve)); feed.closeAllConnections(); await rm(temporary, { recursive: true, force: true });
+  try { await quitOwnedDesktop(); }
+  catch (error) { failure = failure ? new AggregateError([failure, error], 'FRONTEND_ACCEPTANCE_AND_QUIT_FAILED', { cause: failure }) : error; }
+  await fixture.finish(failure, {
+    stopServer: () => server.stop(),
+    closeHost: () => host.close(),
+    closeOther: async () => { feed.closeAllConnections(); await new Promise(resolve => feed.close(resolve)); },
+  });
 }
+const artifacts = fileURLToPath(new URL('../../artifacts/update-acceptance/', import.meta.url));
+await writeFile(join(artifacts, 'frontend.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report));

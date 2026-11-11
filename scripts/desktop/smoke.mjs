@@ -25,6 +25,10 @@ const server = new H5Server(host, { dataDir: directory, port: 0, host: '127.0.0.
 let desktop;
 let page, timeline;
 const diagnostics = process.env.PULSE_DESKTOP_SMOKE_ARTIFACTS;
+// Artifact collection stays lightweight by default. Timeline/CPU profiling is an
+// explicit diagnostic mode, not a prerequisite for the same wall-time acceptance.
+// CPU_PROFILE explicitly opts into tracing as well; both require an artifact path.
+const traceRequested = process.env.PULSE_DESKTOP_TRACE === "1" || process.env.PULSE_DESKTOP_CPU_PROFILE === "1";
 async function closeOwnedDesktop(cleanup = false) {
     if (!desktop) return;
     const owned = desktop; desktop = undefined;
@@ -65,6 +69,7 @@ async function stopTimeline() {
     await writeFile(join(diagnostics, 'renderer-trace.json'), Buffer.concat(chunks));
 }
 try {
+    if (traceRequested && !diagnostics) throw new Error("DESKTOP_TRACE_REQUIRES_ARTIFACTS");
     await host.init();
     await server.start();
     const inbox = await host.conversationData.call('readState', 'assistant-inbox');
@@ -136,7 +141,7 @@ try {
     await page.screenshot({ path: join(tmpdir(), 'pulse-desktop-chat.png') });
     await page.evaluate(id => { history.pushState(null, '', `/work/${id}`); dispatchEvent(new PopStateEvent('popstate')); }, work.id);
     await page.getByText('Work history 9999', { exact: true }).waitFor({ timeout: 10000 });
-    if (diagnostics) {
+    if (diagnostics && traceRequested) {
         timeline = await page.context().newCDPSession(page);
         const categories = ['devtools.timeline', 'blink.user_timing', ...(process.env.PULSE_DESKTOP_CPU_PROFILE === '1' ? ['v8', 'disabled-by-default-v8.cpu_profiler'] : [])];
         await timeline.send('Tracing.start', { transferMode: 'ReturnAsStream', categories: categories.join(',') });

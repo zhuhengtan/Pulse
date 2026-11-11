@@ -105,16 +105,24 @@ export async function ownSmokeFixture(root, directory, userData) {
     }
     async function stopDesktops() {
         const errors = [];
-        for (const { app, child } of desktops) {
-            if (child.exitCode !== null || child.signalCode != null) continue;
-            const exited = new Promise(resolveExit => child.once('exit', resolveExit));
-            try { await deadline(app.close(), 'desktop-close', 5000); await deadline(exited, 'desktop-exit', 5000); }
-            catch (error) {
+        await Promise.all(desktops.map(async ({ app, child }) => {
+            if (child.exitCode !== null || child.signalCode != null) return;
+            const exited = new Promise(resolveExit => child.once('exit', (code, signal) => resolveExit({ code, signal })));
+            try {
+                // Keep the inspector connected until the real tray quit action.
+                // Each bounded operation belongs only to this captured child.
+                await deadline(closeToTray(app), 'desktop-hide', 6000);
+                await deadline(quitFromMenu(app), 'desktop-quit-menu', 11000);
+                const result = await deadline(exited, 'desktop-exit', 10000);
+                if (result.code !== 0 || result.signal) throw new Error(`DESKTOP_EXIT_FAILED:${result.code}:${result.signal}`);
+            } catch (error) {
                 errors.push(error);
-                if (child.exitCode === null && child.signalCode == null) child.kill('SIGKILL');
+                if (child.exitCode === null && child.signalCode == null) {
+                    try { child.kill('SIGKILL'); } catch (cause) { errors.push(cause); }
+                }
                 try { await deadline(exited, 'forced-desktop-exit', 5000); } catch (cause) { errors.push(cause); }
             }
-        }
+        }));
         if (errors.length) throw new AggregateError(errors, 'DESKTOP_WINDOW_CLEANUP_FAILED');
     }
     async function serviceIdentity(descriptor) {
